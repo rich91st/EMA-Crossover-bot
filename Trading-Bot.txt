@@ -330,15 +330,4 @@ async def on_ready():
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
 
-Requirements.txt
-discord.py
-finnhub-python
-pandas
-numpy
-ta
 
-Watchlist.json 
-{
-  "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "TSLA", "META", "NFLX", "DIS"],
-  "crypto": ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT", "BINANCE:XRPUSDT", "BINANCE:DOGEUSDT", "BINANCE:PEPEUSDT", "BINANCE:ADAUSDT", "BINANCE:DOTUSDT"]
-}
