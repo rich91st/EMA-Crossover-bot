@@ -1,4 +1,4 @@
-Requirements.txt
+requirements.txt
 discord.py
 finnhub-python
 pandas
