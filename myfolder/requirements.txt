@@ -1,5 +1,0 @@
-discord.py
-finnhub-python
-pandas
-numpy
-ta
