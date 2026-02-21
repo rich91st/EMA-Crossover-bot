@@ -3,5 +3,8 @@ services:
     name: ema-crossover-bot
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
-    startCommand: python3 bot.py
+    buildCommand: |-
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: |-
+      python3 bot.py
