@@ -196,8 +196,27 @@ def format_symbol_result(symbol, signals, timeframe):
     return "\n".join(lines)
 
 # ====================
+# DISCORD EVENTS
+# ====================
+
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+
+@bot.event
+async def on_message(message):
+    # Debug: log every message received
+    print(f"Received message: {message.content} from {message.author}")
+    await bot.process_commands(message)
+
+# ====================
 # DISCORD COMMANDS
 # ====================
+
+@bot.command(name='ping')
+async def ping(ctx):
+    """Simple test command to check if bot responds."""
+    await ctx.send('pong')
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
@@ -294,13 +313,10 @@ async def help_command(ctx):
 `!add SYMBOL` – Add a symbol (use BINANCE:XXX for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
+`!ping` – Test if bot is responsive.
 `!help` – This message.
     """
     await ctx.send(help_text)
-
-@bot.event
-async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
 
 # Run the bot
 if __name__ == '__main__':
