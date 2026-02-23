@@ -13,9 +13,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    print(f'Received message: {message.content} from {message.author}')
-    if message.content.startswith('!'):
-        await message.channel.send('Echo: ' + message.content)
+    print(f'Received: {message.content} from {message.author}')
     await bot.process_commands(message)
 
 @bot.command()
