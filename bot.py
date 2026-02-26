@@ -44,6 +44,7 @@ def save_watchlist(watchlist):
         json.dump(watchlist, f, indent=2)
 
 def normalize_symbol(symbol):
+    """Convert common crypto symbols to BASE/USD format."""
     symbol = symbol.upper()
     crypto_map = {
         'BTC': 'BTC/USD', 'ETH': 'ETH/USD', 'SOL': 'SOL/USD',
@@ -94,6 +95,7 @@ async def fetch_ohlcv(symbol, timeframe):
         return None
 
 def calculate_indicators(df):
+    """Calculate all TA indicators, safely handling missing volume."""
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -106,7 +108,11 @@ def calculate_indicators(df):
 
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-    df['volume_avg'] = df['volume'].rolling(window=20).mean()
+    # Volume average – only if volume column exists
+    if 'volume' in df.columns:
+        df['volume_avg'] = df['volume'].rolling(window=20).mean()
+    else:
+        df['volume_avg'] = None  # safe placeholder
 
     return df
 
@@ -122,11 +128,19 @@ def get_signals(df):
     signals['ema13'] = latest['ema13']
     signals['ema50'] = latest['ema50']
     signals['ema200'] = latest['ema200']
-    signals['volume'] = latest['volume']
-    signals['volume_avg'] = latest['volume_avg']
 
+    # Safely handle volume
+    if 'volume' in latest and 'volume_avg' in latest:
+        signals['volume'] = latest['volume']
+        signals['volume_avg'] = latest['volume_avg']
+    else:
+        signals['volume'] = None
+        signals['volume_avg'] = None
+
+    # Trend direction
     signals['trend'] = 'UPTREND' if latest['close'] > latest['ema50'] and latest['ema5'] > latest['ema13'] else 'DOWNTREND'
 
+    # Support & Resistance (simple: 20-day low/high)
     signals['support_20'] = df['low'].tail(20).min()
     signals['resistance_20'] = df['high'].tail(20).max()
 
@@ -171,6 +185,7 @@ def get_signals(df):
     return signals
 
 def get_rating(signals):
+    """Return (rating_text, color) based on signals."""
     net = signals['net_score']
     rsi = signals['rsi']
     buy_signal = signals['buy_signal']
@@ -195,20 +210,25 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 def format_embed(symbol, signals, timeframe):
+    """Return a discord.Embed with all the fancy formatting."""
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
     sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
 
-    # Volume status
-    vol_ratio = signals['volume'] / signals['volume_avg'] if signals['volume_avg'] and signals['volume_avg'] > 0 else 1
-    if vol_ratio > 1.5:
-        vol_status = "High"
-    elif vol_ratio < 0.5:
-        vol_status = "Low"
+    # Volume status – safely handle missing volume
+    if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
+        vol_ratio = signals['volume'] / signals['volume_avg']
+        if vol_ratio > 1.5:
+            vol_status = "High"
+        elif vol_ratio < 0.5:
+            vol_status = "Low"
+        else:
+            vol_status = "Normal"
+        vol_display = f"{vol_status} ({vol_ratio:.1f}x)"
     else:
-        vol_status = "Normal"
+        vol_display = "N/A (no volume data)"
 
     # Build reason string
     reasons = []
@@ -249,7 +269,7 @@ def format_embed(symbol, signals, timeframe):
     support = signals['support_20']
     resistance = signals['resistance_20']
     stop_loss = support
-    target = resistance + (resistance - support)
+    target = resistance + (resistance - support)  # simple projection
 
     # Create embed
     embed = discord.Embed(
@@ -259,7 +279,7 @@ def format_embed(symbol, signals, timeframe):
     )
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
-    embed.add_field(name="Volume", value=f"{vol_status} ({vol_ratio:.1f}x)", inline=True)
+    embed.add_field(name="Volume", value=vol_display, inline=True)
 
     ema_text = f"5: ${signals['ema5']:.2f}\n13: ${signals['ema13']:.2f}\n50: ${signals['ema50']:.2f}\n200: ${signals['ema200']:.2f}"
     embed.add_field(name="EMAs", value=ema_text, inline=True)
@@ -300,6 +320,7 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
+    # Cooldown
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -327,6 +348,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send(embed=embed)
         return
 
+    # Scan all
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
