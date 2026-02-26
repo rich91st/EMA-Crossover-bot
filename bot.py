@@ -16,6 +16,7 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+bot._skip_check = lambda x, y: False  # Prevents duplicate command processing
 
 WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
@@ -362,7 +363,7 @@ def format_embed(symbol, signals, timeframe):
     ]
     # Filter out NaN values and sort descending (highest to lowest)
     valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
-    valid_items.sort(reverse=True)  # sort by value descending
+    valid_items.sort(reverse=True)
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
     # ===================================
@@ -401,7 +402,7 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
-    print(f"Received message: {message.content} from {message.author}")
+    # Process the command only once
     await bot.process_commands(message)
 
 @bot.command(name='ping')
