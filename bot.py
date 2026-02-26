@@ -217,46 +217,5 @@ async def ping(ctx):
     await ctx.send('pong')
 
 # Run the bot
-if __name__ == '__main__':) @bot.command(name='scan')
-async def scan(ctx, target='all', timeframe='daily'):
-    timeframe = timeframe.lower()
-    if timeframe not in ['daily', 'weekly', '4h']:
-        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-        return
-
-    watchlist = load_watchlist()
-    symbols = watchlist['stocks'] + watchlist['crypto']
-
-    if target.lower() != 'all':
-        symbol = target.upper()
-        await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is None or df.empty:
-            await ctx.send(f"Could not fetch data for {symbol}.")
-            return
-        df = calculate_indicators(df)
-        signals = get_signals(df)
-        result = format_symbol_result(symbol, signals, timeframe)
-        await ctx.send(result)
-        return
-
-    await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
-
-    results = []
-    for symbol in symbols:
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is not None and not df.empty:
-            df = calculate_indicators(df)
-            signals = get_signals(df)
-            if signals and signals['net_score'] != 0:
-                result = format_symbol_result(symbol, signals, timeframe)
-                results.append(result)
-                if len("\n\n".join(results)) > 1800:
-                    await ctx.send("\n\n".join(results))
-                    results = []
-        await asyncio.sleep(1)
-
-    if results:
-        await ctx.send("\n\n".join(results))
-    await ctx.send("Scan complete.")
+if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
