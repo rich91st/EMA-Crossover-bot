@@ -353,19 +353,19 @@ def format_embed(symbol, signals, timeframe):
     stop_loss = support
     target = resistance + (resistance - support)
 
-    # ===== NEW: Colored and sorted EMAs =====
+    # ===== Colored and sorted EMAs =====
     ema_items = [
         (signals['ema5'], '5', '🟢'),
         (signals['ema13'], '13', '🟡'),
         (signals['ema50'], '50', '🔴'),
         (signals['ema200'], '200', '🟣')
     ]
-    # Filter out NaN values and sort descending
+    # Filter out NaN values and sort descending (highest to lowest)
     valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
     valid_items.sort(reverse=True)  # sort by value descending
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
-    # ========================================
+    # ===================================
 
     embed = discord.Embed(
         title=f"{rating}",
