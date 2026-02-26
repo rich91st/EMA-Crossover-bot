@@ -80,7 +80,6 @@ async def fetch_twelvedata(symbol, timeframe):
                 df.set_index('timestamp', inplace=True)
                 df = df.astype(float)
                 df = df.sort_index()
-                print(f"Twelve Data success for {symbol}")
                 return df
     except Exception as e:
         print(f"Twelve Data exception for {symbol}: {e}")
@@ -90,7 +89,7 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
     base = symbol.split('/')[0].lower()
     coin_map = {
         'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',  # Fixed PEPE ID
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
         'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
     }
     coin_id = coin_map.get(base)
@@ -116,7 +115,6 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
                 df['volume'] = np.nan
-                print(f"CoinGecko OHLC success for {symbol}")
                 return df
     except Exception as e:
         print(f"CoinGecko OHLC exception for {symbol}: {e}")
@@ -126,7 +124,7 @@ async def fetch_coingecko_price(symbol):
     base = symbol.split('/')[0].lower()
     coin_map = {
         'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',  # Fixed PEPE ID
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
         'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
     }
     coin_id = coin_map.get(base)
@@ -164,7 +162,6 @@ async def fetch_coingecko_price(symbol):
                     'volume': volumes
                 })
                 df.set_index('timestamp', inplace=True)
-                print(f"CoinGecko price success for {symbol} (synthetic)")
                 return df
     except Exception as e:
         print(f"CoinGecko price exception for {symbol}: {e}")
@@ -302,6 +299,7 @@ def format_embed(symbol, signals, timeframe):
     sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
 
+    # Volume status
     if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
         vol_ratio = signals['volume'] / signals['volume_avg']
         if vol_ratio > 1.5:
@@ -314,6 +312,7 @@ def format_embed(symbol, signals, timeframe):
     else:
         vol_display = "N/A (no volume data)"
 
+    # Build reason string
     reasons = []
     if signals['ema5_cross_above_13']:
         reasons.append("EMA5 ↑ EMA13")
@@ -340,6 +339,7 @@ def format_embed(symbol, signals, timeframe):
 
     reason_str = " | ".join(reasons)
 
+    # Bollinger Bands status
     if signals['overbought_triangle']:
         bb_status = "🔴 Overbought (touch)"
     elif signals['oversold_triangle']:
@@ -347,10 +347,25 @@ def format_embed(symbol, signals, timeframe):
     else:
         bb_status = "⚪ Normal"
 
+    # Support, Resistance, Stop Loss, Target
     support = signals['support_20']
     resistance = signals['resistance_20']
     stop_loss = support
     target = resistance + (resistance - support)
+
+    # ===== NEW: Colored and sorted EMAs =====
+    ema_items = [
+        (signals['ema5'], '5', '🟢'),
+        (signals['ema13'], '13', '🟡'),
+        (signals['ema50'], '50', '🔴'),
+        (signals['ema200'], '200', '🟣')
+    ]
+    # Filter out NaN values and sort descending
+    valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
+    valid_items.sort(reverse=True)  # sort by value descending
+    ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
+    ema_text = "\n".join(ema_lines) if valid_items else "N/A"
+    # ========================================
 
     embed = discord.Embed(
         title=f"{rating}",
@@ -361,8 +376,7 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
     embed.add_field(name="Volume", value=vol_display, inline=True)
 
-    ema_text = f"5: ${signals['ema5']:.2f}\n13: ${signals['ema13']:.2f}\n50: ${signals['ema50']:.2f}\n200: ${signals['ema200']:.2f}"
-    embed.add_field(name="EMAs", value=ema_text, inline=True)
+    embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
 
     embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
     embed.add_field(name="Reason", value=reason_str, inline=False)
