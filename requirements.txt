@@ -3,3 +3,4 @@ finnhub-python
 pandas
 numpy
 ta
+aiohttp
