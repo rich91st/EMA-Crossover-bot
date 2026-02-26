@@ -44,7 +44,6 @@ def save_watchlist(watchlist):
         json.dump(watchlist, f, indent=2)
 
 def normalize_symbol(symbol):
-    """Convert common crypto symbols to BASE/USD format."""
     symbol = symbol.upper()
     crypto_map = {
         'BTC': 'BTC/USD', 'ETH': 'ETH/USD', 'SOL': 'SOL/USD',
@@ -107,7 +106,6 @@ def calculate_indicators(df):
 
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-    # Add volume average for later comparison
     df['volume_avg'] = df['volume'].rolling(window=20).mean()
 
     return df
@@ -127,10 +125,8 @@ def get_signals(df):
     signals['volume'] = latest['volume']
     signals['volume_avg'] = latest['volume_avg']
 
-    # Trend direction
     signals['trend'] = 'UPTREND' if latest['close'] > latest['ema50'] and latest['ema5'] > latest['ema13'] else 'DOWNTREND'
 
-    # Support & Resistance (simple: 20-day low/high)
     signals['support_20'] = df['low'].tail(20).min()
     signals['resistance_20'] = df['high'].tail(20).max()
 
@@ -151,7 +147,6 @@ def get_signals(df):
     signals['buy_signal'] = signals['ema5_cross_above_13'] and latest['rsi'] >= 50
     signals['sell_signal'] = signals['ema5_cross_below_13'] and latest['rsi'] <= 50
 
-    # BB + RSI conditions
     signals['overbought_triangle'] = signals['touch_upper_bb'] and signals['rsi_overbought']
     signals['oversold_triangle'] = signals['touch_lower_bb'] and signals['rsi_oversold']
 
@@ -159,14 +154,14 @@ def get_signals(df):
         signals['ema5_cross_above_13'],
         signals['ema13_cross_above_50'],
         signals['buy_signal'],
-        signals['oversold_triangle'],  # Green triangle condition
+        signals['oversold_triangle'],
         signals['rsi_oversold']
     ]
     bearish = [
         signals['ema5_cross_below_13'],
         signals['ema13_cross_below_50'],
         signals['sell_signal'],
-        signals['overbought_triangle'],  # Red triangle condition
+        signals['overbought_triangle'],
         signals['rsi_overbought']
     ]
     signals['bullish_count'] = sum(bullish)
@@ -176,7 +171,6 @@ def get_signals(df):
     return signals
 
 def get_rating(signals):
-    """Return (rating_text, color) based on signals, including BB touches."""
     net = signals['net_score']
     rsi = signals['rsi']
     buy_signal = signals['buy_signal']
@@ -185,14 +179,12 @@ def get_rating(signals):
     ob_triangle = signals['overbought_triangle']
     os_triangle = signals['oversold_triangle']
 
-    # Bullish ratings (including oversold triangle)
     if net >= 2 or (buy_signal and rsi >= 60) or os_triangle:
         return "STRONG BUY", 0x00ff00
     elif net == 1 or (buy_signal and rsi >= 50):
         return "BUY", 0x00cc00
     elif net == 0 and (above_200 or signals['rsi_oversold'] or os_triangle):
         return "WEAK BUY", 0x88ff88
-    # Bearish ratings (including overbought triangle)
     elif net <= -2 or (sell_signal and rsi <= 40) or ob_triangle:
         return "STRONG SELL", 0xff0000
     elif net == -1 or (sell_signal and rsi <= 50):
@@ -203,14 +195,13 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 def format_embed(symbol, signals, timeframe):
-    """Return a discord.Embed with all the fancy formatting."""
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
     sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
 
-    # Determine volume status
+    # Volume status
     vol_ratio = signals['volume'] / signals['volume_avg'] if signals['volume_avg'] and signals['volume_avg'] > 0 else 1
     if vol_ratio > 1.5:
         vol_status = "High"
@@ -246,11 +237,19 @@ def format_embed(symbol, signals, timeframe):
 
     reason_str = " | ".join(reasons)
 
+    # Bollinger Bands status field
+    if signals['overbought_triangle']:
+        bb_status = "🔴 Overbought (touch)"
+    elif signals['oversold_triangle']:
+        bb_status = "🟢 Oversold (touch)"
+    else:
+        bb_status = "⚪ Normal"
+
     # Support, Resistance, Stop Loss, Target
     support = signals['support_20']
     resistance = signals['resistance_20']
     stop_loss = support
-    target = resistance + (resistance - support)  # simple projection
+    target = resistance + (resistance - support)
 
     # Create embed
     embed = discord.Embed(
@@ -265,6 +264,7 @@ def format_embed(symbol, signals, timeframe):
     ema_text = f"5: ${signals['ema5']:.2f}\n13: ${signals['ema13']:.2f}\n50: ${signals['ema50']:.2f}\n200: ${signals['ema200']:.2f}"
     embed.add_field(name="EMAs", value=ema_text, inline=True)
 
+    embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
     embed.add_field(name="Reason", value=reason_str, inline=False)
 
     embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
@@ -300,7 +300,6 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Cooldown
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -328,7 +327,6 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send(embed=embed)
         return
 
-    # Scan all
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
