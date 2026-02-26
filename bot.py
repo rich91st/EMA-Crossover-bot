@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import finnhub
+import aiohttp  # added for async HTTP requests
 import pandas as pd
 import numpy as np
 import ta
@@ -10,13 +10,10 @@ import os
 from datetime import datetime
 
 # === CONFIGURATION ===
-FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')  # new env variable
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
-# Initialize Finnhub client
-finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
-
-# Discord bot setup – with help_command=None to allow custom !help
+# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
@@ -34,7 +31,7 @@ def load_watchlist():
             return json.load(f)
     default = {
         "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-        "crypto": ["BINANCE:BTCUSDT", "BINANCE:ETHUSDT", "BINANCE:SOLUSDT", "BINANCE:XRPUSDT", "BINANCE:DOGEUSDT", "BINANCE:PEPEUSDT"]
+        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]  # twelve data format
     }
     save_watchlist(default)
     return default
@@ -44,48 +41,42 @@ def save_watchlist(watchlist):
         json.dump(watchlist, f, indent=2)
 
 async def fetch_ohlcv(symbol, timeframe):
-    if timeframe == 'daily':
-        res = 'D'
-        limit = 200
-    elif timeframe == 'weekly':
-        res = 'W'
-        limit = 200
-    elif timeframe == '4h':
-        res = '60'
-        limit = 800
-    else:
+    """Fetch OHLCV data from Twelve Data API"""
+    # Map timeframe to Twelve Data interval
+    interval_map = {
+        'daily': '1day',
+        'weekly': '1week',
+        '4h': '4h'
+    }
+    interval = interval_map.get(timeframe)
+    if not interval:
         return None
 
-    to_time = int(datetime.now().timestamp())
-    from_time = to_time - limit * 24 * 60 * 60
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'apikey': TWELVEDATA_API_KEY,
+        'outputsize': 200,
+        'format': 'JSON'
+    }
 
     try:
-        data = finnhub_client.stock_candles(symbol, res, from_time, to_time)
-        if data['s'] != 'ok':
-            return None
-        df = pd.DataFrame({
-            'timestamp': data['t'],
-            'open': data['o'],
-            'high': data['h'],
-            'low': data['l'],
-            'close': data['c'],
-            'volume': data['v']
-        })
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-        df.set_index('timestamp', inplace=True)
-
-        if timeframe == '4h':
-            df = df.resample('4H').agg({
-                'open': 'first',
-                'high': 'max',
-                'low': 'min',
-                'close': 'last',
-                'volume': 'sum'
-            }).dropna()
-        return df
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                data = await resp.json()
+                if 'values' not in data:
+                    print(f"Twelve Data error for {symbol}: {data}")
+                    return None
+                df = pd.DataFrame(data['values'])
+                df = df.rename(columns={'datetime': 'timestamp'})
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+                df = df.astype(float)
+                df = df.sort_index()
+                return df
     except Exception as e:
-        # This line is already present – it will log the real error to Render logs
-        print(f"Error fetching {symbol}: {e}")
+        print(f"Error fetching {symbol} from Twelve Data: {e}")
         return None
 
 def calculate_indicators(df):
@@ -157,7 +148,7 @@ def format_symbol_result(symbol, signals, timeframe):
     if not signals:
         return f"`{symbol}`: No data or error."
 
-    sym_type = "Crypto" if ':' in symbol else "Stock"
+    sym_type = "Crypto" if '/' in symbol else "Stock"
 
     if signals['net_score'] >= 2:
         emoji = "🟢🟢"
@@ -264,7 +255,7 @@ async def scan(ctx, target='all', timeframe='daily'):
 async def add_symbol(ctx, symbol):
     symbol = symbol.upper()
     watchlist = load_watchlist()
-    if ':' in symbol:
+    if '/' in symbol:  # twelve data crypto format
         if symbol not in watchlist['crypto']:
             watchlist['crypto'].append(symbol)
             save_watchlist(watchlist)
@@ -309,7 +300,7 @@ async def help_command(ctx):
 **5-13-50 Trading Bot Commands**
 `!scan all [timeframe]` – Scan all watchlist symbols (shows only non-neutral). Timeframes: daily, weekly, 4h (default daily).
 `!scan SYMBOL [timeframe]` – Scan a single symbol.
-`!add SYMBOL` – Add a symbol (use BINANCE:XXX for crypto).
+`!add SYMBOL` – Add a symbol (use BTC/USD for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
 `!ping` – Test if bot is responsive.
