@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+# CoinGecko does not require an API key for free tier
 
 # Discord bot setup
 intents = discord.Intents.default()
@@ -57,7 +58,8 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
-async def fetch_ohlcv(symbol, timeframe):
+async def fetch_twelvedata(symbol, timeframe):
+    """Fetch OHLCV from Twelve Data (used for stocks and fallback)."""
     interval_map = {
         'daily': '1day',
         'weekly': '1week',
@@ -94,6 +96,75 @@ async def fetch_ohlcv(symbol, timeframe):
         print(f"Error fetching {symbol} from Twelve Data: {e}")
         return None
 
+async def fetch_coingecko(symbol, timeframe):
+    """Fetch OHLCV from CoinGecko for crypto symbols (format: BTC/USD)."""
+    # CoinGecko expects IDs like 'bitcoin', not symbols. We'll use the /simple/price endpoint for current price,
+    # but for historical OHLC we need the coin ID. Since we need full OHLC for indicators, we'll use the /coins/{id}/ohlc endpoint.
+    # We'll map common symbols to CoinGecko IDs. For simplicity, we'll extract the base (e.g., 'BTC' from 'BTC/USD').
+    base = symbol.split('/')[0].lower()
+    coin_map = {
+        'btc': 'bitcoin',
+        'eth': 'ethereum',
+        'sol': 'solana',
+        'xrp': 'ripple',
+        'doge': 'dogecoin',
+        'pepe': 'pepe',
+        'ada': 'cardano',
+        'dot': 'polkadot',
+        'link': 'chainlink'
+    }
+    coin_id = coin_map.get(base)
+    if not coin_id:
+        print(f"Unsupported crypto symbol for CoinGecko: {symbol}")
+        return None
+
+    # Map timeframe to CoinGecko days parameter
+    days_map = {
+        'daily': 30,      # last 30 days of daily data
+        'weekly': 90,     # last 90 days (approx 13 weeks)
+        '4h': 7           # last 7 days of 4-hour data (CoinGecko provides 4h data for up to 7 days)
+    }
+    days = days_map.get(timeframe)
+    if not days:
+        return None
+
+    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
+    params = {
+        'vs_currency': 'usd',
+        'days': days
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"CoinGecko error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                # data is list of [timestamp, open, high, low, close]
+                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                df.set_index('timestamp', inplace=True)
+                # CoinGecko does not provide volume in this endpoint; we'll set volume to NaN
+                df['volume'] = np.nan
+                return df
+    except Exception as e:
+        print(f"Error fetching {symbol} from CoinGecko: {e}")
+        return None
+
+async def fetch_ohlcv(symbol, timeframe):
+    """Main fetch function: uses CoinGecko for crypto, Twelve Data for stocks, with fallback."""
+    if '/' in symbol:
+        # Try CoinGecko first
+        df = await fetch_coingecko(symbol, timeframe)
+        if df is not None and not df.empty:
+            return df
+        # Fallback to Twelve Data
+        print(f"Falling back to Twelve Data for {symbol}")
+        return await fetch_twelvedata(symbol, timeframe)
+    else:
+        # Stocks: use Twelve Data
+        return await fetch_twelvedata(symbol, timeframe)
+
 def calculate_indicators(df):
     """Calculate all TA indicators, safely handling missing volume."""
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
@@ -108,11 +179,11 @@ def calculate_indicators(df):
 
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-    # Volume average – only if volume column exists
-    if 'volume' in df.columns:
+    # Volume average – only if volume column exists and has data
+    if 'volume' in df.columns and df['volume'].notna().any():
         df['volume_avg'] = df['volume'].rolling(window=20).mean()
     else:
-        df['volume_avg'] = None  # safe placeholder
+        df['volume_avg'] = None
 
     return df
 
@@ -130,7 +201,7 @@ def get_signals(df):
     signals['ema200'] = latest['ema200']
 
     # Safely handle volume
-    if 'volume' in latest and 'volume_avg' in latest:
+    if 'volume' in latest and 'volume_avg' in latest and pd.notna(latest['volume_avg']):
         signals['volume'] = latest['volume']
         signals['volume_avg'] = latest['volume_avg']
     else:
@@ -358,7 +429,7 @@ async def scan(ctx, target='all', timeframe='daily'):
             signals = get_signals(df)
             embed = format_embed(symbol, signals, timeframe)
             await ctx.send(embed=embed)
-        await asyncio.sleep(8)  # Increased to 8 seconds to respect 8 requests/minute limit
+        await asyncio.sleep(8)  # Respect rate limits
 
     await ctx.send("Scan complete.")
 
