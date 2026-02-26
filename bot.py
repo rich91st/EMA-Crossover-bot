@@ -1,16 +1,16 @@
 import discord
 from discord.ext import commands
-import aiohttp  # added for async HTTP requests
+import aiohttp
 import pandas as pd
 import numpy as np
 import ta
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # === CONFIGURATION ===
-TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')  # new env variable
+TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 
 # Discord bot setup
@@ -20,6 +20,9 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 # Watchlist file
 WATCHLIST_FILE = 'watchlist.json'
+
+# Simple cooldown to prevent duplicate command execution
+last_command_time = {}
 
 # ====================
 # HELPER FUNCTIONS
@@ -31,7 +34,7 @@ def load_watchlist():
             return json.load(f)
     default = {
         "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]  # twelve data format
+        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
     }
     save_watchlist(default)
     return default
@@ -40,9 +43,24 @@ def save_watchlist(watchlist):
     with open(WATCHLIST_FILE, 'w') as f:
         json.dump(watchlist, f, indent=2)
 
+def normalize_symbol(symbol):
+    """Convert common crypto symbols to BASE/USD format."""
+    symbol = symbol.upper()
+    crypto_map = {
+        'BTC': 'BTC/USD', 'ETH': 'ETH/USD', 'SOL': 'SOL/USD',
+        'XRP': 'XRP/USD', 'DOGE': 'DOGE/USD', 'PEPE': 'PEPE/USD',
+        'ADA': 'ADA/USD', 'DOT': 'DOT/USD', 'LINK': 'LINK/USD'
+    }
+    # If it's a known crypto shorthand, convert
+    if symbol in crypto_map:
+        return crypto_map[symbol]
+    # If it already contains '/', assume it's correct
+    if '/' in symbol:
+        return symbol
+    # Otherwise, treat as stock
+    return symbol
+
 async def fetch_ohlcv(symbol, timeframe):
-    """Fetch OHLCV data from Twelve Data API"""
-    # Map timeframe to Twelve Data interval
     interval_map = {
         'daily': '1day',
         'weekly': '1week',
@@ -197,6 +215,9 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    # Ignore bot's own messages
+    if message.author == bot.user:
+        return
     print(f"Received message: {message.content} from {message.author}")
     await bot.process_commands(message)
 
@@ -210,6 +231,13 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
+    # Simple cooldown to prevent duplicate execution (5 seconds)
+    now = datetime.now()
+    last = last_command_time.get(ctx.author.id)
+    if last and (now - last) < timedelta(seconds=5):
+        return  # Ignore if user spams
+    last_command_time[ctx.author.id] = now
+
     timeframe = timeframe.lower()
     if timeframe not in ['daily', 'weekly', '4h']:
         await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
@@ -219,7 +247,8 @@ async def scan(ctx, target='all', timeframe='daily'):
     symbols = watchlist['stocks'] + watchlist['crypto']
 
     if target.lower() != 'all':
-        symbol = target.upper()
+        # Normalize symbol (convert crypto shorthand)
+        symbol = normalize_symbol(target)
         await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
@@ -231,6 +260,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send(result)
         return
 
+    # Scan all symbols
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     results = []
@@ -239,12 +269,12 @@ async def scan(ctx, target='all', timeframe='daily'):
         if df is not None and not df.empty:
             df = calculate_indicators(df)
             signals = get_signals(df)
-            if signals and signals['net_score'] != 0:
-                result = format_symbol_result(symbol, signals, timeframe)
-                results.append(result)
-                if len("\n\n".join(results)) > 1800:
-                    await ctx.send("\n\n".join(results))
-                    results = []
+            # Always show result (remove filter)
+            result = format_symbol_result(symbol, signals, timeframe)
+            results.append(result)
+            if len("\n\n".join(results)) > 1800:
+                await ctx.send("\n\n".join(results))
+                results = []
         await asyncio.sleep(1)
 
     if results:
@@ -253,9 +283,9 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol.upper())
     watchlist = load_watchlist()
-    if '/' in symbol:  # twelve data crypto format
+    if '/' in symbol:
         if symbol not in watchlist['crypto']:
             watchlist['crypto'].append(symbol)
             save_watchlist(watchlist)
@@ -272,7 +302,7 @@ async def add_symbol(ctx, symbol):
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
-    symbol = symbol.upper()
+    symbol = normalize_symbol(symbol.upper())
     watchlist = load_watchlist()
     removed = False
     if symbol in watchlist['stocks']:
@@ -298,9 +328,9 @@ async def list_watchlist(ctx):
 async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols (shows only non-neutral). Timeframes: daily, weekly, 4h (default daily).
-`!scan SYMBOL [timeframe]` – Scan a single symbol.
-`!add SYMBOL` – Add a symbol (use BTC/USD for crypto).
+`!scan all [timeframe]` – Scan all watchlist symbols (shows all symbols now). Timeframes: daily, weekly, 4h (default daily).
+`!scan SYMBOL [timeframe]` – Scan a single symbol (e.g., `!scan AAPL`, `!scan XRP/USD`).
+`!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
 `!ping` – Test if bot is responsive.
