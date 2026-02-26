@@ -51,13 +51,10 @@ def normalize_symbol(symbol):
         'XRP': 'XRP/USD', 'DOGE': 'DOGE/USD', 'PEPE': 'PEPE/USD',
         'ADA': 'ADA/USD', 'DOT': 'DOT/USD', 'LINK': 'LINK/USD'
     }
-    # If it's a known crypto shorthand, convert
     if symbol in crypto_map:
         return crypto_map[symbol]
-    # If it already contains '/', assume it's correct
     if '/' in symbol:
         return symbol
-    # Otherwise, treat as stock
     return symbol
 
 async def fetch_ohlcv(symbol, timeframe):
@@ -110,6 +107,9 @@ def calculate_indicators(df):
 
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
+    # Add volume average for later comparison
+    df['volume_avg'] = df['volume'].rolling(window=20).mean()
+
     return df
 
 def get_signals(df):
@@ -124,6 +124,15 @@ def get_signals(df):
     signals['ema13'] = latest['ema13']
     signals['ema50'] = latest['ema50']
     signals['ema200'] = latest['ema200']
+    signals['volume'] = latest['volume']
+    signals['volume_avg'] = latest['volume_avg']
+
+    # Trend direction
+    signals['trend'] = 'UPTREND' if latest['close'] > latest['ema50'] and latest['ema5'] > latest['ema13'] else 'DOWNTREND'
+
+    # Support & Resistance (simple: 20-day low/high)
+    signals['support_20'] = df['low'].tail(20).min()
+    signals['resistance_20'] = df['high'].tail(20).max()
 
     signals['ema5_above_13'] = latest['ema5'] > latest['ema13']
     signals['ema13_above_50'] = latest['ema13'] > latest['ema50']
@@ -162,48 +171,99 @@ def get_signals(df):
 
     return signals
 
-def format_symbol_result(symbol, signals, timeframe):
+def get_rating(signals):
+    """Return (rating_text, color) based on signals."""
+    net = signals['net_score']
+    rsi = signals['rsi']
+    buy_signal = signals['buy_signal']
+    sell_signal = signals['sell_signal']
+    above_200 = signals['price'] > signals['ema200'] if not pd.isna(signals['ema200']) else False
+
+    # Bullish ratings
+    if net >= 2 or (buy_signal and rsi >= 60):
+        return "STRONG BUY", 0x00ff00  # green
+    elif net == 1 or (buy_signal and rsi >= 50):
+        return "BUY", 0x00cc00
+    elif net == 0 and (above_200 or signals['rsi_oversold']):
+        return "WEAK BUY", 0x88ff88
+    # Bearish ratings
+    elif net <= -2 or (sell_signal and rsi <= 40):
+        return "STRONG SELL", 0xff0000  # red
+    elif net == -1 or (sell_signal and rsi <= 50):
+        return "SELL", 0xcc0000
+    elif net == 0 and (not above_200 or signals['rsi_overbought']):
+        return "WEAK SELL", 0xff8888
+    else:
+        return "NEUTRAL", 0xffff00  # yellow
+
+def format_embed(symbol, signals, timeframe):
+    """Return a discord.Embed with all the fancy formatting."""
     if not signals:
-        return f"`{symbol}`: No data or error."
+        return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
     sym_type = "Crypto" if '/' in symbol else "Stock"
+    rating, color = get_rating(signals)
 
-    if signals['net_score'] >= 2:
-        emoji = "🟢🟢"
-    elif signals['net_score'] == 1:
-        emoji = "🟢"
-    elif signals['net_score'] == 0:
-        emoji = "🟡"
-    elif signals['net_score'] == -1:
-        emoji = "🔴"
+    # Determine volume status
+    vol_ratio = signals['volume'] / signals['volume_avg'] if signals['volume_avg'] and signals['volume_avg'] > 0 else 1
+    if vol_ratio > 1.5:
+        vol_status = "High"
+    elif vol_ratio < 0.5:
+        vol_status = "Low"
     else:
-        emoji = "🔴🔴"
+        vol_status = "Normal"
 
-    lines = [
-        f"{emoji} **{symbol}** ({sym_type}) – {timeframe}",
-        f"Price: ${signals['price']:.2f}  | RSI: {signals['rsi']:.1f}",
-        f"EMAs: 5={signals['ema5']:.2f}, 13={signals['ema13']:.2f}, 50={signals['ema50']:.2f}, 200={signals['ema200']:.2f}"
-    ]
+    # Build reason string
+    reasons = []
+    if signals['ema5_cross_above_13']:
+        reasons.append("EMA5 ↑ EMA13")
+    if signals['ema13_cross_above_50']:
+        reasons.append("EMA13 ↑ EMA50")
+    if signals['ema5_cross_below_13']:
+        reasons.append("EMA5 ↓ EMA13")
+    if signals['ema13_cross_below_50']:
+        reasons.append("EMA13 ↓ EMA50")
+    if signals['rsi_oversold']:
+        reasons.append("RSI Oversold")
+    if signals['rsi_overbought']:
+        reasons.append("RSI Overbought")
+    if signals['price'] > signals['ema200'] and not pd.isna(signals['ema200']):
+        reasons.append("Above 200 EMA")
+    elif signals['price'] < signals['ema200'] and not pd.isna(signals['ema200']):
+        reasons.append("Below 200 EMA")
+    if not reasons:
+        reasons.append("No significant signals")
 
-    active = []
-    if signals['ema5_cross_above_13']: active.append("5↑13")
-    if signals['ema13_cross_above_50']: active.append("13↑50")
-    if signals['buy_signal']: active.append("📈 Buy")
-    if signals['touch_lower_bb'] and signals['rsi_oversold']: active.append("🔻 Oversold Triangle")
-    if signals['rsi_oversold']: active.append("OS X")
+    reason_str = " | ".join(reasons)
 
-    if signals['ema5_cross_below_13']: active.append("5↓13")
-    if signals['ema13_cross_below_50']: active.append("13↓50")
-    if signals['sell_signal']: active.append("📉 Sell")
-    if signals['touch_upper_bb'] and signals['rsi_overbought']: active.append("🔺 Overbought Triangle")
-    if signals['rsi_overbought']: active.append("OB X")
+    # Support, Resistance, Stop Loss, Target
+    support = signals['support_20']
+    resistance = signals['resistance_20']
+    stop_loss = support
+    target = resistance + (resistance - support)  # simple projection
 
-    if active:
-        lines.append("Signals: " + ", ".join(active))
-    else:
-        lines.append("No active signals.")
+    # Create embed
+    embed = discord.Embed(
+        title=f"{rating}",
+        description=f"**{symbol}** · ${signals['price']:.2f}",
+        color=color
+    )
+    embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
+    embed.add_field(name="Trend", value=signals['trend'], inline=True)
+    embed.add_field(name="Volume", value=f"{vol_status} ({vol_ratio:.1f}x)", inline=True)
 
-    return "\n".join(lines)
+    ema_text = f"5: ${signals['ema5']:.2f}\n13: ${signals['ema13']:.2f}\n50: ${signals['ema50']:.2f}\n200: ${signals['ema200']:.2f}"
+    embed.add_field(name="EMAs", value=ema_text, inline=True)
+
+    embed.add_field(name="Reason", value=reason_str, inline=False)
+
+    embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
+    embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
+    embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
+    embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
+
+    embed.set_footer(text=f"{sym_type} · {timeframe} timeframe")
+    return embed
 
 # ====================
 # DISCORD EVENTS
@@ -215,7 +275,6 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    # Ignore bot's own messages
     if message.author == bot.user:
         return
     print(f"Received message: {message.content} from {message.author}")
@@ -231,11 +290,11 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Simple cooldown to prevent duplicate execution (5 seconds)
+    # Cooldown
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
-        return  # Ignore if user spams
+        return
     last_command_time[ctx.author.id] = now
 
     timeframe = timeframe.lower()
@@ -247,7 +306,6 @@ async def scan(ctx, target='all', timeframe='daily'):
     symbols = watchlist['stocks'] + watchlist['crypto']
 
     if target.lower() != 'all':
-        # Normalize symbol (convert crypto shorthand)
         symbol = normalize_symbol(target)
         await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
         df = await fetch_ohlcv(symbol, timeframe)
@@ -256,29 +314,22 @@ async def scan(ctx, target='all', timeframe='daily'):
             return
         df = calculate_indicators(df)
         signals = get_signals(df)
-        result = format_symbol_result(symbol, signals, timeframe)
-        await ctx.send(result)
+        embed = format_embed(symbol, signals, timeframe)
+        await ctx.send(embed=embed)
         return
 
-    # Scan all symbols
+    # Scan all
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
-    results = []
     for symbol in symbols:
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
             df = calculate_indicators(df)
             signals = get_signals(df)
-            # Always show result (remove filter)
-            result = format_symbol_result(symbol, signals, timeframe)
-            results.append(result)
-            if len("\n\n".join(results)) > 1800:
-                await ctx.send("\n\n".join(results))
-                results = []
+            embed = format_embed(symbol, signals, timeframe)
+            await ctx.send(embed=embed)
         await asyncio.sleep(1)
 
-    if results:
-        await ctx.send("\n\n".join(results))
     await ctx.send("Scan complete.")
 
 @bot.command(name='add')
@@ -328,7 +379,7 @@ async def list_watchlist(ctx):
 async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols (shows all symbols now). Timeframes: daily, weekly, 4h (default daily).
+`!scan all [timeframe]` – Scan all watchlist symbols with enhanced output.
 `!scan SYMBOL [timeframe]` – Scan a single symbol (e.g., `!scan AAPL`, `!scan XRP/USD`).
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
