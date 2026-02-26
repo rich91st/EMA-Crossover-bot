@@ -217,7 +217,7 @@ async def ping(ctx):
     await ctx.send('pong')
 
 # Run the bot
-if __name__ == '__main__':)@bot.command(name='scan')
+if __name__ == '__main__':) @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
     timeframe = timeframe.lower()
     if timeframe not in ['daily', 'weekly', '4h']:
