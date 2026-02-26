@@ -84,6 +84,7 @@ async def fetch_ohlcv(symbol, timeframe):
             }).dropna()
         return df
     except Exception as e:
+        # This line is already present – it will log the real error to Render logs
         print(f"Error fetching {symbol}: {e}")
         return None
 
