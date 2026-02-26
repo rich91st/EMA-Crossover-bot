@@ -358,7 +358,7 @@ async def scan(ctx, target='all', timeframe='daily'):
             signals = get_signals(df)
             embed = format_embed(symbol, signals, timeframe)
             await ctx.send(embed=embed)
-        await asyncio.sleep(1)
+        await asyncio.sleep(8)  # Increased to 8 seconds to respect 8 requests/minute limit
 
     await ctx.send("Scan complete.")
 
