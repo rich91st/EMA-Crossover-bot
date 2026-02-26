@@ -151,18 +151,22 @@ def get_signals(df):
     signals['buy_signal'] = signals['ema5_cross_above_13'] and latest['rsi'] >= 50
     signals['sell_signal'] = signals['ema5_cross_below_13'] and latest['rsi'] <= 50
 
+    # BB + RSI conditions
+    signals['overbought_triangle'] = signals['touch_upper_bb'] and signals['rsi_overbought']
+    signals['oversold_triangle'] = signals['touch_lower_bb'] and signals['rsi_oversold']
+
     bullish = [
         signals['ema5_cross_above_13'],
         signals['ema13_cross_above_50'],
         signals['buy_signal'],
-        signals['touch_lower_bb'] and signals['rsi_oversold'],
+        signals['oversold_triangle'],  # Green triangle condition
         signals['rsi_oversold']
     ]
     bearish = [
         signals['ema5_cross_below_13'],
         signals['ema13_cross_below_50'],
         signals['sell_signal'],
-        signals['touch_upper_bb'] and signals['rsi_overbought'],
+        signals['overbought_triangle'],  # Red triangle condition
         signals['rsi_overbought']
     ]
     signals['bullish_count'] = sum(bullish)
@@ -172,29 +176,31 @@ def get_signals(df):
     return signals
 
 def get_rating(signals):
-    """Return (rating_text, color) based on signals."""
+    """Return (rating_text, color) based on signals, including BB touches."""
     net = signals['net_score']
     rsi = signals['rsi']
     buy_signal = signals['buy_signal']
     sell_signal = signals['sell_signal']
     above_200 = signals['price'] > signals['ema200'] if not pd.isna(signals['ema200']) else False
+    ob_triangle = signals['overbought_triangle']
+    os_triangle = signals['oversold_triangle']
 
-    # Bullish ratings
-    if net >= 2 or (buy_signal and rsi >= 60):
-        return "STRONG BUY", 0x00ff00  # green
+    # Bullish ratings (including oversold triangle)
+    if net >= 2 or (buy_signal and rsi >= 60) or os_triangle:
+        return "STRONG BUY", 0x00ff00
     elif net == 1 or (buy_signal and rsi >= 50):
         return "BUY", 0x00cc00
-    elif net == 0 and (above_200 or signals['rsi_oversold']):
+    elif net == 0 and (above_200 or signals['rsi_oversold'] or os_triangle):
         return "WEAK BUY", 0x88ff88
-    # Bearish ratings
-    elif net <= -2 or (sell_signal and rsi <= 40):
-        return "STRONG SELL", 0xff0000  # red
+    # Bearish ratings (including overbought triangle)
+    elif net <= -2 or (sell_signal and rsi <= 40) or ob_triangle:
+        return "STRONG SELL", 0xff0000
     elif net == -1 or (sell_signal and rsi <= 50):
         return "SELL", 0xcc0000
-    elif net == 0 and (not above_200 or signals['rsi_overbought']):
+    elif net == 0 and (not above_200 or signals['rsi_overbought'] or ob_triangle):
         return "WEAK SELL", 0xff8888
     else:
-        return "NEUTRAL", 0xffff00  # yellow
+        return "NEUTRAL", 0xffff00
 
 def format_embed(symbol, signals, timeframe):
     """Return a discord.Embed with all the fancy formatting."""
@@ -223,6 +229,10 @@ def format_embed(symbol, signals, timeframe):
         reasons.append("EMA5 ↓ EMA13")
     if signals['ema13_cross_below_50']:
         reasons.append("EMA13 ↓ EMA50")
+    if signals['oversold_triangle']:
+        reasons.append("🔻 Oversold BB touch")
+    if signals['overbought_triangle']:
+        reasons.append("🔺 Overbought BB touch")
     if signals['rsi_oversold']:
         reasons.append("RSI Oversold")
     if signals['rsi_overbought']:
