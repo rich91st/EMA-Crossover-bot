@@ -53,7 +53,6 @@ def normalize_symbol(symbol):
     return symbol
 
 async def fetch_twelvedata(symbol, timeframe):
-    """Fetch OHLCV from Twelve Data (used for stocks and crypto fallback)."""
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
     if not interval:
@@ -88,11 +87,10 @@ async def fetch_twelvedata(symbol, timeframe):
         return None
 
 async def fetch_coingecko_ohlc(symbol, timeframe):
-    """Fetch OHLC from CoinGecko."""
     base = symbol.split('/')[0].lower()
     coin_map = {
         'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepe',
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',  # Fixed PEPE ID
         'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
     }
     coin_id = coin_map.get(base)
@@ -125,11 +123,10 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
         return None
 
 async def fetch_coingecko_price(symbol):
-    """Get current price from CoinGecko and generate synthetic OHLC."""
     base = symbol.split('/')[0].lower()
     coin_map = {
         'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepe',
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',  # Fixed PEPE ID
         'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
     }
     coin_id = coin_map.get(base)
@@ -149,8 +146,8 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC with small random walk
-                np.random.seed(42)  # for reproducibility
+                # Create synthetic OHLC
+                np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
                 open_prices = close_prices * 0.99
@@ -174,23 +171,19 @@ async def fetch_coingecko_price(symbol):
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    """Main fetch: multiple fallback layers for crypto."""
     if '/' in symbol:  # crypto
         # Layer 1: CoinGecko OHLC
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
-
         # Layer 2: CoinGecko price (synthetic)
         df = await fetch_coingecko_price(symbol)
         if df is not None:
             return df
-
         # Layer 3: Twelve Data (final fallback)
         print(f"Trying Twelve Data as final fallback for {symbol}")
         return await fetch_twelvedata(symbol, timeframe)
     else:
-        # Stocks: Twelve Data only
         return await fetch_twelvedata(symbol, timeframe)
 
 def calculate_indicators(df):
