@@ -209,12 +209,13 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ====================
-# DISCORD COMMANDS (Start with ping)
+# DISCORD COMMANDS
 # ====================
 
 @bot.command(name='ping')
 async def ping(ctx):
     await ctx.send('pong')
+
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
     timeframe = timeframe.lower()
@@ -257,6 +258,64 @@ async def scan(ctx, target='all', timeframe='daily'):
     if results:
         await ctx.send("\n\n".join(results))
     await ctx.send("Scan complete.")
+
+@bot.command(name='add')
+async def add_symbol(ctx, symbol):
+    symbol = symbol.upper()
+    watchlist = load_watchlist()
+    if ':' in symbol:
+        if symbol not in watchlist['crypto']:
+            watchlist['crypto'].append(symbol)
+            save_watchlist(watchlist)
+            await ctx.send(f"Added {symbol} to crypto watchlist.")
+        else:
+            await ctx.send(f"{symbol} already in crypto watchlist.")
+    else:
+        if symbol not in watchlist['stocks']:
+            watchlist['stocks'].append(symbol)
+            save_watchlist(watchlist)
+            await ctx.send(f"Added {symbol} to stocks watchlist.")
+        else:
+            await ctx.send(f"{symbol} already in stocks watchlist.")
+
+@bot.command(name='remove')
+async def remove_symbol(ctx, symbol):
+    symbol = symbol.upper()
+    watchlist = load_watchlist()
+    removed = False
+    if symbol in watchlist['stocks']:
+        watchlist['stocks'].remove(symbol)
+        removed = True
+    if symbol in watchlist['crypto']:
+        watchlist['crypto'].remove(symbol)
+        removed = True
+    if removed:
+        save_watchlist(watchlist)
+        await ctx.send(f"Removed {symbol} from watchlist.")
+    else:
+        await ctx.send(f"{symbol} not found in watchlist.")
+
+@bot.command(name='list')
+async def list_watchlist(ctx):
+    watchlist = load_watchlist()
+    stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
+    cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
+    await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
+
+@bot.command(name='help')
+async def help_command(ctx):
+    help_text = """
+**5-13-50 Trading Bot Commands**
+`!scan all [timeframe]` – Scan all watchlist symbols (shows only non-neutral). Timeframes: daily, weekly, 4h (default daily).
+`!scan SYMBOL [timeframe]` – Scan a single symbol.
+`!add SYMBOL` – Add a symbol (use BINANCE:XXX for crypto).
+`!remove SYMBOL` – Remove a symbol.
+`!list` – Show current watchlist.
+`!ping` – Test if bot is responsive.
+`!help` – This message.
+    """
+    await ctx.send(help_text)
+
 # Run the bot
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
