@@ -12,17 +12,13 @@ from datetime import datetime, timedelta
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-# CoinGecko and CoinLore are free and do not require API keys
+# CoinGecko is free and does not require an API key
 
-# Discord bot setup
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# Watchlist file
 WATCHLIST_FILE = 'watchlist.json'
-
-# Simple cooldown to prevent duplicate command execution
 last_command_time = {}
 
 # ====================
@@ -45,7 +41,6 @@ def save_watchlist(watchlist):
         json.dump(watchlist, f, indent=2)
 
 def normalize_symbol(symbol):
-    """Convert common crypto symbols to BASE/USD format."""
     symbol = symbol.upper()
     crypto_map = {
         'BTC': 'BTC/USD', 'ETH': 'ETH/USD', 'SOL': 'SOL/USD',
@@ -59,12 +54,7 @@ def normalize_symbol(symbol):
     return symbol
 
 async def fetch_twelvedata(symbol, timeframe):
-    """Fetch OHLCV from Twelve Data (used for stocks and fallback)."""
-    interval_map = {
-        'daily': '1day',
-        'weekly': '1week',
-        '4h': '4h'
-    }
+    interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
     if not interval:
         return None
@@ -96,82 +86,65 @@ async def fetch_twelvedata(symbol, timeframe):
         print(f"Error fetching {symbol} from Twelve Data: {e}")
         return None
 
-async def fetch_coingecko(symbol, timeframe):
-    """Fetch OHLCV from CoinGecko for crypto symbols (format: BTC/USD)."""
+async def fetch_coingecko_ohlc(symbol, timeframe):
+    """Fetch OHLC from CoinGecko."""
     base = symbol.split('/')[0].lower()
     coin_map = {
-        'btc': 'bitcoin',
-        'eth': 'ethereum',
-        'sol': 'solana',
-        'xrp': 'ripple',
-        'doge': 'dogecoin',
-        'pepe': 'pepe',
-        'ada': 'cardano',
-        'dot': 'polkadot',
-        'link': 'chainlink'
+        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepe',
+        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
     }
     coin_id = coin_map.get(base)
     if not coin_id:
-        print(f"Unsupported crypto symbol for CoinGecko: {symbol}")
         return None
 
-    # CoinGecko ohlc endpoint expects days parameter
-    days_map = {
-        'daily': 30,      # last 30 days of daily data
-        'weekly': 90,     # last 90 days (approx 13 weeks of daily data)
-        '4h': 7           # last 7 days of 4-hour data (CoinGecko provides 4h for up to 7 days)
-    }
+    days_map = {'daily': 30, 'weekly': 90, '4h': 7}
     days = days_map.get(timeframe)
     if not days:
         return None
 
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {
-        'vs_currency': 'usd',
-        'days': days
-    }
+    params = {'vs_currency': 'usd', 'days': days}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"CoinGecko error for {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
-                # data is list of [timestamp, open, high, low, close]
                 df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
-                # CoinGecko does not provide volume in this endpoint; we'll set volume to NaN
                 df['volume'] = np.nan
                 return df
     except Exception as e:
-        print(f"Error fetching {symbol} from CoinGecko: {e}")
+        print(f"CoinGecko OHLC error for {symbol}: {e}")
         return None
 
-async def fetch_coinlore(symbol, timeframe):
-    """Fallback for crypto when CoinGecko fails – provides synthetic OHLC from current price."""
-    base = symbol.split('/')[0].upper()
+async def fetch_coingecko_price(symbol):
+    """Get current price from CoinGecko (fallback)."""
+    base = symbol.split('/')[0].lower()
+    coin_map = {
+        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepe',
+        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
+    }
+    coin_id = coin_map.get(base)
+    if not coin_id:
+        return None
+
+    url = f"https://api.coingecko.com/api/v3/simple/price"
+    params = {'ids': coin_id, 'vs_currencies': 'usd'}
     try:
         async with aiohttp.ClientSession() as session:
-            # Get list of top 1000 coins (CoinLore free endpoint, no key needed)
-            async with session.get("https://api.coinlore.net/api/tickers/?limit=1000") as resp:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
                 data = await resp.json()
-                coin_data = None
-                for coin in data.get('data', []):
-                    if coin.get('symbol') == base:
-                        coin_data = coin
-                        break
-                if not coin_data:
-                    print(f"CoinLore: {base} not found")
+                price = data.get(coin_id, {}).get('usd')
+                if price is None:
                     return None
-
-                price = float(coin_data.get('price_usd', 0))
-                if price == 0:
-                    return None
-
-                # Create 200 periods of synthetic data so indicators can calculate
-                # We'll add a tiny random variation to allow EMAs and BB to work
-                np.random.seed(42)  # for reproducibility
+                # Create synthetic OHLC with small random walk
+                np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
                 open_prices = close_prices * 0.99
@@ -190,25 +163,22 @@ async def fetch_coinlore(symbol, timeframe):
                 df.set_index('timestamp', inplace=True)
                 return df
     except Exception as e:
-        print(f"CoinLore error for {symbol}: {e}")
+        print(f"CoinGecko price error for {symbol}: {e}")
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    """Main fetch function: uses CoinGecko for crypto, with CoinLore fallback."""
-    if '/' in symbol:
-        # Try CoinGecko first
-        df = await fetch_coingecko(symbol, timeframe)
-        if df is not None and not df.empty:
+    """Main fetch: CoinGecko OHLC -> CoinGecko price fallback -> Twelve Data for stocks."""
+    if '/' in symbol:  # crypto
+        df = await fetch_coingecko_ohlc(symbol, timeframe)
+        if df is not None:
             return df
-        # Fallback to CoinLore
-        print(f"Falling back to CoinLore for {symbol}")
-        return await fetch_coinlore(symbol, timeframe)
+        # Fallback to price-based synthetic data
+        print(f"Falling back to price-based synthetic for {symbol}")
+        return await fetch_coingecko_price(symbol)
     else:
-        # Stocks: use Twelve Data
         return await fetch_twelvedata(symbol, timeframe)
 
 def calculate_indicators(df):
-    """Calculate all TA indicators, safely handling missing volume."""
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -221,7 +191,6 @@ def calculate_indicators(df):
 
     df['rsi'] = ta.momentum.rsi(df['close'], window=14)
 
-    # Volume average – only if volume column exists and has data
     if 'volume' in df.columns and df['volume'].notna().any():
         df['volume_avg'] = df['volume'].rolling(window=20).mean()
     else:
@@ -242,7 +211,6 @@ def get_signals(df):
     signals['ema50'] = latest['ema50']
     signals['ema200'] = latest['ema200']
 
-    # Safely handle volume
     if 'volume' in latest and 'volume_avg' in latest and pd.notna(latest['volume_avg']):
         signals['volume'] = latest['volume']
         signals['volume_avg'] = latest['volume_avg']
@@ -250,10 +218,8 @@ def get_signals(df):
         signals['volume'] = None
         signals['volume_avg'] = None
 
-    # Trend direction
     signals['trend'] = 'UPTREND' if latest['close'] > latest['ema50'] and latest['ema5'] > latest['ema13'] else 'DOWNTREND'
 
-    # Support & Resistance (simple: 20-day low/high)
     signals['support_20'] = df['low'].tail(20).min()
     signals['resistance_20'] = df['high'].tail(20).max()
 
@@ -298,7 +264,6 @@ def get_signals(df):
     return signals
 
 def get_rating(signals):
-    """Return (rating_text, color) based on signals."""
     net = signals['net_score']
     rsi = signals['rsi']
     buy_signal = signals['buy_signal']
@@ -323,14 +288,12 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 def format_embed(symbol, signals, timeframe):
-    """Return a discord.Embed with all the fancy formatting."""
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
     sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
 
-    # Volume status – safely handle missing volume
     if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
         vol_ratio = signals['volume'] / signals['volume_avg']
         if vol_ratio > 1.5:
@@ -343,7 +306,6 @@ def format_embed(symbol, signals, timeframe):
     else:
         vol_display = "N/A (no volume data)"
 
-    # Build reason string
     reasons = []
     if signals['ema5_cross_above_13']:
         reasons.append("EMA5 ↑ EMA13")
@@ -370,7 +332,6 @@ def format_embed(symbol, signals, timeframe):
 
     reason_str = " | ".join(reasons)
 
-    # Bollinger Bands status field
     if signals['overbought_triangle']:
         bb_status = "🔴 Overbought (touch)"
     elif signals['oversold_triangle']:
@@ -378,13 +339,11 @@ def format_embed(symbol, signals, timeframe):
     else:
         bb_status = "⚪ Normal"
 
-    # Support, Resistance, Stop Loss, Target
     support = signals['support_20']
     resistance = signals['resistance_20']
     stop_loss = support
-    target = resistance + (resistance - support)  # simple projection
+    target = resistance + (resistance - support)
 
-    # Create embed
     embed = discord.Embed(
         title=f"{rating}",
         description=f"**{symbol}** · ${signals['price']:.2f}",
@@ -409,7 +368,7 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# DISCORD EVENTS
+# DISCORD EVENTS & COMMANDS
 # ====================
 
 @bot.event
@@ -423,17 +382,12 @@ async def on_message(message):
     print(f"Received message: {message.content} from {message.author}")
     await bot.process_commands(message)
 
-# ====================
-# DISCORD COMMANDS
-# ====================
-
 @bot.command(name='ping')
 async def ping(ctx):
     await ctx.send('pong')
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Cooldown
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -461,7 +415,6 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send(embed=embed)
         return
 
-    # Scan all
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
@@ -471,7 +424,7 @@ async def scan(ctx, target='all', timeframe='daily'):
             signals = get_signals(df)
             embed = format_embed(symbol, signals, timeframe)
             await ctx.send(embed=embed)
-        await asyncio.sleep(8)  # Respect rate limits
+        await asyncio.sleep(8)
 
     await ctx.send("Scan complete.")
 
@@ -532,6 +485,5 @@ async def help_command(ctx):
     """
     await ctx.send(help_text)
 
-# Run the bot
 if __name__ == '__main__':
     bot.run(DISCORD_TOKEN)
