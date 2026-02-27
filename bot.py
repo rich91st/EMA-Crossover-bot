@@ -420,16 +420,22 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication by message ID
-    if not hasattr(bot, 'last_msg_id'):
-        bot.last_msg_id = {}
-    if ctx.message.id in bot.last_msg_id:
+    # --- Robust deduplication by message ID with timestamp ---
+    if not hasattr(bot, 'processed_msgs'):
+        bot.processed_msgs = {}
+    msg_id = ctx.message.id
+    now_ts = datetime.now().timestamp()
+    # Remove entries older than 10 seconds
+    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
+    for mid in to_remove:
+        del bot.processed_msgs[mid]
+    if msg_id in bot.processed_msgs:
+        print(f"Ignoring duplicate message {msg_id}")
         return
-    bot.last_msg_id[ctx.message.id] = True
-    if len(bot.last_msg_id) > 100:
-        bot.last_msg_id.clear()
+    bot.processed_msgs[msg_id] = now_ts
+    # ------------------------------------
 
-    # Cooldown per user
+    # Cooldown per user (still useful)
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
