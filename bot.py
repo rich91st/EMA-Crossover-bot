@@ -19,7 +19,7 @@ import io
 
 # === CONFIGURATION ===
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
-TWELVEDATA_API_KEY = os.getgetenv('TWELVEDATA_API_KEY')
+TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')  # FIXED: was getgetenv
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PORT = int(os.getenv('PORT', 10000))
 
