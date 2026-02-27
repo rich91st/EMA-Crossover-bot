@@ -18,6 +18,7 @@ import mplfinance as mpf
 import io
 
 # === CONFIGURATION ===
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PORT = int(os.getenv('PORT', 10000))
@@ -31,7 +32,7 @@ WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
 
 # ====================
-# WEB SERVER
+# WEB SERVER (keeps Render happy)
 # ====================
 
 async def handle_health(request):
@@ -79,6 +80,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
+# ----- Stock/Crypto Data Fetching -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
@@ -90,7 +92,7 @@ async def fetch_twelvedata(symbol, timeframe):
         'symbol': symbol,
         'interval': interval,
         'apikey': TWELVEDATA_API_KEY,
-        'outputsize': 200,  # keep 200 for indicators
+        'outputsize': 200,
         'format': 'JSON'
     }
 
@@ -171,7 +173,7 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC
+                # Create synthetic OHLC (enough for indicators but maybe not for chart)
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
@@ -207,6 +209,30 @@ async def fetch_ohlcv(symbol, timeframe):
     else:
         return await fetch_twelvedata(symbol, timeframe)
 
+# ----- Finnhub News Fetching -----
+async def fetch_stock_news(symbol):
+    """Fetches latest news for a given stock symbol from Finnhub."""
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {
+        'symbol': symbol,
+        'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+        'to': datetime.now().strftime('%Y-%m-%d'),
+        'token': FINNHUB_API_KEY
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Finnhub news error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception as e:
+        print(f"Error fetching news for {symbol}: {e}")
+        return None
+
+# ----- Indicator Calculations -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -320,11 +346,16 @@ def generate_chart_image(df, symbol, timeframe):
     """
     Generate a candlestick chart with EMAs (last 30 days) with vibrant, thick lines.
     Returns a BytesIO object ready to be sent as a Discord file.
+    If insufficient data, returns None.
     """
-    # Use last 30 days for chart
-    df_chart = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
-    df_chart.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    
+    # Need at least 20 data points for a decent chart
+    if len(df) < 20:
+        return None
+
+    # Use last 30 days or all available if less
+    chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
     # Add EMAs as overlays with vibrant colors and thicker lines
     apds = []
     if not df['ema5'].tail(30).isna().all():
@@ -335,14 +366,14 @@ def generate_chart_image(df, symbol, timeframe):
         apds.append(mpf.make_addplot(df['ema50'].tail(30), color='crimson', width=2.0, label='EMA50'))
     if not df['ema200'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema200'].tail(30), color='darkviolet', width=2.0, label='EMA200'))
-    
-    # Style with vibrant colors
+
+    # Style
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
-    
+
     # Create figure
     fig, axes = mpf.plot(
-        df_chart,
+        chart_data,
         type='candle',
         style=s,
         addplot=apds,
@@ -353,11 +384,10 @@ def generate_chart_image(df, symbol, timeframe):
         tight_layout=True,
         ylabel='Price (USD)'
     )
-    
-    # Adjust legend
+
     if apds:
         axes[0].legend(loc='upper left')
-    
+
     # Save to bytes buffer
     buf = io.BytesIO()
     fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
@@ -474,12 +504,11 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication with timestamp (cleans old entries)
+    # Deduplication with timestamp (clean old entries)
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
     now_ts = datetime.now().timestamp()
-    # Remove entries older than 10 seconds
     to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
     for mid in to_remove:
         del bot.processed_msgs[mid]
@@ -513,17 +542,19 @@ async def scan(ctx, target='all', timeframe='daily'):
         signals = get_signals(df)
         embed = format_embed(symbol, signals, timeframe)
 
-        # Generate chart and attach
-        try:
-            chart_buffer = generate_chart_image(df, symbol, timeframe)
+        # Generate chart if enough data
+        chart_buffer = generate_chart_image(df, symbol, timeframe)
+        if chart_buffer:
             file = discord.File(chart_buffer, filename='chart.png')
             embed.set_image(url='attachment://chart.png')
             await ctx.send(embed=embed, file=file)
-        except Exception as e:
-            print(f"Chart generation failed: {e}")
-            await ctx.send(embed=embed)  # fallback
+        else:
+            # Still send embed but indicate chart not available
+            embed.add_field(name="📊 Chart", value="*Insufficient data for chart*", inline=False)
+            await ctx.send(embed=embed)
         return
 
+    # Full scan (all symbols, no charts)
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
@@ -584,6 +615,63 @@ async def signals(ctx, timeframe='daily'):
         await ctx.send("No symbols with active signals found.")
     await ctx.send("Signal scan complete.")
 
+@bot.command(name='news')
+async def stock_news(ctx, ticker: str, limit: int = 5):
+    """Fetches the latest news for a given stock ticker."""
+    # Deduplication
+    if not hasattr(bot, 'processed_msgs'):
+        bot.processed_msgs = {}
+    msg_id = ctx.message.id
+    now_ts = datetime.now().timestamp()
+    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
+    for mid in to_remove:
+        del bot.processed_msgs[mid]
+    if msg_id in bot.processed_msgs:
+        print(f"Ignoring duplicate message {msg_id}")
+        return
+    bot.processed_msgs[msg_id] = now_ts
+
+    # Cooldown per user
+    now = datetime.now()
+    last = last_command_time.get(ctx.author.id)
+    if last and (now - last) < timedelta(seconds=5):
+        return
+    last_command_time[ctx.author.id] = now
+
+    await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
+
+    news_data = await fetch_stock_news(ticker.upper())
+
+    if not news_data or len(news_data) == 0:
+        await ctx.send(f"Could not fetch news for {ticker.upper()}. The ticker might be invalid or there's been an API error.")
+        return
+
+    # Create an embed for the news
+    embed = discord.Embed(
+        title=f"Latest News for {ticker.upper()}",
+        color=0x3498db,  # Blue
+        url=f"https://finnhub.io"
+    )
+
+    # Limit the number of articles shown
+    for article in news_data[:limit]:
+        headline = article.get('headline', 'No Headline')
+        source = article.get('source', 'Unknown')
+        date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
+        url = article.get('url', '')
+
+        if len(headline) > 256:
+            headline = headline[:253] + "..."
+
+        embed.add_field(
+            name=f"{source} - {date}",
+            value=f"[{headline}]({url})",
+            inline=False
+        )
+
+    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
     symbol = normalize_symbol(symbol.upper())
@@ -632,8 +720,9 @@ async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
 `!scan all [timeframe]` – Scan all watchlist symbols (full overview).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (with vibrant chart).
+`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart if enough data).
 `!signals [timeframe]` – Scan only symbols with active signals.
+`!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`).
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
