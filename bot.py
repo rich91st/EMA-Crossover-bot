@@ -420,12 +420,12 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # --- Robust deduplication by message ID with timestamp ---
+    """Full scan: shows all symbols in watchlist."""
+    # Deduplication
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
     now_ts = datetime.now().timestamp()
-    # Remove entries older than 10 seconds
     to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
     for mid in to_remove:
         del bot.processed_msgs[mid]
@@ -433,9 +433,8 @@ async def scan(ctx, target='all', timeframe='daily'):
         print(f"Ignoring duplicate message {msg_id}")
         return
     bot.processed_msgs[msg_id] = now_ts
-    # ------------------------------------
 
-    # Cooldown per user (still useful)
+    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -475,6 +474,56 @@ async def scan(ctx, target='all', timeframe='daily'):
         await asyncio.sleep(8)
 
     await ctx.send("Scan complete.")
+
+@bot.command(name='signals')
+async def signals(ctx, timeframe='daily'):
+    """Filtered scan: only shows symbols with active signals (net_score != 0)."""
+    # Deduplication
+    if not hasattr(bot, 'processed_msgs'):
+        bot.processed_msgs = {}
+    msg_id = ctx.message.id
+    now_ts = datetime.now().timestamp()
+    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
+    for mid in to_remove:
+        del bot.processed_msgs[mid]
+    if msg_id in bot.processed_msgs:
+        print(f"Ignoring duplicate message {msg_id}")
+        return
+    bot.processed_msgs[msg_id] = now_ts
+
+    # Cooldown per user
+    now = datetime.now()
+    last = last_command_time.get(ctx.author.id)
+    if last and (now - last) < timedelta(seconds=5):
+        return
+    last_command_time[ctx.author.id] = now
+
+    timeframe = timeframe.lower()
+    if timeframe not in ['daily', 'weekly', '4h']:
+        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+        return
+
+    watchlist = load_watchlist()
+    symbols = watchlist['stocks'] + watchlist['crypto']
+
+    await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+
+    found_any = False
+    for symbol in symbols:
+        df = await fetch_ohlcv(symbol, timeframe)
+        if df is not None and not df.empty:
+            df = calculate_indicators(df)
+            signals = get_signals(df)
+            if signals and signals['net_score'] != 0:
+                found_any = True
+                embed = format_embed(symbol, signals, timeframe)
+                await ctx.send(embed=embed)
+        await asyncio.sleep(8)
+
+    if not found_any:
+        await ctx.send("No symbols with active signals found.")
+
+    await ctx.send("Signal scan complete.")
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
@@ -523,8 +572,9 @@ async def list_watchlist(ctx):
 async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols with enhanced output.
+`!scan all [timeframe]` – Scan all watchlist symbols (full overview).
 `!scan SYMBOL [timeframe]` – Scan a single symbol (e.g., `!scan AAPL`, `!scan XRP/USD`).
+`!signals [timeframe]` – Scan only symbols with active bullish/bearish signals.
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
