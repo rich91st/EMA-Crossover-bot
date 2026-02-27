@@ -90,7 +90,7 @@ async def fetch_twelvedata(symbol, timeframe):
         'symbol': symbol,
         'interval': interval,
         'apikey': TWELVEDATA_API_KEY,
-        'outputsize': 30,  # Only need last 30 days for chart
+        'outputsize': 200,  # keep 200 for indicators
         'format': 'JSON'
     }
 
@@ -173,12 +173,12 @@ async def fetch_coingecko_price(symbol):
                     return None
                 # Create synthetic OHLC
                 np.random.seed(42)
-                dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
-                close_prices = price * (1 + np.random.normal(0, 0.01, 30).cumsum() * 0.01)
+                dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
+                close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
                 open_prices = close_prices * 0.99
                 high_prices = close_prices * 1.02
                 low_prices = close_prices * 0.98
-                volumes = np.abs(np.random.normal(1e6, 2e5, 30))
+                volumes = np.abs(np.random.normal(1e6, 2e5, 200))
 
                 df = pd.DataFrame({
                     'timestamp': dates,
@@ -318,27 +318,27 @@ def get_rating(signals):
 
 def generate_chart_image(df, symbol, timeframe):
     """
-    Generate a candlestick chart with EMAs from the DataFrame (last 30 days).
+    Generate a candlestick chart with EMAs (last 30 days) with vibrant, thick lines.
     Returns a BytesIO object ready to be sent as a Discord file.
     """
     # Use last 30 days for chart
     df_chart = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
     df_chart.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     
-    # Add EMAs as overlays
+    # Add EMAs as overlays with vibrant colors and thicker lines
     apds = []
-    if not df['ema5'].isna().all():
-        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='green', width=0.8, label='EMA5'))
-    if not df['ema13'].isna().all():
-        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='yellow', width=0.8, label='EMA13'))
-    if not df['ema50'].isna().all():
-        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='red', width=0.8, label='EMA50'))
-    if not df['ema200'].isna().all():
-        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='purple', width=0.8, label='EMA200'))
+    if not df['ema5'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='lime', width=2.0, label='EMA5'))
+    if not df['ema13'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='gold', width=2.0, label='EMA13'))
+    if not df['ema50'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='crimson', width=2.0, label='EMA50'))
+    if not df['ema200'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='darkviolet', width=2.0, label='EMA200'))
     
-    # Style
-    mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', wick='inherit', volume='in')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=False)
+    # Style with vibrant colors
+    mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
     
     # Create figure
     fig, axes = mpf.plot(
@@ -350,12 +350,17 @@ def generate_chart_image(df, symbol, timeframe):
         figsize=(10, 6),
         returnfig=True,
         title=f'{symbol} – {timeframe} (last 30)',
-        tight_layout=True
+        tight_layout=True,
+        ylabel='Price (USD)'
     )
+    
+    # Adjust legend
+    if apds:
+        axes[0].legend(loc='upper left')
     
     # Save to bytes buffer
     buf = io.BytesIO()
-    fig.savefig(buf, format='PNG', dpi=100)
+    fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
     buf.seek(0)
     plt.close(fig)
     return buf
@@ -429,7 +434,7 @@ def format_embed(symbol, signals, timeframe):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
-    # Build embed – we'll put EMAs as the last field before the chart image
+    # Build embed – EMAs as last field before chart
     embed = discord.Embed(
         title=f"{rating}",
         description=f"**{symbol}** · ${signals['price']:.2f}",
@@ -469,11 +474,12 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication
+    # Deduplication with timestamp (cleans old entries)
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
     now_ts = datetime.now().timestamp()
+    # Remove entries older than 10 seconds
     to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
     for mid in to_remove:
         del bot.processed_msgs[mid]
@@ -626,7 +632,7 @@ async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
 `!scan all [timeframe]` – Scan all watchlist symbols (full overview).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
+`!scan SYMBOL [timeframe]` – Scan a single symbol (with vibrant chart).
 `!signals [timeframe]` – Scan only symbols with active signals.
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
