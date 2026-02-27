@@ -19,7 +19,7 @@ import io
 
 # === CONFIGURATION ===
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
-TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
+TWELVEDATA_API_KEY = os.getgetenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PORT = int(os.getenv('PORT', 10000))
 
@@ -30,6 +30,7 @@ bot._skip_check = lambda x, y: False
 
 WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
+cancellation_flags = {}  # user_id -> bool (True means cancel requested)
 
 # ====================
 # WEB SERVER (keeps Render happy)
@@ -53,19 +54,33 @@ async def start_web_server():
 # ====================
 
 def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE) as f:
-            return json.load(f)
-    default = {
-        "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
-    }
-    save_watchlist(default)
-    return default
+    try:
+        if os.path.exists(WATCHLIST_FILE):
+            with open(WATCHLIST_FILE, 'r') as f:
+                return json.load(f)
+        else:
+            default = {
+                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
+                "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+            }
+            save_watchlist(default)
+            return default
+    except Exception as e:
+        print(f"❌ Error loading watchlist: {e}")
+        return {
+            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
+            "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+        }
 
 def save_watchlist(watchlist):
-    with open(WATCHLIST_FILE, 'w') as f:
-        json.dump(watchlist, f, indent=2)
+    try:
+        with open(WATCHLIST_FILE, 'w') as f:
+            json.dump(watchlist, f, indent=2)
+        print(f"✅ Watchlist saved successfully")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving watchlist: {e}")
+        return False
 
 def normalize_symbol(symbol):
     symbol = symbol.upper()
@@ -173,7 +188,7 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC (200 points)
+                # Create synthetic OHLC
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
@@ -355,24 +370,18 @@ def generate_chart_image(df, symbol, timeframe):
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
     apds = []
-    # EMA5 – bright green
     if not df['ema5'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema5'].tail(30), color='#00ff00', width=2.5, label='EMA5'))
-    # EMA13 – bright gold
     if not df['ema13'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema13'].tail(30), color='#ffd700', width=2.5, label='EMA13'))
-    # EMA50 – bright red
     if not df['ema50'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema50'].tail(30), color='#ff4444', width=2.5, label='EMA50'))
-    # EMA200 – bright magenta, extra thick to stand out
     if not df['ema200'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema200'].tail(30), color='#ff00ff', width=3.5, label='EMA200'))
 
-    # Market colors
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
 
-    # Plot
     fig, axes = mpf.plot(
         chart_data,
         type='candle',
@@ -386,7 +395,6 @@ def generate_chart_image(df, symbol, timeframe):
         ylabel='Price (USD)'
     )
 
-    # Legend
     if apds:
         axes[0].legend(loc='upper left', fontsize='small')
 
@@ -493,12 +501,10 @@ async def check_duplicates(ctx, command_name, *args):
     2. Per‑user command + args (within 3 seconds)
     Returns True if duplicate, False otherwise.
     """
-    # Message ID check
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
     now_ts = datetime.now().timestamp()
-    # Clean old message IDs
     to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
     for mid in to_remove:
         del bot.processed_msgs[mid]
@@ -507,7 +513,6 @@ async def check_duplicates(ctx, command_name, *args):
         return True
     bot.processed_msgs[msg_id] = now_ts
 
-    # Per‑user command cooldown
     if not hasattr(bot, 'user_commands'):
         bot.user_commands = {}
     key = f"{ctx.author.id}:{command_name}:{':'.join(str(a) for a in args)}"
@@ -518,6 +523,25 @@ async def check_duplicates(ctx, command_name, *args):
         return True
     bot.user_commands[key] = now
     return False
+
+# ====================
+# SCAN CANCELLATION
+# ====================
+
+async def check_cancel(ctx):
+    """Check if the user has requested cancellation. If so, send a message and return True."""
+    user_id = ctx.author.id
+    if cancellation_flags.get(user_id, False):
+        cancellation_flags[user_id] = False  # clear flag
+        await ctx.send("🛑 Scan cancelled.")
+        return True
+    return False
+
+@bot.command(name='stopscan')
+async def stop_scan(ctx):
+    """Stops any ongoing scan initiated by the user."""
+    cancellation_flags[ctx.author.id] = True
+    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
 
 # ====================
 # DISCORD EVENTS & COMMANDS
@@ -539,6 +563,9 @@ async def ping(ctx):
     await ctx.send('pong')
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
+    # Check cancellation before processing symbol
+    if await check_cancel(ctx):
+        return False
     df = calculate_indicators(df)
     signals = get_signals(df)
     embed = format_embed(symbol, signals, timeframe)
@@ -550,14 +577,13 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     else:
         embed.add_field(name="📊 Chart", value="*Insufficient data for chart*", inline=False)
         await ctx.send(embed=embed)
+    return True
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication
     if await check_duplicates(ctx, 'scan', target, timeframe):
         return
 
-    # Cooldown per user (5 seconds)
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -585,11 +611,15 @@ async def scan(ctx, target='all', timeframe='daily'):
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
+        if await check_cancel(ctx):
+            break
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
             await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
+    # Clear cancellation flag after finishing
+    cancellation_flags[ctx.author.id] = False
     await ctx.send("Scan complete.")
 
 @bot.command(name='signals')
@@ -615,6 +645,8 @@ async def signals(ctx, timeframe='daily'):
 
     found_any = False
     for symbol in symbols:
+        if await check_cancel(ctx):
+            break
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
             df_calc = calculate_indicators(df)
@@ -624,8 +656,9 @@ async def signals(ctx, timeframe='daily'):
                 await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
-    if not found_any:
+    if not found_any and not cancellation_flags.get(ctx.author.id, False):
         await ctx.send("No symbols with active signals found.")
+    cancellation_flags[ctx.author.id] = False
     await ctx.send("Signal scan complete.")
 
 @bot.command(name='news')
@@ -677,15 +710,19 @@ async def add_symbol(ctx, symbol):
     if '/' in symbol:
         if symbol not in watchlist['crypto']:
             watchlist['crypto'].append(symbol)
-            save_watchlist(watchlist)
-            await ctx.send(f"Added {symbol} to crypto watchlist.")
+            if save_watchlist(watchlist):
+                await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+            else:
+                await ctx.send(f"❌ Could not save watchlist. Please check logs.")
         else:
             await ctx.send(f"{symbol} already in crypto watchlist.")
     else:
         if symbol not in watchlist['stocks']:
             watchlist['stocks'].append(symbol)
-            save_watchlist(watchlist)
-            await ctx.send(f"Added {symbol} to stocks watchlist.")
+            if save_watchlist(watchlist):
+                await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+            else:
+                await ctx.send(f"❌ Could not save watchlist. Please check logs.")
         else:
             await ctx.send(f"{symbol} already in stocks watchlist.")
 
@@ -701,8 +738,10 @@ async def remove_symbol(ctx, symbol):
         watchlist['crypto'].remove(symbol)
         removed = True
     if removed:
-        save_watchlist(watchlist)
-        await ctx.send(f"Removed {symbol} from watchlist.")
+        if save_watchlist(watchlist):
+            await ctx.send(f"✅ Removed {symbol} from watchlist.")
+        else:
+            await ctx.send(f"❌ Could not save watchlist. Please check logs.")
     else:
         await ctx.send(f"{symbol} not found in watchlist.")
 
@@ -725,6 +764,7 @@ async def help_command(ctx):
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
 `!ping` – Test if bot is responsive.
+`!stopscan` – Stops any ongoing scan.
 `!help` – This message.
     """
     await ctx.send(help_text)
