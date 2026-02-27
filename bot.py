@@ -400,9 +400,9 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
+    print("🔥 on_message triggered!")  # Debug line to see if any message is received
     if message.author == bot.user:
         return
-    # Process the command only once
     await bot.process_commands(message)
 
 @bot.command(name='ping')
