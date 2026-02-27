@@ -173,7 +173,7 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC (enough for indicators but maybe not for chart)
+                # Create synthetic OHLC
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
@@ -348,15 +348,12 @@ def generate_chart_image(df, symbol, timeframe):
     Returns a BytesIO object ready to be sent as a Discord file.
     If insufficient data, returns None.
     """
-    # Need at least 20 data points for a decent chart
     if len(df) < 20:
         return None
 
-    # Use last 30 days or all available if less
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    # Add EMAs as overlays with vibrant colors and thicker lines
     apds = []
     if not df['ema5'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema5'].tail(30), color='lime', width=2.0, label='EMA5'))
@@ -367,11 +364,9 @@ def generate_chart_image(df, symbol, timeframe):
     if not df['ema200'].tail(30).isna().all():
         apds.append(mpf.make_addplot(df['ema200'].tail(30), color='darkviolet', width=2.0, label='EMA200'))
 
-    # Style
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
 
-    # Create figure
     fig, axes = mpf.plot(
         chart_data,
         type='candle',
@@ -388,7 +383,6 @@ def generate_chart_image(df, symbol, timeframe):
     if apds:
         axes[0].legend(loc='upper left')
 
-    # Save to bytes buffer
     buf = io.BytesIO()
     fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
     buf.seek(0)
@@ -452,7 +446,6 @@ def format_embed(symbol, signals, timeframe):
     stop_loss = support
     target = resistance + (resistance - support)
 
-    # Colored and sorted EMAs
     ema_items = [
         (signals['ema5'], '5', '🟢'),
         (signals['ema13'], '13', '🟡'),
@@ -464,7 +457,6 @@ def format_embed(symbol, signals, timeframe):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
-    # Build embed – EMAs as last field before chart
     embed = discord.Embed(
         title=f"{rating}",
         description=f"**{symbol}** · ${signals['price']:.2f}",
@@ -482,6 +474,43 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
     embed.set_footer(text=f"{sym_type} · {timeframe} timeframe")
     return embed
+
+# ====================
+# DEDUPLICATION HELPERS
+# ====================
+
+async def check_duplicates(ctx, command_name, *args):
+    """
+    Two‑layer deduplication:
+    1. Message ID (within 10 seconds)
+    2. Per‑user command + args (within 3 seconds)
+    Returns True if duplicate, False otherwise.
+    """
+    # Message ID check
+    if not hasattr(bot, 'processed_msgs'):
+        bot.processed_msgs = {}
+    msg_id = ctx.message.id
+    now_ts = datetime.now().timestamp()
+    # Clean old message IDs
+    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
+    for mid in to_remove:
+        del bot.processed_msgs[mid]
+    if msg_id in bot.processed_msgs:
+        print(f"Ignoring duplicate message {msg_id}")
+        return True
+    bot.processed_msgs[msg_id] = now_ts
+
+    # Per‑user command cooldown
+    if not hasattr(bot, 'user_commands'):
+        bot.user_commands = {}
+    key = f"{ctx.author.id}:{command_name}:{':'.join(str(a) for a in args)}"
+    now = datetime.now()
+    last = bot.user_commands.get(key)
+    if last and (now - last) < timedelta(seconds=3):
+        print(f"Ignoring duplicate command from user {ctx.author.id} for {command_name}")
+        return True
+    bot.user_commands[key] = now
+    return False
 
 # ====================
 # DISCORD EVENTS & COMMANDS
@@ -503,7 +532,6 @@ async def ping(ctx):
     await ctx.send('pong')
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    """Helper to send embed + chart for a single symbol."""
     df = calculate_indicators(df)
     signals = get_signals(df)
     embed = format_embed(symbol, signals, timeframe)
@@ -518,19 +546,11 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication with timestamp (clean old entries)
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
+    # Deduplication
+    if await check_duplicates(ctx, 'scan', target, timeframe):
         return
-    bot.processed_msgs[msg_id] = now_ts
 
+    # Cooldown per user (5 seconds)
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -555,7 +575,6 @@ async def scan(ctx, target='all', timeframe='daily'):
         await send_symbol_with_chart(ctx, symbol, df, timeframe)
         return
 
-    # Full scan (all symbols, with charts)
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
@@ -568,18 +587,8 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
-    # Deduplication
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
+    if await check_duplicates(ctx, 'signals', timeframe):
         return
-    bot.processed_msgs[msg_id] = now_ts
 
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
@@ -602,8 +611,8 @@ async def signals(ctx, timeframe='daily'):
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
             df_calc = calculate_indicators(df)
-            signals = get_signals(df_calc)
-            if signals and signals['net_score'] != 0:
+            sig = get_signals(df_calc)
+            if sig and sig['net_score'] != 0:
                 found_any = True
                 await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
@@ -614,19 +623,8 @@ async def signals(ctx, timeframe='daily'):
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
-    """Fetches the latest news for a given stock ticker."""
-    # Deduplication
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
+    if await check_duplicates(ctx, 'news', ticker, limit):
         return
-    bot.processed_msgs[msg_id] = now_ts
 
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
@@ -639,13 +637,12 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
     news_data = await fetch_stock_news(ticker.upper())
 
     if not news_data or len(news_data) == 0:
-        await ctx.send(f"Could not fetch news for {ticker.upper()}. The ticker might be invalid or there's been an API error.")
+        await ctx.send(f"Could not fetch news for {ticker.upper()}.")
         return
 
     embed = discord.Embed(
         title=f"Latest News for {ticker.upper()}",
-        color=0x3498db,
-        url=f"https://finnhub.io"
+        color=0x3498db
     )
 
     for article in news_data[:limit]:
