@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import aiohttp
+from aiohttp import web
 import pandas as pd
 import numpy as np
 import ta
@@ -12,14 +13,32 @@ from datetime import datetime, timedelta
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+PORT = int(os.getenv('PORT', 10000))
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
-bot._skip_check = lambda x, y: False  # Prevents duplicate command processing
+bot._skip_check = lambda x, y: False
 
 WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
+
+# ====================
+# WEB SERVER (keeps Render happy)
+# ====================
+
+async def handle_health(request):
+    return web.Response(text="OK")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', handle_health)
+    app.router.add_get('/health', handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"✅ Web server running on port {PORT}")
 
 # ====================
 # HELPER FUNCTIONS
@@ -300,7 +319,6 @@ def format_embed(symbol, signals, timeframe):
     sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
 
-    # Volume status
     if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
         vol_ratio = signals['volume'] / signals['volume_avg']
         if vol_ratio > 1.5:
@@ -313,7 +331,6 @@ def format_embed(symbol, signals, timeframe):
     else:
         vol_display = "N/A (no volume data)"
 
-    # Build reason string
     reasons = []
     if signals['ema5_cross_above_13']:
         reasons.append("EMA5 ↑ EMA13")
@@ -340,7 +357,6 @@ def format_embed(symbol, signals, timeframe):
 
     reason_str = " | ".join(reasons)
 
-    # Bollinger Bands status
     if signals['overbought_triangle']:
         bb_status = "🔴 Overbought (touch)"
     elif signals['oversold_triangle']:
@@ -348,25 +364,22 @@ def format_embed(symbol, signals, timeframe):
     else:
         bb_status = "⚪ Normal"
 
-    # Support, Resistance, Stop Loss, Target
     support = signals['support_20']
     resistance = signals['resistance_20']
     stop_loss = support
     target = resistance + (resistance - support)
 
-    # ===== Colored and sorted EMAs =====
+    # Colored and sorted EMAs
     ema_items = [
         (signals['ema5'], '5', '🟢'),
         (signals['ema13'], '13', '🟡'),
         (signals['ema50'], '50', '🔴'),
         (signals['ema200'], '200', '🟣')
     ]
-    # Filter out NaN values and sort descending (highest to lowest)
     valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
     valid_items.sort(reverse=True)
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
-    # ===================================
 
     embed = discord.Embed(
         title=f"{rating}",
@@ -376,17 +389,13 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
     embed.add_field(name="Volume", value=vol_display, inline=True)
-
     embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
-
     embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
     embed.add_field(name="Reason", value=reason_str, inline=False)
-
     embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
     embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
     embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
     embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
-
     embed.set_footer(text=f"{sym_type} · {timeframe} timeframe")
     return embed
 
@@ -400,7 +409,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message):
-    print("🔥 on_message triggered!")  # Debug line to see if any message is received
+    print("🔥 on_message triggered!")
     if message.author == bot.user:
         return
     await bot.process_commands(message)
@@ -411,6 +420,16 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
+    # Deduplication by message ID
+    if not hasattr(bot, 'last_msg_id'):
+        bot.last_msg_id = {}
+    if ctx.message.id in bot.last_msg_id:
+        return
+    bot.last_msg_id[ctx.message.id] = True
+    if len(bot.last_msg_id) > 100:
+        bot.last_msg_id.clear()
+
+    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -508,5 +527,13 @@ async def help_command(ctx):
     """
     await ctx.send(help_text)
 
+# ====================
+# MAIN ENTRY POINT
+# ====================
+
+async def main():
+    asyncio.create_task(start_web_server())
+    await bot.start(DISCORD_TOKEN)
+
 if __name__ == '__main__':
-    bot.run(DISCORD_TOKEN)
+    asyncio.run(main())
