@@ -10,6 +10,13 @@ import json
 import os
 from datetime import datetime, timedelta
 
+# Charting libraries
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import io
+
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -24,7 +31,7 @@ WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
 
 # ====================
-# WEB SERVER (keeps Render happy)
+# WEB SERVER
 # ====================
 
 async def handle_health(request):
@@ -83,7 +90,7 @@ async def fetch_twelvedata(symbol, timeframe):
         'symbol': symbol,
         'interval': interval,
         'apikey': TWELVEDATA_API_KEY,
-        'outputsize': 200,
+        'outputsize': 30,  # Only need last 30 days for chart
         'format': 'JSON'
     }
 
@@ -166,12 +173,12 @@ async def fetch_coingecko_price(symbol):
                     return None
                 # Create synthetic OHLC
                 np.random.seed(42)
-                dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
-                close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
+                dates = pd.date_range(end=datetime.now(), periods=30, freq='D')
+                close_prices = price * (1 + np.random.normal(0, 0.01, 30).cumsum() * 0.01)
                 open_prices = close_prices * 0.99
                 high_prices = close_prices * 1.02
                 low_prices = close_prices * 0.98
-                volumes = np.abs(np.random.normal(1e6, 2e5, 200))
+                volumes = np.abs(np.random.normal(1e6, 2e5, 30))
 
                 df = pd.DataFrame({
                     'timestamp': dates,
@@ -189,15 +196,12 @@ async def fetch_coingecko_price(symbol):
 
 async def fetch_ohlcv(symbol, timeframe):
     if '/' in symbol:  # crypto
-        # Layer 1: CoinGecko OHLC
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
-        # Layer 2: CoinGecko price (synthetic)
         df = await fetch_coingecko_price(symbol)
         if df is not None:
             return df
-        # Layer 3: Twelve Data (final fallback)
         print(f"Trying Twelve Data as final fallback for {symbol}")
         return await fetch_twelvedata(symbol, timeframe)
     else:
@@ -312,37 +316,51 @@ def get_rating(signals):
     else:
         return "NEUTRAL", 0xffff00
 
-def generate_minichart(df, signals):
-    """Create a text-based mini chart (sparkline) and key levels."""
-    closes = df['close'].tail(15).values  # last 15 closes
-    if len(closes) < 2:
-        return "Insufficient data"
+def generate_chart_image(df, symbol, timeframe):
+    """
+    Generate a candlestick chart with EMAs from the DataFrame (last 30 days).
+    Returns a BytesIO object ready to be sent as a Discord file.
+    """
+    # Use last 30 days for chart
+    df_chart = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
+    df_chart.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     
-    # Normalize for sparkline
-    min_c, max_c = min(closes), max(closes)
-    if max_c > min_c:
-        levels = np.interp(closes, (min_c, max_c), (0, 7)).astype(int)
-        spark_chars = ['▁','▂','▃','▄','▅','▆','▇','█']
-        sparkline = ''.join(spark_chars[i] for i in levels)
-    else:
-        sparkline = "▁" * len(closes)
+    # Add EMAs as overlays
+    apds = []
+    if not df['ema5'].isna().all():
+        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='green', width=0.8, label='EMA5'))
+    if not df['ema13'].isna().all():
+        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='yellow', width=0.8, label='EMA13'))
+    if not df['ema50'].isna().all():
+        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='red', width=0.8, label='EMA50'))
+    if not df['ema200'].isna().all():
+        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='purple', width=0.8, label='EMA200'))
     
-    # Key levels (support/resistance from signals)
-    support = signals['support_20']
-    resistance = signals['resistance_20']
-    price = signals['price']
+    # Style
+    mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', wick='inherit', volume='in')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle=':', y_on_right=False)
     
-    # Determine where price sits relative to levels
-    if price <= support * 1.02:
-        pos = "near support"
-    elif price >= resistance * 0.98:
-        pos = "near resistance"
-    else:
-        pos = "mid range"
+    # Create figure
+    fig, axes = mpf.plot(
+        df_chart,
+        type='candle',
+        style=s,
+        addplot=apds,
+        volume=True,
+        figsize=(10, 6),
+        returnfig=True,
+        title=f'{symbol} – {timeframe} (last 30)',
+        tight_layout=True
+    )
     
-    return f"`{sparkline}`  \nPrice: ${price:.2f} ({pos})\nSupport: ${support:.2f} | Resistance: ${resistance:.2f}"
+    # Save to bytes buffer
+    buf = io.BytesIO()
+    fig.savefig(buf, format='PNG', dpi=100)
+    buf.seek(0)
+    plt.close(fig)
+    return buf
 
-def format_embed(symbol, signals, timeframe, df):
+def format_embed(symbol, signals, timeframe):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
@@ -411,9 +429,7 @@ def format_embed(symbol, signals, timeframe, df):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
-    # Mini chart
-    chart_text = generate_minichart(df, signals)
-
+    # Build embed – we'll put EMAs as the last field before the chart image
     embed = discord.Embed(
         title=f"{rating}",
         description=f"**{symbol}** · ${signals['price']:.2f}",
@@ -422,14 +438,13 @@ def format_embed(symbol, signals, timeframe, df):
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
     embed.add_field(name="Volume", value=vol_display, inline=True)
-    embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
-    embed.add_field(name="📊 Mini Chart", value=chart_text, inline=False)
     embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
     embed.add_field(name="Reason", value=reason_str, inline=False)
     embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
     embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
     embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
     embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
+    embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
     embed.set_footer(text=f"{sym_type} · {timeframe} timeframe")
     return embed
 
@@ -467,7 +482,6 @@ async def scan(ctx, target='all', timeframe='daily'):
         return
     bot.processed_msgs[msg_id] = now_ts
 
-    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -491,8 +505,17 @@ async def scan(ctx, target='all', timeframe='daily'):
             return
         df = calculate_indicators(df)
         signals = get_signals(df)
-        embed = format_embed(symbol, signals, timeframe, df)
-        await ctx.send(embed=embed)
+        embed = format_embed(symbol, signals, timeframe)
+
+        # Generate chart and attach
+        try:
+            chart_buffer = generate_chart_image(df, symbol, timeframe)
+            file = discord.File(chart_buffer, filename='chart.png')
+            embed.set_image(url='attachment://chart.png')
+            await ctx.send(embed=embed, file=file)
+        except Exception as e:
+            print(f"Chart generation failed: {e}")
+            await ctx.send(embed=embed)  # fallback
         return
 
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
@@ -502,7 +525,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         if df is not None and not df.empty:
             df = calculate_indicators(df)
             signals = get_signals(df)
-            embed = format_embed(symbol, signals, timeframe, df)
+            embed = format_embed(symbol, signals, timeframe)
             await ctx.send(embed=embed)
         await asyncio.sleep(8)
 
@@ -523,7 +546,6 @@ async def signals(ctx, timeframe='daily'):
         return
     bot.processed_msgs[msg_id] = now_ts
 
-    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -548,7 +570,7 @@ async def signals(ctx, timeframe='daily'):
             signals = get_signals(df)
             if signals and signals['net_score'] != 0:
                 found_any = True
-                embed = format_embed(symbol, signals, timeframe, df)
+                embed = format_embed(symbol, signals, timeframe)
                 await ctx.send(embed=embed)
         await asyncio.sleep(8)
 
@@ -604,8 +626,8 @@ async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
 `!scan all [timeframe]` – Scan all watchlist symbols (full overview).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (with mini chart).
-`!signals [timeframe]` – Scan only symbols with active bullish/bearish signals.
+`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
+`!signals [timeframe]` – Scan only symbols with active signals.
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
