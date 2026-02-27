@@ -173,7 +173,7 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC
+                # Create synthetic OHLC (200 points)
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
@@ -355,18 +355,24 @@ def generate_chart_image(df, symbol, timeframe):
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
     apds = []
+    # EMA5 – bright green
     if not df['ema5'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='lime', width=2.0, label='EMA5'))
+        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='#00ff00', width=2.5, label='EMA5'))
+    # EMA13 – bright gold
     if not df['ema13'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='gold', width=2.0, label='EMA13'))
+        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='#ffd700', width=2.5, label='EMA13'))
+    # EMA50 – bright red
     if not df['ema50'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='crimson', width=2.0, label='EMA50'))
+        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='#ff4444', width=2.5, label='EMA50'))
+    # EMA200 – bright magenta, extra thick to stand out
     if not df['ema200'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='darkviolet', width=2.0, label='EMA200'))
+        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='#ff00ff', width=3.5, label='EMA200'))
 
+    # Market colors
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
 
+    # Plot
     fig, axes = mpf.plot(
         chart_data,
         type='candle',
@@ -380,8 +386,9 @@ def generate_chart_image(df, symbol, timeframe):
         ylabel='Price (USD)'
     )
 
+    # Legend
     if apds:
-        axes[0].legend(loc='upper left')
+        axes[0].legend(loc='upper left', fontsize='small')
 
     buf = io.BytesIO()
     fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
