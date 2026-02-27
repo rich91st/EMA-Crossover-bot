@@ -502,6 +502,20 @@ async def on_message(message):
 async def ping(ctx):
     await ctx.send('pong')
 
+async def send_symbol_with_chart(ctx, symbol, df, timeframe):
+    """Helper to send embed + chart for a single symbol."""
+    df = calculate_indicators(df)
+    signals = get_signals(df)
+    embed = format_embed(symbol, signals, timeframe)
+    chart_buffer = generate_chart_image(df, symbol, timeframe)
+    if chart_buffer:
+        file = discord.File(chart_buffer, filename='chart.png')
+        embed.set_image(url='attachment://chart.png')
+        await ctx.send(embed=embed, file=file)
+    else:
+        embed.add_field(name="📊 Chart", value="*Insufficient data for chart*", inline=False)
+        await ctx.send(embed=embed)
+
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
     # Deduplication with timestamp (clean old entries)
@@ -538,32 +552,16 @@ async def scan(ctx, target='all', timeframe='daily'):
         if df is None or df.empty:
             await ctx.send(f"Could not fetch data for {symbol}.")
             return
-        df = calculate_indicators(df)
-        signals = get_signals(df)
-        embed = format_embed(symbol, signals, timeframe)
-
-        # Generate chart if enough data
-        chart_buffer = generate_chart_image(df, symbol, timeframe)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            embed.set_image(url='attachment://chart.png')
-            await ctx.send(embed=embed, file=file)
-        else:
-            # Still send embed but indicate chart not available
-            embed.add_field(name="📊 Chart", value="*Insufficient data for chart*", inline=False)
-            await ctx.send(embed=embed)
+        await send_symbol_with_chart(ctx, symbol, df, timeframe)
         return
 
-    # Full scan (all symbols, no charts)
+    # Full scan (all symbols, with charts)
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
     for symbol in symbols:
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
-            df = calculate_indicators(df)
-            signals = get_signals(df)
-            embed = format_embed(symbol, signals, timeframe)
-            await ctx.send(embed=embed)
+            await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
     await ctx.send("Scan complete.")
@@ -603,12 +601,11 @@ async def signals(ctx, timeframe='daily'):
     for symbol in symbols:
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
-            df = calculate_indicators(df)
-            signals = get_signals(df)
+            df_calc = calculate_indicators(df)
+            signals = get_signals(df_calc)
             if signals and signals['net_score'] != 0:
                 found_any = True
-                embed = format_embed(symbol, signals, timeframe)
-                await ctx.send(embed=embed)
+                await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
     if not found_any:
@@ -631,7 +628,6 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         return
     bot.processed_msgs[msg_id] = now_ts
 
-    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -646,14 +642,12 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         await ctx.send(f"Could not fetch news for {ticker.upper()}. The ticker might be invalid or there's been an API error.")
         return
 
-    # Create an embed for the news
     embed = discord.Embed(
         title=f"Latest News for {ticker.upper()}",
-        color=0x3498db,  # Blue
+        color=0x3498db,
         url=f"https://finnhub.io"
     )
 
-    # Limit the number of articles shown
     for article in news_data[:limit]:
         headline = article.get('headline', 'No Headline')
         source = article.get('source', 'Unknown')
@@ -719,9 +713,9 @@ async def list_watchlist(ctx):
 async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols (full overview).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart if enough data).
-`!signals [timeframe]` – Scan only symbols with active signals.
+`!scan all [timeframe]` – Scan all watchlist symbols (full overview with charts).
+`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
+`!signals [timeframe]` – Scan only symbols with active signals (with charts).
 `!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`).
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
