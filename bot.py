@@ -19,7 +19,7 @@ import io
 
 # === CONFIGURATION ===
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
-TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')  # FIXED: was getgetenv
+TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 PORT = int(os.getenv('PORT', 10000))
 
@@ -30,7 +30,7 @@ bot._skip_check = lambda x, y: False
 
 WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
-cancellation_flags = {}  # user_id -> bool (True means cancel requested)
+cancellation_flags = {}
 
 # ====================
 # WEB SERVER (keeps Render happy)
@@ -226,7 +226,6 @@ async def fetch_ohlcv(symbol, timeframe):
 
 # ----- Finnhub News Fetching -----
 async def fetch_stock_news(symbol):
-    """Fetches latest news for a given stock symbol from Finnhub."""
     url = "https://finnhub.io/api/v1/company-news"
     params = {
         'symbol': symbol,
@@ -358,11 +357,6 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 def generate_chart_image(df, symbol, timeframe):
-    """
-    Generate a candlestick chart with EMAs (last 30 days) with vibrant, thick lines.
-    Returns a BytesIO object ready to be sent as a Discord file.
-    If insufficient data, returns None.
-    """
     if len(df) < 20:
         return None
 
@@ -495,12 +489,6 @@ def format_embed(symbol, signals, timeframe):
 # ====================
 
 async def check_duplicates(ctx, command_name, *args):
-    """
-    Two‑layer deduplication:
-    1. Message ID (within 10 seconds)
-    2. Per‑user command + args (within 3 seconds)
-    Returns True if duplicate, False otherwise.
-    """
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
@@ -529,17 +517,15 @@ async def check_duplicates(ctx, command_name, *args):
 # ====================
 
 async def check_cancel(ctx):
-    """Check if the user has requested cancellation. If so, send a message and return True."""
     user_id = ctx.author.id
     if cancellation_flags.get(user_id, False):
-        cancellation_flags[user_id] = False  # clear flag
+        cancellation_flags[user_id] = False
         await ctx.send("🛑 Scan cancelled.")
         return True
     return False
 
 @bot.command(name='stopscan')
 async def stop_scan(ctx):
-    """Stops any ongoing scan initiated by the user."""
     cancellation_flags[ctx.author.id] = True
     await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
 
@@ -563,7 +549,6 @@ async def ping(ctx):
     await ctx.send('pong')
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    # Check cancellation before processing symbol
     if await check_cancel(ctx):
         return False
     df = calculate_indicators(df)
@@ -618,7 +603,6 @@ async def scan(ctx, target='all', timeframe='daily'):
             await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
-    # Clear cancellation flag after finishing
     cancellation_flags[ctx.author.id] = False
     await ctx.send("Scan complete.")
 
