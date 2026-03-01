@@ -112,100 +112,17 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
-# ----- Stock/Crypto Data Fetching (with detailed logging and timeouts) -----
-async def fetch_coingecko_ohlc(symbol, timeframe):
-    base = symbol.split('/')[0].lower()
-    coin_map = {
-        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
-        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
-    }
-    coin_id = coin_map.get(base)
-    if not coin_id:
-        print(f"CoinGecko: no coin_id for {symbol}")
-        return None
+# ----- Helper for crypto symbol conversion (for Finnhub) -----
+def finnhub_crypto_symbol(symbol):
+    """Convert 'BTC/USD' to 'BINANCE:BTCUSDT' (or similar). Adjust exchange as needed."""
+    if '/' in symbol:
+        base, quote = symbol.split('/')
+        # For Finnhub, common format is 'BINANCE:BASEQUOTE' (e.g., BINANCE:BTCUSDT)
+        # Note: Some cryptos might use different exchanges. You can modify this mapping.
+        return f"BINANCE:{base}{quote}"
+    return symbol  # fallback (should not happen)
 
-    days_map = {'daily': 30, 'weekly': 90, '4h': 7}
-    days = days_map.get(timeframe)
-    if not days:
-        return None
-
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {'vs_currency': 'usd', 'days': days}
-    print(f"📡 CoinGecko OHLC request for {symbol} (coin_id={coin_id})")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                if resp.status != 200:
-                    print(f"❌ CoinGecko OHLC error for {symbol}: status {resp.status}")
-                    return None
-                data = await resp.json()
-                if not data:
-                    print(f"⚠️ CoinGecko OHLC returned empty data for {symbol}")
-                    return None
-                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                df['volume'] = np.nan
-                print(f"✅ CoinGecko OHLC success for {symbol}")
-                return df
-    except asyncio.TimeoutError:
-        print(f"⏰ CoinGecko OHLC timeout for {symbol} (after 10 seconds)")
-        return None
-    except Exception as e:
-        print(f"❌ CoinGecko OHLC exception for {symbol}: {e}")
-        return None
-
-async def fetch_coingecko_price(symbol):
-    base = symbol.split('/')[0].lower()
-    coin_map = {
-        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
-        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
-    }
-    coin_id = coin_map.get(base)
-    if not coin_id:
-        print(f"CoinGecko price: no coin_id for {symbol}")
-        return None
-
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {'ids': coin_id, 'vs_currencies': 'usd'}
-    print(f"📡 CoinGecko price request for {symbol}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    print(f"❌ CoinGecko price error for {symbol}: status {resp.status}")
-                    return None
-                data = await resp.json()
-                price = data.get(coin_id, {}).get('usd')
-                if price is None:
-                    print(f"⚠️ CoinGecko price: no price for {coin_id}")
-                    return None
-                # Create synthetic OHLC
-                np.random.seed(42)
-                dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
-                close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
-                open_prices = close_prices * 0.99
-                high_prices = close_prices * 1.02
-                low_prices = close_prices * 0.98
-                volumes = np.abs(np.random.normal(1e6, 2e5, 200))
-
-                df = pd.DataFrame({
-                    'timestamp': dates,
-                    'open': open_prices,
-                    'high': high_prices,
-                    'low': low_prices,
-                    'close': close_prices,
-                    'volume': volumes
-                })
-                df.set_index('timestamp', inplace=True)
-                print(f"✅ Synthetic price data for {symbol}")
-                return df
-    except Exception as e:
-        print(f"❌ CoinGecko price exception for {symbol}: {e}")
-        return None
-
+# ----- Twelve Data fetch (for stocks and crypto) -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
@@ -243,21 +160,86 @@ async def fetch_twelvedata(symbol, timeframe):
         print(f"❌ Twelve Data exception for {symbol}: {e}")
         return None
 
-async def fetch_ohlcv(symbol, timeframe):
-    if '/' in symbol:  # crypto
-        print(f"🔍 Fetching crypto {symbol} via CoinGecko OHLC")
-        df = await fetch_coingecko_ohlc(symbol, timeframe)
-        if df is not None:
-            return df
-        print(f"⚠️ CoinGecko OHLC failed, trying CoinGecko price (synthetic)")
-        df = await fetch_coingecko_price(symbol)
-        if df is not None:
-            return df
-        print(f"⚠️ CoinGecko price failed, trying Twelve Data as final fallback")
-        return await fetch_twelvedata(symbol, timeframe)
+# ----- Finnhub fetch (for stocks and crypto) -----
+async def fetch_finnhub(symbol, timeframe):
+    # Finnhub uses different endpoints for stocks and crypto.
+    # Stocks: /stock/candle
+    # Crypto: /crypto/candle
+    # We'll detect by presence of '/' (crypto) and convert symbol.
+    is_crypto = '/' in symbol
+    if is_crypto:
+        # Convert to Finnhub crypto format
+        finnhub_sym = finnhub_crypto_symbol(symbol)
+        endpoint = "crypto/candle"
     else:
-        print(f"🔍 Fetching stock {symbol} via Twelve Data")
-        return await fetch_twelvedata(symbol, timeframe)
+        finnhub_sym = symbol
+        endpoint = "stock/candle"
+
+    # Map timeframe to Finnhub resolution
+    res_map = {'daily': 'D', 'weekly': 'W', '4h': '60'}  # 4h not directly supported, use 60min and resample later?
+    resolution = res_map.get(timeframe)
+    if not resolution:
+        return None
+
+    url = f"https://finnhub.io/api/v1/{endpoint}"
+    params = {
+        'symbol': finnhub_sym,
+        'resolution': resolution,
+        'from': int((datetime.now() - timedelta(days=200)).timestamp()),
+        'to': int(datetime.now().timestamp()),
+        'token': FINNHUB_API_KEY
+    }
+    print(f"📡 Finnhub request for {symbol} (as {finnhub_sym})")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"❌ Finnhub error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                if data.get('s') != 'ok':
+                    print(f"❌ Finnhub error for {symbol}: {data}")
+                    return None
+                # Finnhub returns arrays: t (timestamp), o, h, l, c, v
+                df = pd.DataFrame({
+                    'timestamp': data['t'],
+                    'open': data['o'],
+                    'high': data['h'],
+                    'low': data['l'],
+                    'close': data['c'],
+                    'volume': data['v']
+                })
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                df.set_index('timestamp', inplace=True)
+                df = df.sort_index()
+                # If we used 60min for 4h, we need to resample
+                if timeframe == '4h':
+                    df = df.resample('4H').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                print(f"✅ Finnhub success for {symbol}")
+                return df
+    except Exception as e:
+        print(f"❌ Finnhub exception for {symbol}: {e}")
+        return None
+
+# ----- Main fetch with fallback -----
+async def fetch_ohlcv(symbol, timeframe):
+    """Try Twelve Data first, then Finnhub."""
+    print(f"🔍 Fetching {symbol} via Twelve Data (primary)")
+    df = await fetch_twelvedata(symbol, timeframe)
+    if df is not None:
+        return df
+    print(f"⚠️ Twelve Data failed, trying Finnhub as fallback for {symbol}")
+    df = await fetch_finnhub(symbol, timeframe)
+    if df is not None:
+        return df
+    print(f"❌ Both Twelve Data and Finnhub failed for {symbol}")
+    return None
 
 # ----- Finnhub News Fetching -----
 async def fetch_stock_news(symbol):
@@ -281,7 +263,7 @@ async def fetch_stock_news(symbol):
         print(f"Error fetching news for {symbol}: {e}")
         return None
 
-# ----- Indicator Calculations -----
+# ----- Indicator Calculations (unchanged) -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
