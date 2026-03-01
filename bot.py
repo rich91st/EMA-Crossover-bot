@@ -347,12 +347,15 @@ def get_rating(signals):
     else:
         return "NEUTRAL", 0xffff00
 
-# ----- Chart Generation -----
+# ----- Chart Generation (fixed) -----
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
         return None
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+    # Check if volume data is all NaN
+    volume_all_nan = chart_data['Volume'].isna().all()
 
     apds = []
     if not df['ema5'].tail(30).isna().all():
@@ -367,24 +370,41 @@ def generate_chart_image(df, symbol, timeframe):
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
 
-    fig, axes = mpf.plot(
-        chart_data,
-        type='candle',
-        style=s,
-        addplot=apds,
-        volume=True,
-        figsize=(10,6),
-        returnfig=True,
-        title=f'{symbol} – {timeframe}',
-        tight_layout=True
-    )
-    if apds:
-        axes[0].legend(loc='upper left')
-    buf = io.BytesIO()
-    fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
-    buf.seek(0)
-    plt.close(fig)
-    return buf
+    try:
+        if volume_all_nan:
+            fig, axes = mpf.plot(
+                chart_data,
+                type='candle',
+                style=s,
+                addplot=apds,
+                volume=False,
+                figsize=(10,6),
+                returnfig=True,
+                title=f'{symbol} – {timeframe}',
+                tight_layout=True
+            )
+        else:
+            fig, axes = mpf.plot(
+                chart_data,
+                type='candle',
+                style=s,
+                addplot=apds,
+                volume=True,
+                figsize=(10,6),
+                returnfig=True,
+                title=f'{symbol} – {timeframe}',
+                tight_layout=True
+            )
+        if apds:
+            axes[0].legend(loc='upper left')
+        buf = io.BytesIO()
+        fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+    except Exception as e:
+        print(f"⚠️ Chart generation failed for {symbol}: {e}")
+        return None
 
 def format_embed(symbol, signals, timeframe):
     if not signals:
@@ -495,13 +515,16 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     df_calc = calculate_indicators(df)
     signals = get_signals(df_calc)
     embed = format_embed(symbol, signals, timeframe)
-    chart_buffer = generate_chart_image(df, symbol, timeframe)
-    if chart_buffer:
-        file = discord.File(chart_buffer, filename='chart.png')
-        embed.set_image(url='attachment://chart.png')
-        await ctx.send(embed=embed, file=file)
-    else:
-        # No chart generated (insufficient data)
+    try:
+        chart_buffer = generate_chart_image(df, symbol, timeframe)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='chart.png')
+            embed.set_image(url='attachment://chart.png')
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
         await ctx.send(embed=embed)
 
 @bot.command(name='scan')
