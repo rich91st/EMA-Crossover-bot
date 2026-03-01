@@ -20,8 +20,11 @@ import io
 import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
+# Apify for Yahoo Finance news
+from apify_client import ApifyClient
+
 # === CONFIGURATION ===
-FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')   # still used? Actually we're replacing news, but leave it in case.
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -240,25 +243,58 @@ async def fetch_ohlcv(symbol, timeframe):
     else:
         return await fetch_twelvedata(symbol, timeframe)
 
-# ----- Finnhub News Fetching (NEW) -----
+# ----- Yahoo Finance News (via Apify) -----
 async def fetch_stock_news(symbol):
-    url = "https://finnhub.io/api/v1/company-news"
-    params = {
-        'symbol': symbol,
-        'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
-        'to': datetime.now().strftime('%Y-%m-%d'),
-        'token': FINNHUB_API_KEY
-    }
+    """Fetch latest news for a stock using Yahoo Finance (via Apify)."""
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    print(f"Finnhub news error for {symbol}: status {resp.status}")
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, list) else None
+        # Initialize the Apify client (no token needed for public actors)
+        client = ApifyClient(token="")
+        
+        # Configure the actor input
+        run_input = {
+            "tickers": [symbol],      # e.g., ["AAPL"]
+            "maxArticles": 5,          # number of articles per ticker
+        }
+        
+        # Run the actor and wait for completion
+        run = client.actor("desmond-dev/yahoo-finance-news-ai").call(run_input=run_input)
+        
+        # Fetch the results from the dataset
+        items = list(client.dataset(run["defaultDatasetId"]).iterate_items())
+        
+        if not items or len(items) == 0:
+            print(f"⚠️ No news found for {symbol}")
+            return None
+        
+        # The results are nested – extract articles
+        articles = []
+        for item in items[0].get('articles', []):
+            # Parse the publication date (e.g., "2025-02-24T14:30:00.000Z")
+            published = item.get('publishedDate', '')
+            timestamp = 0
+            if published:
+                try:
+                    dt = datetime.strptime(published, '%Y-%m-%dT%H:%M:%S.%fZ')
+                    timestamp = int(dt.timestamp())
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(published, '%Y-%m-%dT%H:%M:%SZ')
+                        timestamp = int(dt.timestamp())
+                    except:
+                        pass  # fallback to 0
+            
+            articles.append({
+                'headline': item.get('title', 'No Headline'),
+                'source': item.get('publisher', 'Yahoo Finance'),
+                'datetime': timestamp,
+                'url': item.get('link', '')
+            })
+        
+        print(f"✅ Fetched {len(articles)} news articles for {symbol}")
+        return articles[:10]  # limit to 10 just in case
+        
     except Exception as e:
-        print(f"Error fetching news for {symbol}: {e}")
+        print(f"❌ Error fetching news for {symbol}: {e}")
         return None
 
 # ----- Indicator Calculations (unchanged) -----
@@ -666,7 +702,6 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         return
     user_busy[ctx.author.id] = True
     try:
-        # Simple cooldown (5 seconds)
         now = datetime.now()
         last = last_command_time.get(ctx.author.id)
         if last and (now - last) < timedelta(seconds=5):
@@ -687,7 +722,8 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         for article in news_data[:limit]:
             headline = article.get('headline', 'No Headline')
             source = article.get('source', 'Unknown')
-            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
+            timestamp = article.get('datetime', 0)
+            date = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M') if timestamp else 'Unknown'
             url = article.get('url', '')
             if len(headline) > 256:
                 headline = headline[:253] + "..."
