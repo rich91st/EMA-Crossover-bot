@@ -8,8 +8,9 @@ import ta
 import asyncio
 import json
 import os
+import warnings
 from datetime import datetime, timedelta
-import motor.motor_asyncio  # <-- new import
+import motor.motor_asyncio
 
 # Charting libraries
 import matplotlib
@@ -18,11 +19,14 @@ import matplotlib.pyplot as plt
 import mplfinance as mpf
 import io
 
+# Suppress harmless mplfinance warnings about all‑NaN volumes
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
+
 # === CONFIGURATION ===
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-MONGODB_URI = os.getenv('MONGODB_URI')          # <-- new env variable
+MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 
 # MongoDB setup
@@ -39,7 +43,7 @@ last_command_time = {}
 cancellation_flags = {}
 
 # ====================
-# WEB SERVER (keeps Render happy)
+# WEB SERVER
 # ====================
 
 async def handle_health(request):
@@ -60,7 +64,6 @@ async def start_web_server():
 # ====================
 
 async def load_watchlist():
-    """Load watchlist from MongoDB, or create default if not exists."""
     try:
         doc = await watchlist_collection.find_one({'_id': 'main'})
         if doc:
@@ -69,7 +72,6 @@ async def load_watchlist():
                 "crypto": doc.get('crypto', [])
             }
         else:
-            # Create default
             default = {
                 "_id": "main",
                 "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
@@ -79,14 +81,12 @@ async def load_watchlist():
             return default
     except Exception as e:
         print(f"❌ Error loading watchlist from MongoDB: {e}")
-        # Return default as fallback
         return {
             "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
             "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
         }
 
 async def save_watchlist(watchlist):
-    """Save watchlist to MongoDB."""
     try:
         await watchlist_collection.replace_one(
             {'_id': 'main'},
@@ -112,7 +112,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
-# ----- Stock/Crypto Data Fetching (unchanged) -----
+# ----- Stock/Crypto Data Fetching -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
@@ -167,7 +167,8 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
     params = {'vs_currency': 'usd', 'days': days}
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            # 10‑second timeout to avoid hanging
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     print(f"CoinGecko OHLC error for {symbol}: status {resp.status}")
                     return None
@@ -176,9 +177,13 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
                 df['volume'] = np.nan
+                print(f"✅ CoinGecko OHLC success for {symbol}")
                 return df
+    except asyncio.TimeoutError:
+        print(f"⏰ CoinGecko OHLC timeout for {symbol}")
+        return None
     except Exception as e:
-        print(f"CoinGecko OHLC exception for {symbol}: {e}")
+        print(f"❌ CoinGecko OHLC exception for {symbol}: {e}")
         return None
 
 async def fetch_coingecko_price(symbol):
@@ -223,13 +228,14 @@ async def fetch_coingecko_price(symbol):
                     'volume': volumes
                 })
                 df.set_index('timestamp', inplace=True)
+                print(f"✅ Synthetic price data for {symbol}")
                 return df
     except Exception as e:
         print(f"CoinGecko price exception for {symbol}: {e}")
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    if '/' in symbol:
+    if '/' in symbol:  # crypto
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
@@ -502,7 +508,7 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# DEDUPLICATION HELPERS (unchanged)
+# DEDUPLICATION HELPERS
 # ====================
 
 async def check_duplicates(ctx, command_name, *args):
@@ -530,7 +536,7 @@ async def check_duplicates(ctx, command_name, *args):
     return False
 
 # ====================
-# SCAN CANCELLATION (unchanged)
+# SCAN CANCELLATION
 # ====================
 
 async def check_cancel(ctx):
@@ -547,7 +553,7 @@ async def stop_scan(ctx):
     await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
 
 # ====================
-# DISCORD EVENTS & COMMANDS (unchanged except now using async watchlist functions)
+# DISCORD EVENTS & COMMANDS
 # ====================
 
 @bot.event
@@ -583,6 +589,9 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
+    # Debug: log every scan command
+    print(f"👀 scan command received for target={target}, timeframe={timeframe}")
+
     if await check_duplicates(ctx, 'scan', target, timeframe):
         return
 
@@ -625,6 +634,8 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
+    print(f"👀 signals command received, timeframe={timeframe}")
+
     if await check_duplicates(ctx, 'signals', timeframe):
         return
 
@@ -664,6 +675,8 @@ async def signals(ctx, timeframe='daily'):
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
+    print(f"👀 news command received for ticker={ticker}, limit={limit}")
+
     if await check_duplicates(ctx, 'news', ticker, limit):
         return
 
@@ -706,6 +719,8 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
+    print(f"👀 add command received for symbol={symbol}")
+
     symbol = normalize_symbol(symbol.upper())
     watchlist = await load_watchlist()
     if '/' in symbol:
@@ -729,6 +744,8 @@ async def add_symbol(ctx, symbol):
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
+    print(f"👀 remove command received for symbol={symbol}")
+
     symbol = normalize_symbol(symbol.upper())
     watchlist = await load_watchlist()
     removed = False
@@ -748,6 +765,7 @@ async def remove_symbol(ctx, symbol):
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
+    print(f"👀 list command received")
     watchlist = await load_watchlist()
     stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
     cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
