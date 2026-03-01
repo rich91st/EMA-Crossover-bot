@@ -9,18 +9,24 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta
+import motor.motor_asyncio  # <-- new import
 
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
+MONGODB_URI = os.getenv('MONGODB_URI')  # <-- new env variable
 PORT = int(os.getenv('PORT', 10000))
+
+# MongoDB setup
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
+db = client['trading_bot']
+watchlist_collection = db['watchlist']
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot._skip_check = lambda x, y: False
 
-WATCHLIST_FILE = 'watchlist.json'
 last_command_time = {}
 
 # ====================
@@ -41,23 +47,46 @@ async def start_web_server():
     print(f"✅ Web server running on port {PORT}")
 
 # ====================
-# HELPER FUNCTIONS
+# WATCHLIST FUNCTIONS (MongoDB)
 # ====================
 
-def load_watchlist():
-    if os.path.exists(WATCHLIST_FILE):
-        with open(WATCHLIST_FILE) as f:
-            return json.load(f)
-    default = {
-        "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-        "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
-    }
-    save_watchlist(default)
-    return default
+async def load_watchlist():
+    try:
+        doc = await watchlist_collection.find_one({'_id': 'main'})
+        if doc:
+            return {
+                "stocks": doc.get('stocks', []),
+                "crypto": doc.get('crypto', [])
+            }
+        else:
+            # Create default watchlist
+            default = {
+                "_id": "main",
+                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
+                "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+            }
+            await watchlist_collection.insert_one(default)
+            return default
+    except Exception as e:
+        print(f"❌ Error loading watchlist: {e}")
+        # Return default as fallback
+        return {
+            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
+            "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+        }
 
-def save_watchlist(watchlist):
-    with open(WATCHLIST_FILE, 'w') as f:
-        json.dump(watchlist, f, indent=2)
+async def save_watchlist(watchlist):
+    try:
+        await watchlist_collection.replace_one(
+            {'_id': 'main'},
+            {'_id': 'main', 'stocks': watchlist['stocks'], 'crypto': watchlist['crypto']},
+            upsert=True
+        )
+        print(f"✅ Watchlist saved")
+        return True
+    except Exception as e:
+        print(f"❌ Error saving watchlist: {e}")
+        return False
 
 def normalize_symbol(symbol):
     symbol = symbol.upper()
@@ -72,6 +101,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
+# ----- Data Fetching (unchanged from your working code) -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
@@ -189,15 +219,12 @@ async def fetch_coingecko_price(symbol):
 
 async def fetch_ohlcv(symbol, timeframe):
     if '/' in symbol:  # crypto
-        # Layer 1: CoinGecko OHLC
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
-        # Layer 2: CoinGecko price (synthetic)
         df = await fetch_coingecko_price(symbol)
         if df is not None:
             return df
-        # Layer 3: Twelve Data (final fallback)
         print(f"Trying Twelve Data as final fallback for {symbol}")
         return await fetch_twelvedata(symbol, timeframe)
     else:
@@ -369,7 +396,6 @@ def format_embed(symbol, signals, timeframe):
     stop_loss = support
     target = resistance + (resistance - support)
 
-    # Colored and sorted EMAs
     ema_items = [
         (signals['ema5'], '5', '🟢'),
         (signals['ema13'], '13', '🟡'),
@@ -420,7 +446,6 @@ async def ping(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    """Full scan: shows all symbols in watchlist."""
     # Deduplication
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
@@ -446,7 +471,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
         return
 
-    watchlist = load_watchlist()
+    watchlist = await load_watchlist()  # <-- now async
     symbols = watchlist['stocks'] + watchlist['crypto']
 
     if target.lower() != 'all':
@@ -477,7 +502,6 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
-    """Filtered scan: only shows symbols with active signals (net_score != 0)."""
     # Deduplication
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
@@ -503,7 +527,7 @@ async def signals(ctx, timeframe='daily'):
         await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
         return
 
-    watchlist = load_watchlist()
+    watchlist = await load_watchlist()
     symbols = watchlist['stocks'] + watchlist['crypto']
 
     await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
@@ -528,26 +552,30 @@ async def signals(ctx, timeframe='daily'):
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
     symbol = normalize_symbol(symbol.upper())
-    watchlist = load_watchlist()
+    watchlist = await load_watchlist()
     if '/' in symbol:
         if symbol not in watchlist['crypto']:
             watchlist['crypto'].append(symbol)
-            save_watchlist(watchlist)
-            await ctx.send(f"Added {symbol} to crypto watchlist.")
+            if await save_watchlist(watchlist):
+                await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+            else:
+                await ctx.send("❌ Could not save watchlist.")
         else:
             await ctx.send(f"{symbol} already in crypto watchlist.")
     else:
         if symbol not in watchlist['stocks']:
             watchlist['stocks'].append(symbol)
-            save_watchlist(watchlist)
-            await ctx.send(f"Added {symbol} to stocks watchlist.")
+            if await save_watchlist(watchlist):
+                await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+            else:
+                await ctx.send("❌ Could not save watchlist.")
         else:
             await ctx.send(f"{symbol} already in stocks watchlist.")
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
     symbol = normalize_symbol(symbol.upper())
-    watchlist = load_watchlist()
+    watchlist = await load_watchlist()
     removed = False
     if symbol in watchlist['stocks']:
         watchlist['stocks'].remove(symbol)
@@ -556,14 +584,16 @@ async def remove_symbol(ctx, symbol):
         watchlist['crypto'].remove(symbol)
         removed = True
     if removed:
-        save_watchlist(watchlist)
-        await ctx.send(f"Removed {symbol} from watchlist.")
+        if await save_watchlist(watchlist):
+            await ctx.send(f"✅ Removed {symbol} from watchlist.")
+        else:
+            await ctx.send("❌ Could not save watchlist.")
     else:
         await ctx.send(f"{symbol} not found in watchlist.")
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
-    watchlist = load_watchlist()
+    watchlist = await load_watchlist()
     stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
     cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
     await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
