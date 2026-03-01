@@ -21,6 +21,7 @@ import warnings
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
 # === CONFIGURATION ===
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -37,7 +38,8 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot._skip_check = lambda x, y: False
 
 last_command_time = {}
-recent_commands = {}  # (user_id, command_name, args) -> timestamp
+user_busy = {}          # per‑user lock to prevent overlapping commands
+cancellation_flags = {} # user_id -> bool (True means cancel requested)
 
 # ====================
 # WEB SERVER
@@ -237,6 +239,27 @@ async def fetch_ohlcv(symbol, timeframe):
         return await fetch_twelvedata(symbol, timeframe)
     else:
         return await fetch_twelvedata(symbol, timeframe)
+
+# ----- Finnhub News Fetching (NEW) -----
+async def fetch_stock_news(symbol):
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {
+        'symbol': symbol,
+        'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+        'to': datetime.now().strftime('%Y-%m-%d'),
+        'token': FINNHUB_API_KEY
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Finnhub news error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception as e:
+        print(f"Error fetching news for {symbol}: {e}")
+        return None
 
 # ----- Indicator Calculations (unchanged) -----
 def calculate_indicators(df):
@@ -493,24 +516,6 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# DEDUPLICATION HELPERS
-# ====================
-
-async def check_recent(ctx, command_name, *args):
-    """Prevent same command+args from the same user within 5 seconds."""
-    key = (ctx.author.id, command_name, args)
-    now = datetime.now()
-    last = recent_commands.get(key)
-    if last and (now - last) < timedelta(seconds=5):
-        print(f"Ignoring duplicate command {command_name} from {ctx.author.id}")
-        return True
-    recent_commands[key] = now
-    # Simple cleanup
-    if len(recent_commands) > 100:
-        recent_commands.clear()
-    return False
-
-# ====================
 # DISCORD EVENTS & COMMANDS
 # ====================
 
@@ -527,9 +532,13 @@ async def on_message(message):
 
 @bot.command(name='ping')
 async def ping(ctx):
-    if await check_recent(ctx, 'ping'):
+    if user_busy.get(ctx.author.id):
         return
-    await ctx.send('pong')
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send('pong')
+    finally:
+        user_busy[ctx.author.id] = False
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     df_calc = calculate_indicators(df)
@@ -547,179 +556,240 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
         print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
         await ctx.send(embed=embed)
 
+async def check_cancel(ctx):
+    """Check if the user has requested cancellation; if so, clear flag and return True."""
+    user_id = ctx.author.id
+    if cancellation_flags.get(user_id, False):
+        cancellation_flags[user_id] = False
+        await ctx.send("🛑 Scan cancelled.")
+        return True
+    return False
+
+@bot.command(name='stopscan')
+async def stop_scan(ctx):
+    """Stops any ongoing scan initiated by the user."""
+    cancellation_flags[ctx.author.id] = True
+    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
+
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # First, deduplicate by command content
-    if await check_recent(ctx, 'scan', target, timeframe):
+    if user_busy.get(ctx.author.id):
         return
-
-    # Message ID deduplication (10 seconds)
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
-        return
-    bot.processed_msgs[msg_id] = now_ts
-
-    # Cooldown per user (5 seconds, but check_recent already does this)
-    now = datetime.now()
-    last = last_command_time.get(ctx.author.id)
-    if last and (now - last) < timedelta(seconds=5):
-        return
-    last_command_time[ctx.author.id] = now
-
-    timeframe = timeframe.lower()
-    if timeframe not in ['daily', 'weekly', '4h']:
-        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-        return
-
-    watchlist = await load_watchlist()
-    symbols = watchlist['stocks'] + watchlist['crypto']
-
-    if target.lower() != 'all':
-        symbol = normalize_symbol(target)
-        await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is None or df.empty:
-            await ctx.send(f"Could not fetch data for {symbol}.")
+    user_busy[ctx.author.id] = True
+    try:
+        # Cooldown per user (5 seconds)
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
             return
-        await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        return
+        last_command_time[ctx.author.id] = now
 
-    await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
 
-    for symbol in symbols:
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is not None and not df.empty:
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks'] + watchlist['crypto']
+
+        if target.lower() != 'all':
+            symbol = normalize_symbol(target)
+            await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is None or df.empty:
+                await ctx.send(f"Could not fetch data for {symbol}.")
+                return
             await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        await asyncio.sleep(8)
+            return
 
-    await ctx.send("Scan complete.")
+        await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is not None and not df.empty:
+                await send_symbol_with_chart(ctx, symbol, df, timeframe)
+            await asyncio.sleep(8)
+
+        # Clear cancellation flag after finishing
+        cancellation_flags[ctx.author.id] = False
+        await ctx.send("Scan complete.")
+    finally:
+        user_busy[ctx.author.id] = False
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
-    if await check_recent(ctx, 'signals', timeframe):
+    if user_busy.get(ctx.author.id):
         return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
 
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
+
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks'] + watchlist['crypto']
+
+        await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+
+        found_any = False
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is not None and not df.empty:
+                df_calc = calculate_indicators(df)
+                sig = get_signals(df_calc)
+                if sig and sig['net_score'] != 0:
+                    found_any = True
+                    await send_symbol_with_chart(ctx, symbol, df, timeframe)
+            await asyncio.sleep(8)
+
+        if not found_any and not cancellation_flags.get(ctx.author.id, False):
+            await ctx.send("No symbols with active signals found.")
+        cancellation_flags[ctx.author.id] = False
+        await ctx.send("Signal scan complete.")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='news')
+async def stock_news(ctx, ticker: str, limit: int = 5):
+    if user_busy.get(ctx.author.id):
         return
-    bot.processed_msgs[msg_id] = now_ts
+    user_busy[ctx.author.id] = True
+    try:
+        # Simple cooldown (5 seconds)
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
 
-    now = datetime.now()
-    last = last_command_time.get(ctx.author.id)
-    if last and (now - last) < timedelta(seconds=5):
-        return
-    last_command_time[ctx.author.id] = now
+        await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
 
-    timeframe = timeframe.lower()
-    if timeframe not in ['daily', 'weekly', '4h']:
-        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-        return
+        news_data = await fetch_stock_news(ticker.upper())
+        if not news_data or len(news_data) == 0:
+            await ctx.send(f"Could not fetch news for {ticker.upper()}.")
+            return
 
-    watchlist = await load_watchlist()
-    symbols = watchlist['stocks'] + watchlist['crypto']
-
-    await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
-
-    found_any = False
-    for symbol in symbols:
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is not None and not df.empty:
-            df_calc = calculate_indicators(df)
-            sig = get_signals(df_calc)
-            if sig and sig['net_score'] != 0:
-                found_any = True
-                await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        await asyncio.sleep(8)
-
-    if not found_any:
-        await ctx.send("No symbols with active signals found.")
-    await ctx.send("Signal scan complete.")
+        embed = discord.Embed(
+            title=f"Latest News for {ticker.upper()}",
+            color=0x3498db  # blue
+        )
+        for article in news_data[:limit]:
+            headline = article.get('headline', 'No Headline')
+            source = article.get('source', 'Unknown')
+            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
+            url = article.get('url', '')
+            if len(headline) > 256:
+                headline = headline[:253] + "..."
+            embed.add_field(
+                name=f"{source} - {date}",
+                value=f"[{headline}]({url})",
+                inline=False
+            )
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    finally:
+        user_busy[ctx.author.id] = False
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
-    if await check_recent(ctx, 'add', symbol):
+    if user_busy.get(ctx.author.id):
         return
-    symbol = normalize_symbol(symbol.upper())
-    watchlist = await load_watchlist()
-    if '/' in symbol:
-        if symbol not in watchlist['crypto']:
-            watchlist['crypto'].append(symbol)
-            if await save_watchlist(watchlist):
-                await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(symbol.upper())
+        watchlist = await load_watchlist()
+        if '/' in symbol:
+            if symbol not in watchlist['crypto']:
+                watchlist['crypto'].append(symbol)
+                if await save_watchlist(watchlist):
+                    await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+                else:
+                    await ctx.send("❌ Could not save watchlist.")
             else:
-                await ctx.send("❌ Could not save watchlist.")
+                await ctx.send(f"{symbol} already in crypto watchlist.")
         else:
-            await ctx.send(f"{symbol} already in crypto watchlist.")
-    else:
-        if symbol not in watchlist['stocks']:
-            watchlist['stocks'].append(symbol)
-            if await save_watchlist(watchlist):
-                await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+            if symbol not in watchlist['stocks']:
+                watchlist['stocks'].append(symbol)
+                if await save_watchlist(watchlist):
+                    await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+                else:
+                    await ctx.send("❌ Could not save watchlist.")
             else:
-                await ctx.send("❌ Could not save watchlist.")
-        else:
-            await ctx.send(f"{symbol} already in stocks watchlist.")
+                await ctx.send(f"{symbol} already in stocks watchlist.")
+    finally:
+        user_busy[ctx.author.id] = False
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
-    if await check_recent(ctx, 'remove', symbol):
+    if user_busy.get(ctx.author.id):
         return
-    symbol = normalize_symbol(symbol.upper())
-    watchlist = await load_watchlist()
-    removed = False
-    if symbol in watchlist['stocks']:
-        watchlist['stocks'].remove(symbol)
-        removed = True
-    if symbol in watchlist['crypto']:
-        watchlist['crypto'].remove(symbol)
-        removed = True
-    if removed:
-        if await save_watchlist(watchlist):
-            await ctx.send(f"✅ Removed {symbol} from watchlist.")
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(symbol.upper())
+        watchlist = await load_watchlist()
+        removed = False
+        if symbol in watchlist['stocks']:
+            watchlist['stocks'].remove(symbol)
+            removed = True
+        if symbol in watchlist['crypto']:
+            watchlist['crypto'].remove(symbol)
+            removed = True
+        if removed:
+            if await save_watchlist(watchlist):
+                await ctx.send(f"✅ Removed {symbol} from watchlist.")
+            else:
+                await ctx.send("❌ Could not save watchlist.")
         else:
-            await ctx.send("❌ Could not save watchlist.")
-    else:
-        await ctx.send(f"{symbol} not found in watchlist.")
+            await ctx.send(f"{symbol} not found in watchlist.")
+    finally:
+        user_busy[ctx.author.id] = False
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
-    if await check_recent(ctx, 'list'):
+    if user_busy.get(ctx.author.id):
         return
-    watchlist = await load_watchlist()
-    stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
-    cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
-    await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
+    user_busy[ctx.author.id] = True
+    try:
+        watchlist = await load_watchlist()
+        stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
+        cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
+        await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 @bot.command(name='help')
 async def help_command(ctx):
-    if await check_recent(ctx, 'help'):
+    if user_busy.get(ctx.author.id):
         return
-    help_text = """
+    user_busy[ctx.author.id] = True
+    try:
+        help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols (full overview with charts).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
-`!signals [timeframe]` – Scan only symbols with active bullish/bearish signals (with charts).
-`!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
-`!remove SYMBOL` – Remove a symbol.
-`!list` – Show current watchlist.
-`!ping` – Test if bot is responsive.
-`!help` – This message.
-    """
-    await ctx.send(help_text)
+`!scan all [daily|weekly|4h]` – Scan all watchlist symbols (full overview with charts)
+`!scan SYMBOL` – Scan a single symbol (with chart)
+`!signals [daily|weekly|4h]` – Scan only symbols with active signals (with charts)
+`!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
+`!add SYMBOL` – Add a symbol to watchlist (use `BTC/USD` for crypto)
+`!remove SYMBOL` – Remove a symbol from watchlist
+`!list` – Show current watchlist
+`!ping` – Test bot responsiveness
+`!stopscan` – Stops any ongoing scan
+`!help` – This message
+        """
+        await ctx.send(help_text)
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
 # MAIN ENTRY POINT
