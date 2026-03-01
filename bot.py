@@ -37,6 +37,7 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot._skip_check = lambda x, y: False
 
 last_command_time = {}
+recent_commands = {}  # (user_id, command_name, args) -> timestamp
 
 # ====================
 # WEB SERVER
@@ -347,14 +348,13 @@ def get_rating(signals):
     else:
         return "NEUTRAL", 0xffff00
 
-# ----- Chart Generation (fixed) -----
+# ----- Chart Generation (robust) -----
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
         return None
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    # Check if volume data is all NaN
     volume_all_nan = chart_data['Volume'].isna().all()
 
     apds = []
@@ -493,6 +493,24 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
+# DEDUPLICATION HELPERS
+# ====================
+
+async def check_recent(ctx, command_name, *args):
+    """Prevent same command+args from the same user within 5 seconds."""
+    key = (ctx.author.id, command_name, args)
+    now = datetime.now()
+    last = recent_commands.get(key)
+    if last and (now - last) < timedelta(seconds=5):
+        print(f"Ignoring duplicate command {command_name} from {ctx.author.id}")
+        return True
+    recent_commands[key] = now
+    # Simple cleanup
+    if len(recent_commands) > 100:
+        recent_commands.clear()
+    return False
+
+# ====================
 # DISCORD EVENTS & COMMANDS
 # ====================
 
@@ -509,6 +527,8 @@ async def on_message(message):
 
 @bot.command(name='ping')
 async def ping(ctx):
+    if await check_recent(ctx, 'ping'):
+        return
     await ctx.send('pong')
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
@@ -529,7 +549,11 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Deduplication
+    # First, deduplicate by command content
+    if await check_recent(ctx, 'scan', target, timeframe):
+        return
+
+    # Message ID deduplication (10 seconds)
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
@@ -542,7 +566,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         return
     bot.processed_msgs[msg_id] = now_ts
 
-    # Cooldown per user
+    # Cooldown per user (5 seconds, but check_recent already does this)
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -579,7 +603,9 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
-    # Deduplication
+    if await check_recent(ctx, 'signals', timeframe):
+        return
+
     if not hasattr(bot, 'processed_msgs'):
         bot.processed_msgs = {}
     msg_id = ctx.message.id
@@ -592,7 +618,6 @@ async def signals(ctx, timeframe='daily'):
         return
     bot.processed_msgs[msg_id] = now_ts
 
-    # Cooldown per user
     now = datetime.now()
     last = last_command_time.get(ctx.author.id)
     if last and (now - last) < timedelta(seconds=5):
@@ -614,19 +639,20 @@ async def signals(ctx, timeframe='daily'):
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
             df_calc = calculate_indicators(df)
-            signals = get_signals(df_calc)
-            if signals and signals['net_score'] != 0:
+            sig = get_signals(df_calc)
+            if sig and sig['net_score'] != 0:
                 found_any = True
                 await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
     if not found_any:
         await ctx.send("No symbols with active signals found.")
-
     await ctx.send("Signal scan complete.")
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
+    if await check_recent(ctx, 'add', symbol):
+        return
     symbol = normalize_symbol(symbol.upper())
     watchlist = await load_watchlist()
     if '/' in symbol:
@@ -650,6 +676,8 @@ async def add_symbol(ctx, symbol):
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
+    if await check_recent(ctx, 'remove', symbol):
+        return
     symbol = normalize_symbol(symbol.upper())
     watchlist = await load_watchlist()
     removed = False
@@ -669,6 +697,8 @@ async def remove_symbol(ctx, symbol):
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
+    if await check_recent(ctx, 'list'):
+        return
     watchlist = await load_watchlist()
     stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
     cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
@@ -676,6 +706,8 @@ async def list_watchlist(ctx):
 
 @bot.command(name='help')
 async def help_command(ctx):
+    if await check_recent(ctx, 'help'):
+        return
     help_text = """
 **5-13-50 Trading Bot Commands**
 `!scan all [timeframe]` – Scan all watchlist symbols (full overview with charts).
