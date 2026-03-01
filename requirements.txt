@@ -7,4 +7,3 @@ motor
 matplotlib
 mplfinance
 Pillow
-apify-client
