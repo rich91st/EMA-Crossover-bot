@@ -21,6 +21,7 @@ import io
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -39,6 +40,7 @@ bot._skip_check = lambda x, y: False
 last_command_time = {}
 cancellation_flags = {}
 user_locks = {}
+processed_messages = set()  # Store recent message IDs to prevent duplicates
 
 # ====================
 # WEB SERVER
@@ -96,7 +98,7 @@ def normalize_symbol(symbol):
     return s
 
 # ====================
-# DATA FETCHING – RESTORED OLD VERSION (NO TIMEOUTS)
+# DATA FETCHING – WORKING CRYPTO FALLBACK
 # ====================
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
@@ -218,7 +220,6 @@ async def fetch_coingecko_price(symbol):
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    """Crypto: CoinGecko OHLC -> CoinGecko price -> Twelve Data. Stocks: Twelve Data only."""
     if '/' in symbol:  # crypto
         print(f"🔍 Crypto {symbol}: trying CoinGecko OHLC")
         df = await fetch_coingecko_ohlc(symbol, timeframe)
@@ -233,6 +234,27 @@ async def fetch_ohlcv(symbol, timeframe):
     else:  # stock
         print(f"🔍 Stock {symbol}: trying Twelve Data")
         return await fetch_twelvedata(symbol, timeframe)
+
+# ----- Finnhub News Fetching (restored) -----
+async def fetch_stock_news(symbol):
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {
+        'symbol': symbol,
+        'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+        'to': datetime.now().strftime('%Y-%m-%d'),
+        'token': FINNHUB_API_KEY
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Finnhub news error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception as e:
+        print(f"Error fetching news for {symbol}: {e}")
+        return None
 
 # ====================
 # INDICATORS (unchanged)
@@ -400,6 +422,13 @@ async def on_ready():
 async def on_message(message):
     if message.author == bot.user:
         return
+    # Deduplicate by message ID (ignore if already processed in last 5 seconds)
+    if message.id in processed_messages:
+        return
+    processed_messages.add(message.id)
+    # Clean up old message IDs (keep last 100)
+    if len(processed_messages) > 100:
+        processed_messages.clear()
     await bot.process_commands(message)
 
 @bot.command(name='ping')
@@ -424,6 +453,7 @@ async def scan(ctx, target='all', timeframe='daily'):
     if user_id not in user_locks:
         user_locks[user_id] = asyncio.Lock()
     async with user_locks[user_id]:
+        # Cooldown
         now = datetime.now()
         last = last_command_time.get(user_id)
         if last and (now - last) < timedelta(seconds=5):
@@ -491,6 +521,35 @@ async def signals(ctx, timeframe='daily'):
             await ctx.send("No symbols with active signals.")
         await ctx.send("Signal scan complete.")
 
+@bot.command(name='news')
+async def stock_news(ctx, ticker: str, limit: int = 5):
+    user_id = ctx.author.id
+    if user_id not in user_locks:
+        user_locks[user_id] = asyncio.Lock()
+    async with user_locks[user_id]:
+        now = datetime.now()
+        last = last_command_time.get(user_id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[user_id] = now
+
+        await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
+        news_data = await fetch_stock_news(ticker.upper())
+        if not news_data or len(news_data) == 0:
+            await ctx.send(f"Could not fetch news for {ticker.upper()}.")
+            return
+        embed = discord.Embed(title=f"Latest News for {ticker.upper()}", color=0x3498db)
+        for article in news_data[:limit]:
+            headline = article.get('headline', 'No Headline')
+            source = article.get('source', 'Unknown')
+            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
+            url = article.get('url', '')
+            if len(headline) > 256:
+                headline = headline[:253] + "..."
+            embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+
 @bot.command(name='add')
 async def add(ctx, symbol):
     s = normalize_symbol(symbol.upper())
@@ -514,6 +573,25 @@ async def add(ctx, symbol):
         else:
             await ctx.send(f"{s} already exists")
 
+@bot.command(name='remove')
+async def remove(ctx, symbol):
+    s = normalize_symbol(symbol.upper())
+    wl = await load_watchlist()
+    removed = False
+    if s in wl['stocks']:
+        wl['stocks'].remove(s)
+        removed = True
+    if s in wl['crypto']:
+        wl['crypto'].remove(s)
+        removed = True
+    if removed:
+        if await save_watchlist(wl):
+            await ctx.send(f"✅ Removed {s}")
+        else:
+            await ctx.send("❌ Save failed")
+    else:
+        await ctx.send(f"{s} not found")
+
 @bot.command(name='list')
 async def list_(ctx):
     wl = await load_watchlist()
@@ -521,16 +599,24 @@ async def list_(ctx):
     cryptos = ", ".join(wl['crypto']) if wl['crypto'] else "None"
     await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
 
+@bot.command(name='stopscan')
+async def stop_scan(ctx):
+    cancellation_flags[ctx.author.id] = True
+    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
+
 @bot.command(name='help')
 async def help_(ctx):
     await ctx.send("""
-**Commands**
-`!scan all [daily|weekly|4h]` – scan all symbols
-`!scan SYMBOL` – scan a single symbol
+**5-13-50 Trading Bot Commands**
+`!scan all [daily|weekly|4h]` – scan all symbols (with charts)
+`!scan SYMBOL` – scan a single symbol (with chart)
 `!signals [daily|weekly|4h]` – scan only symbols with active signals
-`!add SYMBOL` – add to watchlist
+`!news TICKER [limit]` – latest news headlines (e.g., !news AAPL 5)
+`!add SYMBOL` – add to watchlist (use BTC/USD for crypto)
+`!remove SYMBOL` – remove from watchlist
 `!list` – show watchlist
 `!ping` – test
+`!stopscan` – stops any ongoing scan
 `!help` – this message
 """)
 
