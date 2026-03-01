@@ -20,7 +20,6 @@ import io
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
-FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
@@ -95,150 +94,42 @@ def normalize_symbol(symbol):
     return s
 
 # ====================
-# STOCK FETCH (Twelve Data -> Finnhub)
+# SINGLE FETCH FUNCTION FOR EVERYTHING (Twelve Data only)
 # ====================
-async def fetch_stock_twelvedata(symbol, timeframe):
+async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
     if not interval:
         return None
     url = "https://api.twelvedata.com/time_series"
     params = {'symbol': symbol, 'interval': interval, 'apikey': TWELVEDATA_API_KEY, 'outputsize': 200}
-    print(f"📡 Twelve Data stock request for {symbol}")
+    print(f"📡 Twelve Data request for {symbol}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params, timeout=10) as resp:
                 if resp.status != 200:
-                    print(f"❌ Twelve Data stock error {symbol}: status {resp.status}")
+                    print(f"❌ Twelve Data error {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
                 if 'values' not in data:
-                    print(f"❌ Twelve Data stock error {symbol}: no values")
+                    print(f"❌ Twelve Data error {symbol}: no values")
                     return None
                 df = pd.DataFrame(data['values'])
                 df = df.rename(columns={'datetime': 'timestamp'})
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
-                print(f"✅ Twelve Data stock success {symbol}")
+                print(f"✅ Twelve Data success {symbol}")
                 return df.astype(float).sort_index()
     except asyncio.TimeoutError:
-        print(f"⏰ Twelve Data stock timeout {symbol}")
+        print(f"⏰ Twelve Data timeout {symbol}")
         return None
     except Exception as e:
-        print(f"❌ Twelve Data stock exception {symbol}: {e}")
-        return None
-
-async def fetch_stock_finnhub(symbol, timeframe):
-    res_map = {'daily': 'D', 'weekly': 'W', '4h': '60'}
-    resolution = res_map.get(timeframe)
-    if not resolution:
-        return None
-    url = f"https://finnhub.io/api/v1/stock/candle"
-    params = {
-        'symbol': symbol,
-        'resolution': resolution,
-        'from': int((datetime.now() - timedelta(days=200)).timestamp()),
-        'to': int(datetime.now().timestamp()),
-        'token': FINNHUB_API_KEY
-    }
-    print(f"📡 Finnhub stock request for {symbol}")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    print(f"❌ Finnhub stock error {symbol}: status {resp.status}")
-                    return None
-                data = await resp.json()
-                if data.get('s') != 'ok':
-                    print(f"❌ Finnhub stock error {symbol}: {data}")
-                    return None
-                df = pd.DataFrame({'timestamp': data['t'], 'open': data['o'], 'high': data['h'], 'low': data['l'], 'close': data['c'], 'volume': data['v']})
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                df.set_index('timestamp', inplace=True)
-                if timeframe == '4h' and resolution == '60':
-                    df = df.resample('4H').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-                print(f"✅ Finnhub stock success {symbol}")
-                return df.sort_index()
-    except asyncio.TimeoutError:
-        print(f"⏰ Finnhub stock timeout {symbol}")
-        return None
-    except Exception as e:
-        print(f"❌ Finnhub stock exception {symbol}: {e}")
-        return None
-
-# ====================
-# CRYPTO FETCH (Finnhub only, direct)
-# ====================
-async def fetch_crypto_finnhub(symbol, timeframe):
-    # symbol is like "XRP/USD" -> convert to "BINANCE:XRPUSDT"
-    if '/' not in symbol:
-        return None
-    base, quote = symbol.split('/')
-    # For USD pairs, use USDT on Binance
-    finnhub_sym = f"BINANCE:{base}{quote}"  # e.g., BINANCE:XRPUSD? Actually Binance uses USDT
-    # But Finnhub expects e.g., BINANCE:BTCUSDT, so we need to ensure quote is USDT if USD
-    if quote == 'USD':
-        finnhub_sym = f"BINANCE:{base}USDT"
-    else:
-        finnhub_sym = f"BINANCE:{base}{quote}"
-    print(f"📡 Finnhub crypto request for {symbol} -> {finnhub_sym}")
-    res_map = {'daily': 'D', 'weekly': 'W', '4h': '60'}
-    resolution = res_map.get(timeframe)
-    if not resolution:
-        return None
-    url = f"https://finnhub.io/api/v1/crypto/candle"
-    params = {
-        'symbol': finnhub_sym,
-        'resolution': resolution,
-        'from': int((datetime.now() - timedelta(days=200)).timestamp()),
-        'to': int(datetime.now().timestamp()),
-        'token': FINNHUB_API_KEY
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=10) as resp:
-                if resp.status != 200:
-                    print(f"❌ Finnhub crypto error {symbol}: status {resp.status}")
-                    return None
-                data = await resp.json()
-                if data.get('s') != 'ok':
-                    print(f"❌ Finnhub crypto error {symbol}: {data}")
-                    return None
-                df = pd.DataFrame({'timestamp': data['t'], 'open': data['o'], 'high': data['h'], 'low': data['l'], 'close': data['c'], 'volume': data['v']})
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                df.set_index('timestamp', inplace=True)
-                if timeframe == '4h' and resolution == '60':
-                    df = df.resample('4H').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'}).dropna()
-                print(f"✅ Finnhub crypto success {symbol}")
-                return df.sort_index()
-    except asyncio.TimeoutError:
-        print(f"⏰ Finnhub crypto timeout {symbol}")
-        return None
-    except Exception as e:
-        print(f"❌ Finnhub crypto exception {symbol}: {e}")
+        print(f"❌ Twelve Data exception {symbol}: {e}")
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    if '/' in symbol:
-        # Crypto: use Finnhub directly
-        print(f"🔍 Crypto {symbol}: trying Finnhub")
-        df = await fetch_crypto_finnhub(symbol, timeframe)
-        if df is not None:
-            return df
-        print(f"❌ All crypto sources failed for {symbol}")
-        return None
-    else:
-        # Stock: try Twelve Data first, then Finnhub
-        print(f"🔍 Stock {symbol}: trying Twelve Data")
-        df = await fetch_stock_twelvedata(symbol, timeframe)
-        if df is not None:
-            return df
-        print(f"⚠️ Twelve Data failed, trying Finnhub stock")
-        df = await fetch_stock_finnhub(symbol, timeframe)
-        if df is not None:
-            return df
-        print(f"❌ All stock sources failed for {symbol}")
-        return None
+    """Unified fetch using Twelve Data only."""
+    return await fetch_twelvedata(symbol, timeframe)
 
 # ====================
 # INDICATORS (unchanged)
