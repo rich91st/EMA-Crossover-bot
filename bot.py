@@ -41,6 +41,7 @@ bot._skip_check = lambda x, y: False
 
 last_command_time = {}
 cancellation_flags = {}
+user_locks = {}  # Per‑user lock to prevent simultaneous commands
 
 # ====================
 # WEB SERVER
@@ -117,10 +118,8 @@ def finnhub_crypto_symbol(symbol):
     """Convert 'BTC/USD' to 'BINANCE:BTCUSDT' (or similar). Adjust exchange as needed."""
     if '/' in symbol:
         base, quote = symbol.split('/')
-        # For Finnhub, common format is 'BINANCE:BASEQUOTE' (e.g., BINANCE:BTCUSDT)
-        # Note: Some cryptos might use different exchanges. You can modify this mapping.
         return f"BINANCE:{base}{quote}"
-    return symbol  # fallback (should not happen)
+    return symbol
 
 # ----- Twelve Data fetch (for stocks and crypto) -----
 async def fetch_twelvedata(symbol, timeframe):
@@ -140,7 +139,7 @@ async def fetch_twelvedata(symbol, timeframe):
     print(f"📡 Twelve Data request for {symbol}")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     print(f"❌ Twelve Data error for {symbol}: status {resp.status}")
                     return None
@@ -156,27 +155,24 @@ async def fetch_twelvedata(symbol, timeframe):
                 df = df.sort_index()
                 print(f"✅ Twelve Data success for {symbol}")
                 return df
+    except asyncio.TimeoutError:
+        print(f"⏰ Twelve Data timeout for {symbol}")
+        return None
     except Exception as e:
         print(f"❌ Twelve Data exception for {symbol}: {e}")
         return None
 
 # ----- Finnhub fetch (for stocks and crypto) -----
 async def fetch_finnhub(symbol, timeframe):
-    # Finnhub uses different endpoints for stocks and crypto.
-    # Stocks: /stock/candle
-    # Crypto: /crypto/candle
-    # We'll detect by presence of '/' (crypto) and convert symbol.
     is_crypto = '/' in symbol
     if is_crypto:
-        # Convert to Finnhub crypto format
         finnhub_sym = finnhub_crypto_symbol(symbol)
         endpoint = "crypto/candle"
     else:
         finnhub_sym = symbol
         endpoint = "stock/candle"
 
-    # Map timeframe to Finnhub resolution
-    res_map = {'daily': 'D', 'weekly': 'W', '4h': '60'}  # 4h not directly supported, use 60min and resample later?
+    res_map = {'daily': 'D', 'weekly': 'W', '4h': '60'}
     resolution = res_map.get(timeframe)
     if not resolution:
         return None
@@ -192,7 +188,7 @@ async def fetch_finnhub(symbol, timeframe):
     print(f"📡 Finnhub request for {symbol} (as {finnhub_sym})")
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     print(f"❌ Finnhub error for {symbol}: status {resp.status}")
                     return None
@@ -200,7 +196,6 @@ async def fetch_finnhub(symbol, timeframe):
                 if data.get('s') != 'ok':
                     print(f"❌ Finnhub error for {symbol}: {data}")
                     return None
-                # Finnhub returns arrays: t (timestamp), o, h, l, c, v
                 df = pd.DataFrame({
                     'timestamp': data['t'],
                     'open': data['o'],
@@ -212,8 +207,7 @@ async def fetch_finnhub(symbol, timeframe):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 df.set_index('timestamp', inplace=True)
                 df = df.sort_index()
-                # If we used 60min for 4h, we need to resample
-                if timeframe == '4h':
+                if timeframe == '4h' and resolution == '60':
                     df = df.resample('4H').agg({
                         'open': 'first',
                         'high': 'max',
@@ -223,6 +217,9 @@ async def fetch_finnhub(symbol, timeframe):
                     }).dropna()
                 print(f"✅ Finnhub success for {symbol}")
                 return df
+    except asyncio.TimeoutError:
+        print(f"⏰ Finnhub timeout for {symbol}")
+        return None
     except Exception as e:
         print(f"❌ Finnhub exception for {symbol}: {e}")
         return None
@@ -253,7 +250,7 @@ async def fetch_stock_news(symbol):
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
                     print(f"Finnhub news error for {symbol}: status {resp.status}")
                     return None
@@ -263,7 +260,7 @@ async def fetch_stock_news(symbol):
         print(f"Error fetching news for {symbol}: {e}")
         return None
 
-# ----- Indicator Calculations (unchanged) -----
+# ----- Indicator Calculations -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -502,32 +499,14 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# DEDUPLICATION HELPERS
+# DEDUPLICATION & USER LOCKS
 # ====================
 
-async def check_duplicates(ctx, command_name, *args):
-    if not hasattr(bot, 'processed_msgs'):
-        bot.processed_msgs = {}
-    msg_id = ctx.message.id
-    now_ts = datetime.now().timestamp()
-    to_remove = [mid for mid, ts in bot.processed_msgs.items() if now_ts - ts > 10]
-    for mid in to_remove:
-        del bot.processed_msgs[mid]
-    if msg_id in bot.processed_msgs:
-        print(f"Ignoring duplicate message {msg_id}")
-        return True
-    bot.processed_msgs[msg_id] = now_ts
-
-    if not hasattr(bot, 'user_commands'):
-        bot.user_commands = {}
-    key = f"{ctx.author.id}:{command_name}:{':'.join(str(a) for a in args)}"
-    now = datetime.now()
-    last = bot.user_commands.get(key)
-    if last and (now - last) < timedelta(seconds=3):
-        print(f"Ignoring duplicate command from user {ctx.author.id} for {command_name}")
-        return True
-    bot.user_commands[key] = now
-    return False
+async def get_user_lock(user_id):
+    """Get or create a lock for a specific user."""
+    if user_id not in user_locks:
+        user_locks[user_id] = asyncio.Lock()
+    return user_locks[user_id]
 
 # ====================
 # SCAN CANCELLATION
@@ -583,187 +562,204 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    # Debug: log every scan command
-    print(f"👀 scan command received for target={target}, timeframe={timeframe}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
 
-    if await check_duplicates(ctx, 'scan', target, timeframe):
-        return
+    # Acquire lock – this prevents the same user from running two commands simultaneously
+    async with lock:
+        # Debug: log every scan command
+        print(f"👀 scan command received for user {user_id}, target={target}, timeframe={timeframe}")
 
-    now = datetime.now()
-    last = last_command_time.get(ctx.author.id)
-    if last and (now - last) < timedelta(seconds=5):
-        return
-    last_command_time[ctx.author.id] = now
-
-    timeframe = timeframe.lower()
-    if timeframe not in ['daily', 'weekly', '4h']:
-        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-        return
-
-    watchlist = await load_watchlist()
-    symbols = watchlist['stocks'] + watchlist['crypto']
-
-    if target.lower() != 'all':
-        symbol = normalize_symbol(target)
-        await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is None or df.empty:
-            await ctx.send(f"Could not fetch data for {symbol}.")
+        # Simple cooldown (5 seconds)
+        now = datetime.now()
+        last = last_command_time.get(user_id)
+        if last and (now - last) < timedelta(seconds=5):
             return
-        await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        return
+        last_command_time[user_id] = now
 
-    await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
 
-    for symbol in symbols:
-        if await check_cancel(ctx):
-            break
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is not None and not df.empty:
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks'] + watchlist['crypto']
+
+        if target.lower() != 'all':
+            symbol = normalize_symbol(target)
+            await ctx.send(f"Scanning **{symbol}** ({timeframe})...")
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is None or df.empty:
+                await ctx.send(f"Could not fetch data for {symbol}.")
+                return
             await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        await asyncio.sleep(8)
+            return
 
-    cancellation_flags[ctx.author.id] = False
-    await ctx.send("Scan complete.")
+        await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is not None and not df.empty:
+                await send_symbol_with_chart(ctx, symbol, df, timeframe)
+            await asyncio.sleep(8)
+
+        cancellation_flags[user_id] = False
+        await ctx.send("Scan complete.")
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe='daily'):
-    print(f"👀 signals command received, timeframe={timeframe}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
 
-    if await check_duplicates(ctx, 'signals', timeframe):
-        return
+    async with lock:
+        print(f"👀 signals command received for user {user_id}, timeframe={timeframe}")
 
-    now = datetime.now()
-    last = last_command_time.get(ctx.author.id)
-    if last and (now - last) < timedelta(seconds=5):
-        return
-    last_command_time[ctx.author.id] = now
+        now = datetime.now()
+        last = last_command_time.get(user_id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[user_id] = now
 
-    timeframe = timeframe.lower()
-    if timeframe not in ['daily', 'weekly', '4h']:
-        await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-        return
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
 
-    watchlist = await load_watchlist()
-    symbols = watchlist['stocks'] + watchlist['crypto']
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks'] + watchlist['crypto']
 
-    await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+        await ctx.send(f"Scanning for signals on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
 
-    found_any = False
-    for symbol in symbols:
-        if await check_cancel(ctx):
-            break
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is not None and not df.empty:
-            df_calc = calculate_indicators(df)
-            sig = get_signals(df_calc)
-            if sig and sig['net_score'] != 0:
-                found_any = True
-                await send_symbol_with_chart(ctx, symbol, df, timeframe)
-        await asyncio.sleep(8)
+        found_any = False
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is not None and not df.empty:
+                df_calc = calculate_indicators(df)
+                sig = get_signals(df_calc)
+                if sig and sig['net_score'] != 0:
+                    found_any = True
+                    await send_symbol_with_chart(ctx, symbol, df, timeframe)
+            await asyncio.sleep(8)
 
-    if not found_any and not cancellation_flags.get(ctx.author.id, False):
-        await ctx.send("No symbols with active signals found.")
-    cancellation_flags[ctx.author.id] = False
-    await ctx.send("Signal scan complete.")
+        if not found_any and not cancellation_flags.get(user_id, False):
+            await ctx.send("No symbols with active signals found.")
+        cancellation_flags[user_id] = False
+        await ctx.send("Signal scan complete.")
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
-    print(f"👀 news command received for ticker={ticker}, limit={limit}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
 
-    if await check_duplicates(ctx, 'news', ticker, limit):
-        return
+    async with lock:
+        print(f"👀 news command received for user {user_id}, ticker={ticker}, limit={limit}")
 
-    now = datetime.now()
-    last = last_command_time.get(ctx.author.id)
-    if last and (now - last) < timedelta(seconds=5):
-        return
-    last_command_time[ctx.author.id] = now
+        now = datetime.now()
+        last = last_command_time.get(user_id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[user_id] = now
 
-    await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
+        await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
 
-    news_data = await fetch_stock_news(ticker.upper())
+        news_data = await fetch_stock_news(ticker.upper())
 
-    if not news_data or len(news_data) == 0:
-        await ctx.send(f"Could not fetch news for {ticker.upper()}.")
-        return
+        if not news_data or len(news_data) == 0:
+            await ctx.send(f"Could not fetch news for {ticker.upper()}.")
+            return
 
-    embed = discord.Embed(
-        title=f"Latest News for {ticker.upper()}",
-        color=0x3498db
-    )
-
-    for article in news_data[:limit]:
-        headline = article.get('headline', 'No Headline')
-        source = article.get('source', 'Unknown')
-        date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
-        url = article.get('url', '')
-
-        if len(headline) > 256:
-            headline = headline[:253] + "..."
-
-        embed.add_field(
-            name=f"{source} - {date}",
-            value=f"[{headline}]({url})",
-            inline=False
+        embed = discord.Embed(
+            title=f"Latest News for {ticker.upper()}",
+            color=0x3498db
         )
 
-    embed.set_footer(text=f"Requested by {ctx.author.display_name}")
-    await ctx.send(embed=embed)
+        for article in news_data[:limit]:
+            headline = article.get('headline', 'No Headline')
+            source = article.get('source', 'Unknown')
+            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M')
+            url = article.get('url', '')
+
+            if len(headline) > 256:
+                headline = headline[:253] + "..."
+
+            embed.add_field(
+                name=f"{source} - {date}",
+                value=f"[{headline}]({url})",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
 
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
-    print(f"👀 add command received for symbol={symbol}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
 
-    symbol = normalize_symbol(symbol.upper())
-    watchlist = await load_watchlist()
-    if '/' in symbol:
-        if symbol not in watchlist['crypto']:
-            watchlist['crypto'].append(symbol)
-            if await save_watchlist(watchlist):
-                await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+    async with lock:
+        print(f"👀 add command received for user {user_id}, symbol={symbol}")
+
+        symbol = normalize_symbol(symbol.upper())
+        watchlist = await load_watchlist()
+        if '/' in symbol:
+            if symbol not in watchlist['crypto']:
+                watchlist['crypto'].append(symbol)
+                if await save_watchlist(watchlist):
+                    await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+                else:
+                    await ctx.send(f"❌ Could not save watchlist. Please check logs.")
             else:
-                await ctx.send(f"❌ Could not save watchlist. Please check logs.")
+                await ctx.send(f"{symbol} already in crypto watchlist.")
         else:
-            await ctx.send(f"{symbol} already in crypto watchlist.")
-    else:
-        if symbol not in watchlist['stocks']:
-            watchlist['stocks'].append(symbol)
-            if await save_watchlist(watchlist):
-                await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+            if symbol not in watchlist['stocks']:
+                watchlist['stocks'].append(symbol)
+                if await save_watchlist(watchlist):
+                    await ctx.send(f"✅ Added {symbol} to stocks watchlist.")
+                else:
+                    await ctx.send(f"❌ Could not save watchlist. Please check logs.")
             else:
-                await ctx.send(f"❌ Could not save watchlist. Please check logs.")
-        else:
-            await ctx.send(f"{symbol} already in stocks watchlist.")
+                await ctx.send(f"{symbol} already in stocks watchlist.")
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
-    print(f"👀 remove command received for symbol={symbol}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
 
-    symbol = normalize_symbol(symbol.upper())
-    watchlist = await load_watchlist()
-    removed = False
-    if symbol in watchlist['stocks']:
-        watchlist['stocks'].remove(symbol)
-        removed = True
-    if symbol in watchlist['crypto']:
-        watchlist['crypto'].remove(symbol)
-        removed = True
-    if removed:
-        if await save_watchlist(watchlist):
-            await ctx.send(f"✅ Removed {symbol} from watchlist.")
+    async with lock:
+        print(f"👀 remove command received for user {user_id}, symbol={symbol}")
+
+        symbol = normalize_symbol(symbol.upper())
+        watchlist = await load_watchlist()
+        removed = False
+        if symbol in watchlist['stocks']:
+            watchlist['stocks'].remove(symbol)
+            removed = True
+        if symbol in watchlist['crypto']:
+            watchlist['crypto'].remove(symbol)
+            removed = True
+        if removed:
+            if await save_watchlist(watchlist):
+                await ctx.send(f"✅ Removed {symbol} from watchlist.")
+            else:
+                await ctx.send(f"❌ Could not save watchlist. Please check logs.")
         else:
-            await ctx.send(f"❌ Could not save watchlist. Please check logs.")
-    else:
-        await ctx.send(f"{symbol} not found in watchlist.")
+            await ctx.send(f"{symbol} not found in watchlist.")
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
-    print(f"👀 list command received")
-    watchlist = await load_watchlist()
-    stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
-    cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
-    await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
+    user_id = ctx.author.id
+    lock = await get_user_lock(user_id)
+
+    async with lock:
+        print(f"👀 list command received for user {user_id}")
+        watchlist = await load_watchlist()
+        stocks = ", ".join(watchlist['stocks']) if watchlist['stocks'] else "None"
+        cryptos = ", ".join(watchlist['crypto']) if watchlist['crypto'] else "None"
+        await ctx.send(f"**Stocks:** {stocks}\n**Crypto:** {cryptos}")
 
 @bot.command(name='help')
 async def help_command(ctx):
@@ -772,7 +768,7 @@ async def help_command(ctx):
 `!scan all [timeframe]` – Scan all watchlist symbols (full overview with charts).
 `!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
 `!signals [timeframe]` – Scan only symbols with active signals (with charts).
-`!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`).
+`!news TICKET [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`).
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
