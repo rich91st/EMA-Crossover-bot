@@ -9,12 +9,21 @@ import asyncio
 import json
 import os
 from datetime import datetime, timedelta
-import motor.motor_asyncio  # <-- new import
+import motor.motor_asyncio
+
+# Charting libraries
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import mplfinance as mpf
+import io
+import warnings
+warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
 # === CONFIGURATION ===
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-MONGODB_URI = os.getenv('MONGODB_URI')  # <-- new env variable
+MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 
 # MongoDB setup
@@ -30,7 +39,7 @@ bot._skip_check = lambda x, y: False
 last_command_time = {}
 
 # ====================
-# WEB SERVER (keeps Render happy)
+# WEB SERVER
 # ====================
 
 async def handle_health(request):
@@ -59,7 +68,6 @@ async def load_watchlist():
                 "crypto": doc.get('crypto', [])
             }
         else:
-            # Create default watchlist
             default = {
                 "_id": "main",
                 "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
@@ -69,7 +77,6 @@ async def load_watchlist():
             return default
     except Exception as e:
         print(f"❌ Error loading watchlist: {e}")
-        # Return default as fallback
         return {
             "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
             "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
@@ -101,7 +108,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
-# ----- Data Fetching (unchanged from your working code) -----
+# ----- Data Fetching (unchanged) -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
     interval = interval_map.get(timeframe)
@@ -230,6 +237,7 @@ async def fetch_ohlcv(symbol, timeframe):
     else:
         return await fetch_twelvedata(symbol, timeframe)
 
+# ----- Indicator Calculations (unchanged) -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -339,6 +347,45 @@ def get_rating(signals):
     else:
         return "NEUTRAL", 0xffff00
 
+# ----- Chart Generation -----
+def generate_chart_image(df, symbol, timeframe):
+    if len(df) < 20:
+        return None
+    chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+    apds = []
+    if not df['ema5'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='#00ff00', width=2.5, label='EMA5'))
+    if not df['ema13'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='#ffd700', width=2.5, label='EMA13'))
+    if not df['ema50'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='#ff4444', width=2.5, label='EMA50'))
+    if not df['ema200'].tail(30).isna().all():
+        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='#ff00ff', width=3.5, label='EMA200'))
+
+    mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
+
+    fig, axes = mpf.plot(
+        chart_data,
+        type='candle',
+        style=s,
+        addplot=apds,
+        volume=True,
+        figsize=(10,6),
+        returnfig=True,
+        title=f'{symbol} – {timeframe}',
+        tight_layout=True
+    )
+    if apds:
+        axes[0].legend(loc='upper left')
+    buf = io.BytesIO()
+    fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
 def format_embed(symbol, signals, timeframe):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
@@ -422,7 +469,7 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
     embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
     embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
-    embed.set_footer(text=f"{sym_type} · {timeframe} timeframe")
+    embed.set_footer(text=f"{sym_type} · {timeframe}")
     return embed
 
 # ====================
@@ -443,6 +490,19 @@ async def on_message(message):
 @bot.command(name='ping')
 async def ping(ctx):
     await ctx.send('pong')
+
+async def send_symbol_with_chart(ctx, symbol, df, timeframe):
+    df_calc = calculate_indicators(df)
+    signals = get_signals(df_calc)
+    embed = format_embed(symbol, signals, timeframe)
+    chart_buffer = generate_chart_image(df, symbol, timeframe)
+    if chart_buffer:
+        file = discord.File(chart_buffer, filename='chart.png')
+        embed.set_image(url='attachment://chart.png')
+        await ctx.send(embed=embed, file=file)
+    else:
+        # No chart generated (insufficient data)
+        await ctx.send(embed=embed)
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
@@ -471,7 +531,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
         return
 
-    watchlist = await load_watchlist()  # <-- now async
+    watchlist = await load_watchlist()
     symbols = watchlist['stocks'] + watchlist['crypto']
 
     if target.lower() != 'all':
@@ -481,10 +541,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         if df is None or df.empty:
             await ctx.send(f"Could not fetch data for {symbol}.")
             return
-        df = calculate_indicators(df)
-        signals = get_signals(df)
-        embed = format_embed(symbol, signals, timeframe)
-        await ctx.send(embed=embed)
+        await send_symbol_with_chart(ctx, symbol, df, timeframe)
         return
 
     await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
@@ -492,10 +549,7 @@ async def scan(ctx, target='all', timeframe='daily'):
     for symbol in symbols:
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
-            df = calculate_indicators(df)
-            signals = get_signals(df)
-            embed = format_embed(symbol, signals, timeframe)
-            await ctx.send(embed=embed)
+            await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
     await ctx.send("Scan complete.")
@@ -536,12 +590,11 @@ async def signals(ctx, timeframe='daily'):
     for symbol in symbols:
         df = await fetch_ohlcv(symbol, timeframe)
         if df is not None and not df.empty:
-            df = calculate_indicators(df)
-            signals = get_signals(df)
+            df_calc = calculate_indicators(df)
+            signals = get_signals(df_calc)
             if signals and signals['net_score'] != 0:
                 found_any = True
-                embed = format_embed(symbol, signals, timeframe)
-                await ctx.send(embed=embed)
+                await send_symbol_with_chart(ctx, symbol, df, timeframe)
         await asyncio.sleep(8)
 
     if not found_any:
@@ -602,9 +655,9 @@ async def list_watchlist(ctx):
 async def help_command(ctx):
     help_text = """
 **5-13-50 Trading Bot Commands**
-`!scan all [timeframe]` – Scan all watchlist symbols (full overview).
-`!scan SYMBOL [timeframe]` – Scan a single symbol (e.g., `!scan AAPL`, `!scan XRP/USD`).
-`!signals [timeframe]` – Scan only symbols with active bullish/bearish signals.
+`!scan all [timeframe]` – Scan all watchlist symbols (full overview with charts).
+`!scan SYMBOL [timeframe]` – Scan a single symbol (with chart).
+`!signals [timeframe]` – Scan only symbols with active bullish/bearish signals (with charts).
 `!add SYMBOL` – Add a symbol (use `BTC/USD` for crypto).
 `!remove SYMBOL` – Remove a symbol.
 `!list` – Show current watchlist.
