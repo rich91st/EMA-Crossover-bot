@@ -112,40 +112,7 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
-# ----- Stock/Crypto Data Fetching -----
-async def fetch_twelvedata(symbol, timeframe):
-    interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
-    interval = interval_map.get(timeframe)
-    if not interval:
-        return None
-
-    url = "https://api.twelvedata.com/time_series"
-    params = {
-        'symbol': symbol,
-        'interval': interval,
-        'apikey': TWELVEDATA_API_KEY,
-        'outputsize': 200,
-        'format': 'JSON'
-    }
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                data = await resp.json()
-                if 'values' not in data:
-                    print(f"Twelve Data error for {symbol}: {data}")
-                    return None
-                df = pd.DataFrame(data['values'])
-                df = df.rename(columns={'datetime': 'timestamp'})
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
-                df.set_index('timestamp', inplace=True)
-                df = df.astype(float)
-                df = df.sort_index()
-                return df
-    except Exception as e:
-        print(f"Twelve Data exception for {symbol}: {e}")
-        return None
-
+# ----- Stock/Crypto Data Fetching (with detailed logging and timeouts) -----
 async def fetch_coingecko_ohlc(symbol, timeframe):
     base = symbol.split('/')[0].lower()
     coin_map = {
@@ -165,14 +132,17 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
 
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {'vs_currency': 'usd', 'days': days}
+    print(f"📡 CoinGecko OHLC request for {symbol} (coin_id={coin_id})")
     try:
         async with aiohttp.ClientSession() as session:
-            # 10‑second timeout to avoid hanging
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status != 200:
-                    print(f"CoinGecko OHLC error for {symbol}: status {resp.status}")
+                    print(f"❌ CoinGecko OHLC error for {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
+                if not data:
+                    print(f"⚠️ CoinGecko OHLC returned empty data for {symbol}")
+                    return None
                 df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
@@ -180,7 +150,7 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
                 print(f"✅ CoinGecko OHLC success for {symbol}")
                 return df
     except asyncio.TimeoutError:
-        print(f"⏰ CoinGecko OHLC timeout for {symbol}")
+        print(f"⏰ CoinGecko OHLC timeout for {symbol} (after 10 seconds)")
         return None
     except Exception as e:
         print(f"❌ CoinGecko OHLC exception for {symbol}: {e}")
@@ -195,20 +165,22 @@ async def fetch_coingecko_price(symbol):
     }
     coin_id = coin_map.get(base)
     if not coin_id:
+        print(f"CoinGecko price: no coin_id for {symbol}")
         return None
 
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {'ids': coin_id, 'vs_currencies': 'usd'}
+    print(f"📡 CoinGecko price request for {symbol}")
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"CoinGecko price error for {symbol}: status {resp.status}")
+                    print(f"❌ CoinGecko price error for {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
                 price = data.get(coin_id, {}).get('usd')
                 if price is None:
-                    print(f"CoinGecko price: no price for {coin_id}")
+                    print(f"⚠️ CoinGecko price: no price for {coin_id}")
                     return None
                 # Create synthetic OHLC
                 np.random.seed(42)
@@ -231,20 +203,60 @@ async def fetch_coingecko_price(symbol):
                 print(f"✅ Synthetic price data for {symbol}")
                 return df
     except Exception as e:
-        print(f"CoinGecko price exception for {symbol}: {e}")
+        print(f"❌ CoinGecko price exception for {symbol}: {e}")
+        return None
+
+async def fetch_twelvedata(symbol, timeframe):
+    interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
+    interval = interval_map.get(timeframe)
+    if not interval:
+        return None
+
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'apikey': TWELVEDATA_API_KEY,
+        'outputsize': 200,
+        'format': 'JSON'
+    }
+    print(f"📡 Twelve Data request for {symbol}")
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"❌ Twelve Data error for {symbol}: status {resp.status}")
+                    return None
+                data = await resp.json()
+                if 'values' not in data:
+                    print(f"❌ Twelve Data error for {symbol}: {data}")
+                    return None
+                df = pd.DataFrame(data['values'])
+                df = df.rename(columns={'datetime': 'timestamp'})
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+                df = df.astype(float)
+                df = df.sort_index()
+                print(f"✅ Twelve Data success for {symbol}")
+                return df
+    except Exception as e:
+        print(f"❌ Twelve Data exception for {symbol}: {e}")
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
     if '/' in symbol:  # crypto
+        print(f"🔍 Fetching crypto {symbol} via CoinGecko OHLC")
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
+        print(f"⚠️ CoinGecko OHLC failed, trying CoinGecko price (synthetic)")
         df = await fetch_coingecko_price(symbol)
         if df is not None:
             return df
-        print(f"Trying Twelve Data as final fallback for {symbol}")
+        print(f"⚠️ CoinGecko price failed, trying Twelve Data as final fallback")
         return await fetch_twelvedata(symbol, timeframe)
     else:
+        print(f"🔍 Fetching stock {symbol} via Twelve Data")
         return await fetch_twelvedata(symbol, timeframe)
 
 # ----- Finnhub News Fetching -----
@@ -269,7 +281,7 @@ async def fetch_stock_news(symbol):
         print(f"Error fetching news for {symbol}: {e}")
         return None
 
-# ----- Indicator Calculations (unchanged) -----
+# ----- Indicator Calculations -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
