@@ -241,7 +241,7 @@ async def fetch_ohlcv(symbol, timeframe):
     else:
         return await fetch_twelvedata(symbol, timeframe)
 
-# ----- Finnhub News Fetching (restored to working version) -----
+# ----- Finnhub News Fetching -----
 async def fetch_stock_news(symbol):
     """Fetches latest news for a given stock symbol from Finnhub."""
     url = "https://finnhub.io/api/v1/company-news"
@@ -263,7 +263,102 @@ async def fetch_stock_news(symbol):
         print(f"Error fetching news for {symbol}: {e}")
         return None
 
-# ----- Indicator Calculations (unchanged) -----
+# ----- Upcoming Events (catalysts) -----
+async def fetch_earnings_upcoming(symbol, days=14):
+    """Fetch earnings in the next `days` days."""
+    url = "https://finnhub.io/api/v1/calendar/earnings"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Earnings API error {symbol}: {resp.status}")
+                    return []
+                data = await resp.json()
+                earnings = data.get('earningsCalendar', [])
+                # Filter for upcoming within next `days` days
+                today = datetime.now().date()
+                cutoff = today + timedelta(days=days)
+                upcoming = []
+                for e in earnings:
+                    date_str = e.get('date')
+                    if not date_str:
+                        continue
+                    try:
+                        e_date = datetime.strptime(date_str, '%Y-%m-%d').date()
+                        if today <= e_date <= cutoff:
+                            upcoming.append(e)
+                    except:
+                        continue
+                return upcoming
+    except Exception as e:
+        print(f"Error fetching earnings for {symbol}: {e}")
+        return []
+
+async def fetch_dividends_upcoming(symbol, days=14):
+    """Fetch dividends with ex‑date in the next `days` days."""
+    url = "https://finnhub.io/api/v1/stock/dividend"
+    today = datetime.now().strftime('%Y-%m-%d')
+    future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    params = {
+        'symbol': symbol,
+        'from': today,
+        'to': future,
+        'token': FINNHUB_API_KEY
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Dividends API error {symbol}: {resp.status}")
+                    return []
+                data = await resp.json()
+                return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Error fetching dividends for {symbol}: {e}")
+        return []
+
+async def fetch_splits_upcoming(symbol, days=14):
+    """Fetch stock splits in the next `days` days."""
+    url = "https://finnhub.io/api/v1/stock/split"
+    today = datetime.now().strftime('%Y-%m-%d')
+    future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    params = {
+        'symbol': symbol,
+        'from': today,
+        'to': future,
+        'token': FINNHUB_API_KEY
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Splits API error {symbol}: {resp.status}")
+                    return []
+                data = await resp.json()
+                return data if isinstance(data, list) else []
+    except Exception as e:
+        print(f"Error fetching splits for {symbol}: {e}")
+        return []
+
+async def fetch_analyst_ratings(symbol, limit=3):
+    """Fetch recent analyst recommendations (last `limit`)."""
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Analyst ratings API error {symbol}: {resp.status}")
+                    return []
+                data = await resp.json()
+                # Data is list of dicts with keys: buy, hold, sell, strongBuy, strongSell, period
+                return data[:limit] if data else []
+    except Exception as e:
+        print(f"Error fetching analyst ratings for {symbol}: {e}")
+        return []
+
+# ----- Indicator Calculations -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -702,6 +797,84 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
     finally:
         user_busy[ctx.author.id] = False
 
+@bot.command(name='upcoming')
+async def upcoming_events(ctx, ticker: str):
+    """Show upcoming catalysts (earnings, dividends, splits, analyst ratings) for a stock."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
+
+        # Gather data
+        earnings = await fetch_earnings_upcoming(ticker.upper())
+        dividends = await fetch_dividends_upcoming(ticker.upper())
+        splits = await fetch_splits_upcoming(ticker.upper())
+        ratings = await fetch_analyst_ratings(ticker.upper(), limit=3)
+
+        if not (earnings or dividends or splits or ratings):
+            await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
+            return
+
+        embed = discord.Embed(
+            title=f"📅 Upcoming Catalysts for {ticker.upper()}",
+            color=0x00ff00
+        )
+
+        if earnings:
+            lines = []
+            for e in earnings:
+                date = e.get('date', 'N/A')
+                eps_est = e.get('epsEstimate', 'N/A')
+                time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
+                lines.append(f"**{date}** {time_str} – EPS Est: {eps_est}")
+            embed.add_field(name="📊 Earnings", value="\n".join(lines), inline=False)
+
+        if dividends:
+            lines = []
+            for d in dividends:
+                ex_date = d.get('exDate', 'N/A')
+                amount = d.get('amount', 'N/A')
+                pay_date = d.get('payDate', '')
+                lines.append(f"**{ex_date}** – Amount: ${amount}" + (f" (pay {pay_date})" if pay_date else ""))
+            embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
+
+        if splits:
+            lines = []
+            for s in splits:
+                date = s.get('date', 'N/A')
+                ratio = s.get('splitRatio', '')
+                text = f"**{date}** – {ratio}" if ratio else f"**{date}**"
+                lines.append(text)
+            embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
+
+        if ratings:
+            lines = []
+            for r in ratings:
+                period = r.get('period', '')
+                sb = r.get('strongBuy', 0)
+                b = r.get('buy', 0)
+                h = r.get('hold', 0)
+                s = r.get('sell', 0)
+                ss = r.get('strongSell', 0)
+                total = sb + b + h + s + ss
+                if total > 0:
+                    lines.append(f"**{period}** – {b+sb} Buy / {h} Hold / {s+ss} Sell")
+                else:
+                    lines.append(f"**{period}** – No data")
+            embed.add_field(name="📈 Analyst Ratings (last 3 periods)", value="\n".join(lines), inline=False)
+
+        await ctx.send(embed=embed)
+
+    finally:
+        user_busy[ctx.author.id] = False
+
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
     if user_busy.get(ctx.author.id):
@@ -781,6 +954,7 @@ async def help_command(ctx):
 `!scan SYMBOL` – Scan a single symbol (with chart)
 `!signals [daily|weekly|4h]` – Scan only symbols with active signals (with charts)
 `!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
+`!upcoming TICKER` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings)
 `!add SYMBOL` – Add a symbol to watchlist (use `BTC/USD` for crypto)
 `!remove SYMBOL` – Remove a symbol from watchlist
 `!list` – Show current watchlist
