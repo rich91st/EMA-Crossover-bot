@@ -378,7 +378,7 @@ async def fetch_economic_events(days=14):
         print(f"Error fetching economic calendar: {e}")
         return []
 
-# ----- Indicator Calculations (unchanged) -----
+# ----- Indicator Calculations -----
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -694,7 +694,6 @@ async def scan(ctx, target='all', timeframe='daily'):
         return
     user_busy[ctx.author.id] = True
     try:
-        # Cooldown per user (5 seconds)
         now = datetime.now()
         last = last_command_time.get(ctx.author.id)
         if last and (now - last) < timedelta(seconds=5):
@@ -729,7 +728,6 @@ async def scan(ctx, target='all', timeframe='daily'):
                 await send_symbol_with_chart(ctx, symbol, df, timeframe)
             await asyncio.sleep(8)
 
-        # Clear cancellation flag after finishing
         cancellation_flags[ctx.author.id] = False
         await ctx.send("Scan complete.")
     finally:
@@ -798,7 +796,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
 
         embed = discord.Embed(
             title=f"Latest News for {ticker.upper()}",
-            color=0x3498db  # blue
+            color=0x3498db
         )
         for article in news_data[:limit]:
             headline = article.get('headline', 'No Headline')
@@ -917,7 +915,6 @@ async def upcoming_events(ctx, ticker: str = None):
                             s = r.get('sell', 0)
                             ss = r.get('strongSell', 0)
                             total = sb + b + h + s + ss
-                            # sentiment emoji: green if buys+strongBuys > sells+strongSells
                             buys = sb + b
                             sells = s + ss
                             sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
