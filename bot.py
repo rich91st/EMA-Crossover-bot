@@ -243,7 +243,6 @@ async def fetch_ohlcv(symbol, timeframe):
 
 # ----- Finnhub News Fetching -----
 async def fetch_stock_news(symbol):
-    """Fetches latest news for a given stock symbol from Finnhub."""
     url = "https://finnhub.io/api/v1/company-news"
     params = {
         'symbol': symbol,
@@ -265,7 +264,6 @@ async def fetch_stock_news(symbol):
 
 # ----- Upcoming Events (catalysts) -----
 async def fetch_earnings_upcoming(symbol, days=14):
-    """Fetch earnings in the next `days` days."""
     url = "https://finnhub.io/api/v1/calendar/earnings"
     params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
     try:
@@ -295,7 +293,6 @@ async def fetch_earnings_upcoming(symbol, days=14):
         return []
 
 async def fetch_dividends_upcoming(symbol, days=14):
-    """Fetch dividends with ex‑date in the next `days` days."""
     url = "https://finnhub.io/api/v1/stock/dividend"
     today = datetime.now().strftime('%Y-%m-%d')
     future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
@@ -318,7 +315,6 @@ async def fetch_dividends_upcoming(symbol, days=14):
         return []
 
 async def fetch_splits_upcoming(symbol, days=14):
-    """Fetch stock splits in the next `days` days."""
     url = "https://finnhub.io/api/v1/stock/split"
     today = datetime.now().strftime('%Y-%m-%d')
     future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
@@ -341,7 +337,6 @@ async def fetch_splits_upcoming(symbol, days=14):
         return []
 
 async def fetch_analyst_ratings(symbol, limit=3):
-    """Fetch recent analyst recommendations (last `limit`)."""
     url = "https://finnhub.io/api/v1/stock/recommendation"
     params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
     try:
@@ -357,7 +352,6 @@ async def fetch_analyst_ratings(symbol, limit=3):
         return []
 
 async def fetch_economic_events(days=14):
-    """Fetch upcoming macroeconomic events for the next `days` days."""
     url = "https://finnhub.io/api/v1/calendar/economic"
     start = datetime.now().strftime('%Y-%m-%d')
     end = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
@@ -633,7 +627,117 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# DISCORD EVENTS & COMMANDS
+# NEW ZONE COMMAND
+# ====================
+
+def format_zone_embed(symbol, signals, timeframe):
+    """Create an embed focused on buy/sell zones."""
+    sym_type = "Crypto" if '/' in symbol else "Stock"
+    price = signals['price']
+    support = signals['support_20']
+    resistance = signals['resistance_20']
+    ema5 = signals['ema5']
+    ema13 = signals['ema13']
+    ema50 = signals['ema50']
+    ema200 = signals['ema200']
+    
+    # Determine which EMAs act as support or resistance
+    support_levels = [support]
+    resistance_levels = [resistance]
+    
+    if not pd.isna(ema200):
+        if ema200 < price:
+            support_levels.append(ema200)
+        else:
+            resistance_levels.append(ema200)
+    if not pd.isna(ema50):
+        if ema50 < price:
+            support_levels.append(ema50)
+        else:
+            resistance_levels.append(ema50)
+    if not pd.isna(ema13):
+        if ema13 < price:
+            support_levels.append(ema13)
+        else:
+            resistance_levels.append(ema13)
+    if not pd.isna(ema5):
+        if ema5 < price:
+            support_levels.append(ema5)
+        else:
+            resistance_levels.append(ema5)
+    
+    # Sort levels
+    support_levels.sort(reverse=True)   # highest support first
+    resistance_levels.sort()             # lowest resistance first
+    
+    embed = discord.Embed(
+        title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
+        description=f"Current Price: **${price:.2f}**",
+        color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00
+    )
+    
+    # Support (Buy) Zone
+    sup_text = ""
+    for i, level in enumerate(support_levels):
+        if i == 0:
+            sup_text += f"Primary Support: ${level:.2f}\n"
+        else:
+            sup_text += f"Secondary Support: ${level:.2f}\n"
+    if sup_text:
+        embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
+    
+    # Resistance (Sell) Zone
+    res_text = ""
+    for i, level in enumerate(resistance_levels):
+        if i == 0:
+            res_text += f"Primary Resistance: ${level:.2f}\n"
+        else:
+            res_text += f"Secondary Resistance: ${level:.2f}\n"
+    if res_text:
+        embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
+    
+    # Optional: target based on resistance projection
+    target = resistance + (resistance - support)
+    embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
+    
+    embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
+    return embed
+
+@bot.command(name='zone')
+async def zone(ctx, ticker: str, timeframe: str = 'daily'):
+    """Show buy and sell zones for a symbol based on support/resistance and EMAs."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
+
+        symbol = normalize_symbol(ticker)
+        await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
+
+        df = await fetch_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            await ctx.send(f"Could not fetch data for {symbol}.")
+            return
+
+        df = calculate_indicators(df)
+        signals = get_signals(df)
+        embed = format_zone_embed(symbol, signals, timeframe)
+        await ctx.send(embed=embed)
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# DISCORD EVENTS & COMMANDS (existing)
 # ====================
 
 @bot.event
@@ -674,7 +778,6 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
         await ctx.send(embed=embed)
 
 async def check_cancel(ctx):
-    """Check if the user has requested cancellation; if so, clear flag and return True."""
     user_id = ctx.author.id
     if cancellation_flags.get(user_id, False):
         cancellation_flags[user_id] = False
@@ -684,7 +787,6 @@ async def check_cancel(ctx):
 
 @bot.command(name='stopscan')
 async def stop_scan(ctx):
-    """Stops any ongoing scan initiated by the user."""
     cancellation_flags[ctx.author.id] = True
     await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
 
@@ -830,16 +932,14 @@ async def upcoming_events(ctx, ticker: str = None):
         last_command_time[ctx.author.id] = now
 
         if ticker is None:
-            # Scan all stocks in watchlist
             watchlist = await load_watchlist()
-            stocks = watchlist['stocks']  # only stocks, crypto not supported
+            stocks = watchlist['stocks']
             if not stocks:
                 await ctx.send("No stocks in your watchlist to scan for events.")
                 return
 
             await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events in the next 14 days. This may take a few minutes...")
 
-            # First, fetch and send macroeconomic events
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
                 econ_embed = discord.Embed(
@@ -864,7 +964,6 @@ async def upcoming_events(ctx, ticker: str = None):
 
             found_any = False
             for sym in stocks:
-                # Check for cancellation
                 if cancellation_flags.get(ctx.author.id, False):
                     cancellation_flags[ctx.author.id] = False
                     await ctx.send("🛑 Scan cancelled.")
@@ -925,7 +1024,7 @@ async def upcoming_events(ctx, ticker: str = None):
                         embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
                     await ctx.send(embed=embed)
 
-                await asyncio.sleep(5)  # delay to respect rate limits
+                await asyncio.sleep(5)
 
             if not found_any:
                 await ctx.send("No upcoming events found for any stock in your watchlist.")
@@ -933,7 +1032,6 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send("✅ Upcoming events scan complete.")
 
         else:
-            # Single ticker
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
             earnings = await fetch_earnings_upcoming(ticker.upper())
             dividends = await fetch_dividends_upcoming(ticker.upper())
@@ -1075,6 +1173,7 @@ async def help_command(ctx):
 `!signals [daily|weekly|4h]` – Scan only symbols with active signals (with charts)
 `!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
 `!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings, macro events)
+`!zone SYMBOL [timeframe]` – Show buy and sell zones based on support/resistance and EMAs
 `!add SYMBOL` – Add a symbol to watchlist (use `BTC/USD` for crypto)
 `!remove SYMBOL` – Remove a symbol from watchlist
 `!list` – Show current watchlist
