@@ -112,6 +112,27 @@ def normalize_symbol(symbol):
         return symbol
     return symbol
 
+# ----- NEW: TradingView Link Generator -----
+def get_tradingview_link(symbol):
+    """Generate a TradingView app link for the given symbol."""
+    # Determine exchange based on symbol format
+    if '/' in symbol:  # Crypto
+        base = symbol.split('/')[0]
+        # Default to Binance for crypto (you can modify this)
+        exchange = "BINANCE"
+        tv_symbol = f"{exchange}:{base}USDT"
+    else:  # Stock
+        # You might want a more sophisticated exchange detector
+        # For now, default to NASDAQ for common US stocks
+        exchange = "NASDAQ"
+        tv_symbol = f"{exchange}:{symbol}"
+    
+    # Create both app and web links
+    app_url = f"tradingview://chart?symbol={tv_symbol}"
+    web_url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+    
+    return app_url, web_url
+
 # ----- Data Fetching (unchanged) -----
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'daily': '1day', 'weekly': '1week', '4h': '4h'}
@@ -540,6 +561,7 @@ def generate_chart_image(df, symbol, timeframe):
         print(f"⚠️ Chart generation failed for {symbol}: {e}")
         return None
 
+# ----- UPDATED: Format functions with TradingView links -----
 def format_embed(symbol, signals, timeframe):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
@@ -608,9 +630,13 @@ def format_embed(symbol, signals, timeframe):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
+    # Generate TradingView link
+    app_url, web_url = get_tradingview_link(symbol)
+    tv_link = f"[📱 Open in TradingView App]({app_url}) | [🌐 Web Chart]({web_url})"
+
     embed = discord.Embed(
         title=f"{rating}",
-        description=f"**{symbol}** · ${signals['price']:.2f}",
+        description=f"**{symbol}** · ${signals['price']:.2f}\n\n{tv_link}",
         color=color
     )
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
@@ -626,12 +652,8 @@ def format_embed(symbol, signals, timeframe):
     embed.set_footer(text=f"{sym_type} · {timeframe}")
     return embed
 
-# ====================
-# NEW ZONE COMMAND
-# ====================
-
 def format_zone_embed(symbol, signals, timeframe):
-    """Create an embed focused on buy/sell zones."""
+    """Create an embed focused on buy/sell zones with TradingView link."""
     sym_type = "Crypto" if '/' in symbol else "Stock"
     price = signals['price']
     support = signals['support_20']
@@ -669,10 +691,14 @@ def format_zone_embed(symbol, signals, timeframe):
     # Sort levels
     support_levels.sort(reverse=True)   # highest support first
     resistance_levels.sort()             # lowest resistance first
+
+    # Generate TradingView link
+    app_url, web_url = get_tradingview_link(symbol)
+    tv_link = f"[📱 Open in TradingView App]({app_url}) | [🌐 Web Chart]({web_url})"
     
     embed = discord.Embed(
         title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
-        description=f"Current Price: **${price:.2f}**",
+        description=f"Current Price: **${price:.2f}**\n\n{tv_link}",
         color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00
     )
     
@@ -680,7 +706,7 @@ def format_zone_embed(symbol, signals, timeframe):
     sup_text = ""
     for i, level in enumerate(support_levels):
         if i == 0:
-            sup_text += f"Primary Support: ${level:.2f}\n"
+            sup_text += f"**Primary Support:** ${level:.2f}\n"
         else:
             sup_text += f"Secondary Support: ${level:.2f}\n"
     if sup_text:
@@ -690,54 +716,21 @@ def format_zone_embed(symbol, signals, timeframe):
     res_text = ""
     for i, level in enumerate(resistance_levels):
         if i == 0:
-            res_text += f"Primary Resistance: ${level:.2f}\n"
+            res_text += f"**Primary Resistance:** ${level:.2f}\n"
         else:
             res_text += f"Secondary Resistance: ${level:.2f}\n"
     if res_text:
         embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
     
-    # Optional: target based on resistance projection
+    # Target
     target = resistance + (resistance - support)
     embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
     
     embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
     return embed
 
-@bot.command(name='zone')
-async def zone(ctx, ticker: str, timeframe: str = 'daily'):
-    """Show buy and sell zones for a symbol based on support/resistance and EMAs."""
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-
-        timeframe = timeframe.lower()
-        if timeframe not in ['daily', 'weekly', '4h']:
-            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
-            return
-
-        symbol = normalize_symbol(ticker)
-        await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
-
-        df = await fetch_ohlcv(symbol, timeframe)
-        if df is None or df.empty:
-            await ctx.send(f"Could not fetch data for {symbol}.")
-            return
-
-        df = calculate_indicators(df)
-        signals = get_signals(df)
-        embed = format_zone_embed(symbol, signals, timeframe)
-        await ctx.send(embed=embed)
-    finally:
-        user_busy[ctx.author.id] = False
-
 # ====================
-# DISCORD EVENTS & COMMANDS (existing)
+# DISCORD EVENTS & COMMANDS
 # ====================
 
 @bot.event
@@ -896,8 +889,13 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
             await ctx.send(f"Could not fetch news for {ticker.upper()}.")
             return
 
+        # Generate TradingView link for news embed
+        app_url, web_url = get_tradingview_link(ticker.upper())
+        tv_link = f"[📱 Open in TradingView App]({app_url}) | [🌐 Web Chart]({web_url})"
+
         embed = discord.Embed(
             title=f"Latest News for {ticker.upper()}",
+            description=tv_link,
             color=0x3498db
         )
         for article in news_data[:limit]:
@@ -919,8 +917,6 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str = None):
-    """Show upcoming catalysts (earnings, dividends, splits, analyst ratings). 
-       If no ticker, scan all stocks in watchlist and include macroeconomic events."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -976,8 +972,13 @@ async def upcoming_events(ctx, ticker: str = None):
 
                 if earnings or dividends or splits or ratings:
                     found_any = True
+                    # Generate TradingView link for this stock
+                    app_url, web_url = get_tradingview_link(sym)
+                    tv_link = f"[📱 Open in TradingView App]({app_url}) | [🌐 Web Chart]({web_url})"
+                    
                     embed = discord.Embed(
                         title=f"📅 Upcoming Catalysts for {sym}",
+                        description=tv_link,
                         color=0x00ff00
                     )
                     if earnings:
@@ -1042,8 +1043,13 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
                 return
 
+            # Generate TradingView link
+            app_url, web_url = get_tradingview_link(ticker.upper())
+            tv_link = f"[📱 Open in TradingView App]({app_url}) | [🌐 Web Chart]({web_url})"
+
             embed = discord.Embed(
                 title=f"📅 Upcoming Catalysts for {ticker.upper()}",
+                description=tv_link,
                 color=0x00ff00
             )
             if earnings:
@@ -1090,6 +1096,38 @@ async def upcoming_events(ctx, ticker: str = None):
                 embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
             await ctx.send(embed=embed)
 
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='zone')
+async def zone(ctx, ticker: str, timeframe: str = 'daily'):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        timeframe = timeframe.lower()
+        if timeframe not in ['daily', 'weekly', '4h']:
+            await ctx.send("Invalid timeframe. Use daily, weekly, or 4h.")
+            return
+
+        symbol = normalize_symbol(ticker)
+        await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
+
+        df = await fetch_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            await ctx.send(f"Could not fetch data for {symbol}.")
+            return
+
+        df = calculate_indicators(df)
+        signals = get_signals(df)
+        embed = format_zone_embed(symbol, signals, timeframe)
+        await ctx.send(embed=embed)
     finally:
         user_busy[ctx.author.id] = False
 
@@ -1180,6 +1218,9 @@ async def help_command(ctx):
 `!ping` – Test bot responsiveness
 `!stopscan` – Stops any ongoing scan
 `!help` – This message
+
+**📱 TradingView Integration**
+All stock/crypto embeds now include a clickable link to open the TradingView app directly to that symbol!
         """
         await ctx.send(help_text)
     finally:
