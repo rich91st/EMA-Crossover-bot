@@ -8,3 +8,4 @@ matplotlib
 mplfinance
 Pillow
 optionlab
+publicdotcom-py
