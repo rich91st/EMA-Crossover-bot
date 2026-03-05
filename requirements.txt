@@ -7,3 +7,4 @@ motor
 matplotlib
 mplfinance
 Pillow
+optionlab
