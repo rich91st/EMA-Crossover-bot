@@ -113,26 +113,21 @@ def normalize_symbol(symbol):
     return symbol
 
 # ====================
-# TRADINGVIEW APP LINK GENERATOR (CLICKABLE)
+# TRADINGVIEW WEB LINK GENERATOR
 # ====================
 
-def get_tradingview_app_link(symbol):
-    """Generate a clickable TradingView app link using angle brackets."""
+def get_tradingview_web_link(symbol):
+    """Generate a clickable TradingView web link."""
     if '/' in symbol:  # Crypto
         base = symbol.split('/')[0]
-        # Default to Binance for crypto
         exchange = "BINANCE"
-        # Convert BTC/USD to BINANCE:BTCUSDT format
         tv_symbol = f"{exchange}:{base}USDT"
     else:  # Stock
-        # Default to NASDAQ for US stocks
         exchange = "NASDAQ"
         tv_symbol = f"{exchange}:{symbol}"
     
-    # Angle brackets make Discord recognize custom schemes as clickable links
-    app_link = f"<tradingview://chart?symbol={tv_symbol}>"
-    
-    return app_link
+    web_url = f"https://www.tradingview.com/chart/?symbol={tv_symbol}"
+    return web_url
 
 # ====================
 # DATA FETCHING
@@ -578,7 +573,7 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# EMBED FORMATTING WITH CLICKABLE TRADINGVIEW APP LINK
+# EMBED FORMATTING WITH TRADINGVIEW WEB LINK
 # ====================
 
 def format_embed(symbol, signals, timeframe):
@@ -649,9 +644,9 @@ def format_embed(symbol, signals, timeframe):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
-    # Generate clickable TradingView app link using angle brackets
-    app_link = get_tradingview_app_link(symbol)
-    tv_field = f"📱 **Open in TradingView App:** {app_link}"
+    # Generate clickable TradingView web link
+    web_url = get_tradingview_web_link(symbol)
+    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
 
     embed = discord.Embed(
         title=f"{rating}",
@@ -669,14 +664,14 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
     embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
     
-    # TradingView app link at the bottom (now clickable with angle brackets)
+    # TradingView web link at the bottom
     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
     
     embed.set_footer(text=f"{sym_type} · {timeframe}")
     return embed
 
 def format_zone_embed(symbol, signals, timeframe):
-    """Create an embed focused on buy/sell zones with clickable TradingView app link."""
+    """Create an embed focused on buy/sell zones with TradingView web link."""
     sym_type = "Crypto" if '/' in symbol else "Stock"
     price = signals['price']
     support = signals['support_20']
@@ -715,9 +710,9 @@ def format_zone_embed(symbol, signals, timeframe):
     support_levels.sort(reverse=True)   # highest support first
     resistance_levels.sort()             # lowest resistance first
 
-    # Generate clickable TradingView app link using angle brackets
-    app_link = get_tradingview_app_link(symbol)
-    tv_field = f"📱 **Open in TradingView App:** {app_link}"
+    # Generate clickable TradingView web link
+    web_url = get_tradingview_web_link(symbol)
+    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
     
     embed = discord.Embed(
         title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
@@ -749,7 +744,7 @@ def format_zone_embed(symbol, signals, timeframe):
     target = resistance + (resistance - support)
     embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
     
-    # TradingView app link at the bottom (clickable)
+    # TradingView web link at the bottom
     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
     
     embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
@@ -915,9 +910,9 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
             await ctx.send(f"Could not fetch news for {ticker.upper()}.")
             return
 
-        # Generate clickable TradingView app link
-        app_link = get_tradingview_app_link(ticker.upper())
-        tv_field = f"📱 **Open in TradingView App:** {app_link}"
+        # Generate clickable TradingView web link
+        web_url = get_tradingview_web_link(ticker.upper())
+        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
 
         embed = discord.Embed(
             title=f"Latest News for {ticker.upper()}",
@@ -936,7 +931,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
                 inline=False
             )
         
-        # TradingView app link at the bottom
+        # TradingView web link at the bottom
         embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
         embed.set_footer(text=f"Requested by {ctx.author.display_name}")
         await ctx.send(embed=embed)
@@ -1000,9 +995,9 @@ async def upcoming_events(ctx, ticker: str = None):
 
                 if earnings or dividends or splits or ratings:
                     found_any = True
-                    # Generate clickable TradingView app link
-                    app_link = get_tradingview_app_link(sym)
-                    tv_field = f"📱 **Open in TradingView App:** {app_link}"
+                    # Generate clickable TradingView web link
+                    web_url = get_tradingview_web_link(sym)
+                    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
                     
                     embed = discord.Embed(
                         title=f"📅 Upcoming Catalysts for {sym}",
@@ -1051,7 +1046,7 @@ async def upcoming_events(ctx, ticker: str = None):
                                 lines.append(f"**{period}** – No data")
                         embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
                     
-                    # TradingView app link at the bottom
+                    # TradingView web link at the bottom
                     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
                     await ctx.send(embed=embed)
 
@@ -1073,9 +1068,9 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
                 return
 
-            # Generate clickable TradingView app link
-            app_link = get_tradingview_app_link(ticker.upper())
-            tv_field = f"📱 **Open in TradingView App:** {app_link}"
+            # Generate clickable TradingView web link
+            web_url = get_tradingview_web_link(ticker.upper())
+            tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
 
             embed = discord.Embed(
                 title=f"📅 Upcoming Catalysts for {ticker.upper()}",
@@ -1124,7 +1119,7 @@ async def upcoming_events(ctx, ticker: str = None):
                         lines.append(f"**{period}** – No data")
                 embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
             
-            # TradingView app link at the bottom
+            # TradingView web link at the bottom
             embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
             await ctx.send(embed=embed)
 
@@ -1251,8 +1246,8 @@ async def help_command(ctx):
 `!stopscan` – Stops any ongoing scan
 `!help` – This message
 
-**📱 TradingView App Integration**
-All stock/crypto embeds include a clickable link at the bottom that opens the **TradingView app directly** to that symbol!
+**📊 TradingView Integration**
+All stock/crypto embeds include a clickable link to view the symbol on TradingView web.
         """
         await ctx.send(help_text)
     finally:
