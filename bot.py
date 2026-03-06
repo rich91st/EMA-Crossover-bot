@@ -28,11 +28,6 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 
-# Public.com credentials
-PUBLIC_CLIENT_ID = os.getenv('PUBLIC_CLIENT_ID')
-PUBLIC_CLIENT_SECRET = os.getenv('PUBLIC_CLIENT_SECRET')
-PUBLIC_ACCOUNT_ID = os.getenv('PUBLIC_ACCOUNT_ID')
-
 # MongoDB setup
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client['trading_bot']
@@ -46,12 +41,6 @@ bot._skip_check = lambda x, y: False
 last_command_time = {}
 user_busy = {}
 cancellation_flags = {}
-
-# Public.com token cache
-public_token_cache = {
-    'token': None,
-    'expires_at': None
-}
 
 # ====================
 # WEB SERVER
@@ -270,44 +259,6 @@ async def fetch_ohlcv(symbol, timeframe):
         return await fetch_twelvedata(symbol, timeframe)
     else:
         return await fetch_twelvedata(symbol, timeframe)
-
-# ====================
-# PUBLIC.COM OPTIONS AUTHENTICATION - FIXED URL
-# ====================
-
-async def get_public_access_token():
-    """Get a valid access token from Public.com using the secret."""
-    global public_token_cache
-    
-    if public_token_cache['token'] and public_token_cache['expires_at']:
-        if datetime.now() < public_token_cache['expires_at']:
-            return public_token_cache['token']
-    
-    # FIXED: Correct URL from documentation
-    url = "https://api.public.com/userpiauthservice"
-    headers = {"Content-Type": "application/json"}
-    payload = {
-        "secret": PUBLIC_CLIENT_SECRET,
-        "validityInMinutes": 60
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, headers=headers) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    print(f"Public token error: {resp.status} - {error_text}")
-                    return None
-                data = await resp.json()
-                token = data.get('accessToken')
-                if token:
-                    public_token_cache['token'] = token
-                    public_token_cache['expires_at'] = datetime.now() + timedelta(minutes=55)
-                    print(f"✅ Got new Public token: {token[:10]}...")
-                return token
-    except Exception as e:
-        print(f"Error getting Public token: {e}")
-        return None
 
 # ====================
 # FINNHUB NEWS & EVENTS
@@ -780,196 +731,6 @@ def format_zone_embed(symbol, signals, timeframe):
     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
     embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
     return embed
-
-# ====================
-# OPTIONS COMMAND WITH PUBLIC.COM - FIXED URLS
-# ====================
-
-@bot.command(name='test_public')
-async def test_public(ctx):
-    """Test Public.com authentication."""
-    token = await get_public_access_token()
-    if token:
-        await ctx.send(f"✅ Successfully authenticated with Public.com!\nToken: `{token[:10]}...`")
-    else:
-        await ctx.send("❌ Failed to authenticate with Public.com. Check your credentials.")
-
-@bot.command(name='options')
-async def options_analysis(ctx, ticker: str):
-    """Complete options analysis using real Public.com data."""
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        await ctx.send(f"🔍 Analyzing options for **{ticker.upper()}** (30-45 DTE)...")
-
-        # 1. Get access token
-        access_token = await get_public_access_token()
-        if not access_token:
-            await ctx.send("❌ Could not authenticate with Public.com. Please check your API credentials.")
-            return
-
-        # 2. Get current stock price from your existing data source
-        df = await fetch_ohlcv(ticker, 'daily')
-        if df is None or df.empty:
-            await ctx.send(f"Could not fetch current price for {ticker}.")
-            return
-        stock_price = float(df['close'].iloc[-1])
-
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Content-Type": "application/json"
-        }
-
-        # 3. Get available expirations - FIXED URL
-        exp_url = f"https://api.public.com/userapigateway/option-expirations"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(exp_url, headers=headers, params={"symbol": ticker.upper()}) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    await ctx.send(f"❌ Failed to fetch expirations. Status: {resp.status}\n{error_text[:200]}")
-                    return
-                exp_data = await resp.json()
-
-        # 4. Find expiration in 30-45 day range
-        today = datetime.now().date()
-        target_exp = None
-        target_dte = None
-        
-        for exp in exp_data.get('expirations', []):
-            exp_date = datetime.strptime(exp['date'], '%Y-%m-%d').date()
-            dte = (exp_date - today).days
-            if 30 <= dte <= 45:
-                target_exp = exp
-                target_dte = dte
-                break
-
-        if not target_exp:
-            await ctx.send(f"No options expiration found in 30-45 day range for {ticker}.")
-            return
-
-        # 5. Get option chain for that expiration - FIXED URL
-        chain_url = f"https://api.public.com/userapigateway/option-chain"
-        params = {
-            "symbol": ticker.upper(),
-            "expirationDate": target_exp['date']
-        }
-        
-        async with aiohttp.ClientSession() as session:
-            async with session.get(chain_url, headers=headers, params=params) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    await ctx.send(f"❌ Failed to fetch option chain. Status: {resp.status}\n{error_text[:200]}")
-                    return
-                chain_data = await resp.json()
-
-        # 6. Separate calls and puts
-        calls = []
-        puts = []
-        
-        for option in chain_data.get('options', []):
-            if option.get('type') == 'CALL':
-                calls.append(option)
-            elif option.get('type') == 'PUT':
-                puts.append(option)
-
-        # 7. Find best ATM call (Delta ~0.60-0.70)
-        best_call = None
-        best_put = None
-        best_call_diff = float('inf')
-        best_put_diff = float('inf')
-
-        for call in calls:
-            delta = call.get('delta', 0)
-            if 0.50 <= delta <= 0.80:
-                diff = abs(delta - 0.65)
-                if diff < best_call_diff:
-                    best_call_diff = diff
-                    best_call = call
-
-        for put in puts:
-            delta = abs(put.get('delta', 0))
-            if 0.50 <= delta <= 0.80:
-                diff = abs(delta - 0.65)
-                if diff < best_put_diff:
-                    best_put_diff = diff
-                    best_put = put
-
-        # 8. Calculate PCR (Put-Call Ratio)
-        total_call_oi = sum(c.get('openInterest', 0) for c in calls)
-        total_put_oi = sum(p.get('openInterest', 0) for p in puts)
-        pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0
-
-        # 9. Build embed
-        embed = discord.Embed(
-            title=f"📊 OPTIONS ANALYSIS: {ticker.upper()}",
-            description=f"Current Price: **${stock_price:.2f}**\nExpiration: {target_exp['date']} ({target_dte} days)",
-            color=0x00ff00
-        )
-
-        # Market Sentiment
-        sentiment = "🟢 Bullish" if pcr < 0.7 else "🔴 Bearish" if pcr > 1.0 else "⚪ Neutral"
-        embed.add_field(
-            name="📈 Market Sentiment",
-            value=f"PCR: {pcr:.2f} ({sentiment})",
-            inline=False
-        )
-
-        # Best Call Pick
-        if best_call:
-            bid = float(best_call.get('bid', 0))
-            ask = float(best_call.get('ask', 0))
-            premium = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
-            embed.add_field(
-                name="✅ BEST CALL PICK (Bullish)",
-                value=f"Strike: ${best_call.get('strike', 0):.2f}\n"
-                      f"Premium: ${premium:.2f}\n"
-                      f"Breakeven: ${best_call.get('strike', 0) + premium:.2f}\n"
-                      f"Delta: {best_call.get('delta', 0):.2f} ({best_call.get('delta', 0)*100:.0f}% ITM)\n"
-                      f"IV: {best_call.get('impliedVolatility', 0)*100:.0f}% | OI: {best_call.get('openInterest', 0)}",
-                inline=True
-            )
-
-        # Best Put Pick
-        if best_put:
-            bid = float(best_put.get('bid', 0))
-            ask = float(best_put.get('ask', 0))
-            premium = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
-            embed.add_field(
-                name="✅ BEST PUT PICK (Bearish)",
-                value=f"Strike: ${best_put.get('strike', 0):.2f}\n"
-                      f"Premium: ${premium:.2f}\n"
-                      f"Breakeven: ${best_put.get('strike', 0) - premium:.2f}\n"
-                      f"Delta: {best_put.get('delta', 0):.2f} ({abs(best_put.get('delta', 0))*100:.0f}% ITM)\n"
-                      f"IV: {best_put.get('impliedVolatility', 0)*100:.0f}% | OI: {best_put.get('openInterest', 0)}",
-                inline=True
-            )
-
-        # Entry/Exit Strategy
-        entry_exit = f"""
-📥 **Entry Strategy**
-• CALL: Enter above ${stock_price * 1.01:.2f}
-• PUT: Enter below ${stock_price * 0.99:.2f}
-
-📤 **Exit Plan**
-• Take profit at 30-50% gain
-• Stop loss if premium drops 50%
-• Exit 5-7 days before expiration
-"""
-        embed.add_field(name="📊 Entry & Exit", value=entry_exit, inline=False)
-
-        # TradingView link
-        web_url = get_tradingview_web_link(ticker)
-        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-        embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-
-        embed.set_footer(text="Data from Public.com • Options involve risk")
-        await ctx.send(embed=embed)
-
-    except Exception as e:
-        await ctx.send(f"❌ Error analyzing options: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
 
 # ====================
 # EXISTING COMMANDS
@@ -1452,8 +1213,6 @@ async def help_command(ctx):
 `!signals [daily|weekly|4h]` – Scan only symbols with active signals (with charts)
 `!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
 `!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings, macro events)
-`!options TICKER` – Complete options analysis with strike picks, PCR, and entry/exit guidance (30-45 DTE)
-`!test_public` – Test Public.com authentication for options data
 `!zone SYMBOL [timeframe]` – Show buy and sell zones based on support/resistance and EMAs
 `!add SYMBOL` – Add a symbol to watchlist (use `BTC/USD` for crypto)
 `!remove SYMBOL` – Remove a symbol from watchlist
@@ -1461,9 +1220,6 @@ async def help_command(ctx):
 `!ping` – Test bot responsiveness
 `!stopscan` – Stops any ongoing scan
 `!help` – This message
-
-**📊 Options Analysis**
-`!options` provides real options data from Public.com with strike recommendations, market sentiment (PCR), and entry/exit strategy.
         """
         await ctx.send(help_text)
     finally:
