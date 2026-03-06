@@ -28,6 +28,11 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 
+# Public.com credentials
+PUBLIC_CLIENT_ID = os.getenv('PUBLIC_CLIENT_ID')
+PUBLIC_CLIENT_SECRET = os.getenv('PUBLIC_CLIENT_SECRET')
+PUBLIC_ACCOUNT_ID = os.getenv('PUBLIC_ACCOUNT_ID')
+
 # MongoDB setup
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client['trading_bot']
@@ -39,8 +44,14 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot._skip_check = lambda x, y: False
 
 last_command_time = {}
-user_busy = {}          # per‑user lock
+user_busy = {}          # per‑user lock to prevent overlapping commands
 cancellation_flags = {} # user_id -> bool (True means cancel requested)
+
+# Public.com token cache
+public_token_cache = {
+    'token': None,
+    'expires_at': None
+}
 
 # ====================
 # WEB SERVER
@@ -113,7 +124,7 @@ def normalize_symbol(symbol):
     return symbol
 
 # ====================
-# TRADINGVIEW WEB LINK
+# TRADINGVIEW WEB LINK GENERATOR
 # ====================
 
 def get_tradingview_web_link(symbol):
@@ -137,6 +148,7 @@ async def fetch_twelvedata(symbol, timeframe):
     interval = interval_map.get(timeframe)
     if not interval:
         return None
+
     url = "https://api.twelvedata.com/time_series"
     params = {
         'symbol': symbol,
@@ -145,6 +157,7 @@ async def fetch_twelvedata(symbol, timeframe):
         'outputsize': 200,
         'format': 'JSON'
     }
+
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
@@ -174,10 +187,12 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
     if not coin_id:
         print(f"CoinGecko: no coin_id for {symbol}")
         return None
+
     days_map = {'daily': 30, 'weekly': 90, '4h': 7}
     days = days_map.get(timeframe)
     if not days:
         return None
+
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {'vs_currency': 'usd', 'days': days}
     try:
@@ -206,6 +221,7 @@ async def fetch_coingecko_price(symbol):
     coin_id = coin_map.get(base)
     if not coin_id:
         return None
+
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {'ids': coin_id, 'vs_currencies': 'usd'}
     try:
@@ -219,7 +235,7 @@ async def fetch_coingecko_price(symbol):
                 if price is None:
                     print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Synthetic OHLC
+                # Create synthetic OHLC
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='D')
                 close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
@@ -227,6 +243,7 @@ async def fetch_coingecko_price(symbol):
                 high_prices = close_prices * 1.02
                 low_prices = close_prices * 0.98
                 volumes = np.abs(np.random.normal(1e6, 2e5, 200))
+
                 df = pd.DataFrame({
                     'timestamp': dates,
                     'open': open_prices,
@@ -255,6 +272,45 @@ async def fetch_ohlcv(symbol, timeframe):
         return await fetch_twelvedata(symbol, timeframe)
 
 # ====================
+# PUBLIC.COM OPTIONS AUTHENTICATION
+# ====================
+
+async def get_public_access_token():
+    """Get a valid access token from Public.com using the secret."""
+    global public_token_cache
+    
+    # Check if we have a valid cached token
+    if public_token_cache['token'] and public_token_cache['expires_at']:
+        if datetime.now() < public_token_cache['expires_at']:
+            return public_token_cache['token']
+    
+    # Get new token using client secret
+    url = "https://trading.public.com/userapiauthservice/personal/access-tokens"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "secret": PUBLIC_CLIENT_SECRET,
+        "validityInMinutes": 60
+    }
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    print(f"Public token error: {resp.status} - {error_text}")
+                    return None
+                data = await resp.json()
+                token = data.get('accessToken')
+                if token:
+                    public_token_cache['token'] = token
+                    public_token_cache['expires_at'] = datetime.now() + timedelta(minutes=55)
+                    print(f"✅ Got new Public token: {token[:10]}...")
+                return token
+    except Exception as e:
+        print(f"Error getting Public token: {e}")
+        return None
+
+# ====================
 # FINNHUB NEWS FETCHING
 # ====================
 
@@ -279,7 +335,7 @@ async def fetch_stock_news(symbol):
         return None
 
 # ====================
-# UPCOMING EVENTS
+# UPCOMING EVENTS (CATALYSTS)
 # ====================
 
 async def fetch_earnings_upcoming(symbol, days=14):
@@ -392,7 +448,7 @@ async def fetch_economic_events(days=14):
         return []
 
 # ====================
-# INDICATOR CALCULATIONS (unchanged)
+# INDICATOR CALCULATIONS
 # ====================
 
 def calculate_indicators(df):
@@ -505,7 +561,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (unchanged)
+# CHART GENERATION
 # ====================
 
 def generate_chart_image(df, symbol, timeframe):
@@ -566,7 +622,7 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# EMBED FORMATTING (unchanged)
+# EMBED FORMATTING
 # ====================
 
 def format_embed(symbol, signals, timeframe):
@@ -670,6 +726,7 @@ def format_zone_embed(symbol, signals, timeframe):
     ema50 = signals['ema50']
     ema200 = signals['ema200']
     
+    # Determine which EMAs act as support or resistance
     support_levels = [support]
     resistance_levels = [resistance]
     
@@ -694,9 +751,11 @@ def format_zone_embed(symbol, signals, timeframe):
         else:
             resistance_levels.append(ema5)
     
-    support_levels.sort(reverse=True)
-    resistance_levels.sort()
+    # Sort levels
+    support_levels.sort(reverse=True)   # highest support first
+    resistance_levels.sort()             # lowest resistance first
 
+    # TradingView web link
     web_url = get_tradingview_web_link(symbol)
     tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
     
@@ -706,6 +765,7 @@ def format_zone_embed(symbol, signals, timeframe):
         color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00
     )
     
+    # Support (Buy) Zone
     sup_text = ""
     for i, level in enumerate(support_levels):
         if i == 0:
@@ -715,6 +775,7 @@ def format_zone_embed(symbol, signals, timeframe):
     if sup_text:
         embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
     
+    # Resistance (Sell) Zone
     res_text = ""
     for i, level in enumerate(resistance_levels):
         if i == 0:
@@ -724,111 +785,145 @@ def format_zone_embed(symbol, signals, timeframe):
     if res_text:
         embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
     
+    # Target
     target = resistance + (resistance - support)
     embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
+    
+    # TradingView web link at the bottom
     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+    
     embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
     return embed
 
 # ====================
-# ENHANCED OPTIONS COMMAND
+# NEW OPTIONS COMMAND WITH PUBLIC.COM
 # ====================
+
+@bot.command(name='test_public')
+async def test_public(ctx):
+    """Test Public.com authentication."""
+    token = await get_public_access_token()
+    if token:
+        await ctx.send(f"✅ Successfully authenticated with Public.com!\nToken: `{token[:10]}...`")
+    else:
+        await ctx.send("❌ Failed to authenticate with Public.com. Check your credentials.")
 
 @bot.command(name='options')
 async def options_analysis(ctx, ticker: str):
-    """Complete options analysis with recommendations for 30-45 DTE."""
+    """Complete options analysis using real Public.com data."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
     try:
         await ctx.send(f"🔍 Analyzing options for **{ticker.upper()}** (30-45 DTE)...")
 
-        # 1. Fetch option chain from Finnhub
-        url = f"https://finnhub.io/api/v1/stock/option-chain?symbol={ticker}&token={FINNHUB_API_KEY}"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    await ctx.send(f"Could not fetch options data for {ticker}.")
-                    return
-                data = await resp.json()
-
-        if not data or 'data' not in data or len(data['data']) == 0:
-            await ctx.send(f"No options data found for {ticker}.")
+        # 1. Get access token
+        access_token = await get_public_access_token()
+        if not access_token:
+            await ctx.send("❌ Could not authenticate with Public.com. Please check your API credentials.")
             return
 
-        # 2. Find expiration in 30-45 day range
-        target_dte = None
-        target_exp = None
+        # 2. Get current stock price from your existing data source
+        df = await fetch_ohlcv(ticker, 'daily')
+        if df is None or df.empty:
+            await ctx.send(f"Could not fetch current price for {ticker}.")
+            return
+        stock_price = float(df['close'].iloc[-1])
+
+        # 3. Get account ID from environment
+        account_id = PUBLIC_ACCOUNT_ID
+        if not account_id:
+            await ctx.send("❌ PUBLIC_ACCOUNT_ID not set in environment.")
+            return
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json"
+        }
+
+        # 4. Get available expirations
+        exp_url = f"https://trading.public.com/userapigateway/marketdata/{account_id}/option-expirations"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(exp_url, headers=headers, params={"symbol": ticker.upper()}) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    await ctx.send(f"❌ Failed to fetch expirations. Status: {resp.status}\n{error_text[:200]}")
+                    return
+                exp_data = await resp.json()
+
+        # 5. Find expiration in 30-45 day range
         today = datetime.now().date()
+        target_exp = None
+        target_dte = None
         
-        for exp_data in data['data']:
-            exp_date = datetime.strptime(exp_data['expirationDate'], '%Y-%m-%d').date()
+        for exp in exp_data.get('expirations', []):
+            exp_date = datetime.strptime(exp['date'], '%Y-%m-%d').date()
             dte = (exp_date - today).days
             if 30 <= dte <= 45:
+                target_exp = exp
                 target_dte = dte
-                target_exp = exp_data
                 break
-        
+
         if not target_exp:
-            await ctx.send(f"No options expiration found in 30-45 day range for {ticker}. Try another ticker.")
+            await ctx.send(f"No options expiration found in 30-45 day range for {ticker}.")
             return
 
-        # 3. Extract data
-        current_price = data.get('underlyingPrice', 0)
-        options = target_exp['options']
+        # 6. Get option chain for that expiration
+        chain_url = f"https://trading.public.com/userapigateway/marketdata/{account_id}/option-chain"
+        params = {
+            "symbol": ticker.upper(),
+            "expirationDate": target_exp['date']
+        }
         
-        # Calculate PCR
-        total_call_oi = sum(opt.get('openInterest', 0) for opt in options if opt['type'] == 'CALL')
-        total_put_oi = sum(opt.get('openInterest', 0) for opt in options if opt['type'] == 'PUT')
-        pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0
+        async with aiohttp.ClientSession() as session:
+            async with session.get(chain_url, headers=headers, params=params) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    await ctx.send(f"❌ Failed to fetch option chain. Status: {resp.status}\n{error_text[:200]}")
+                    return
+                chain_data = await resp.json()
+
+        # 7. Separate calls and puts
+        calls = []
+        puts = []
         
-        # Find max pain (simplified)
-        max_pain = None
-        min_loss = float('inf')
-        for opt in options:
-            if opt['type'] == 'CALL' and opt['strike'] >= current_price * 0.9:
-                loss = abs(opt['strike'] - current_price) * opt.get('openInterest', 0)
-                if loss < min_loss:
-                    min_loss = loss
-                    max_pain = opt['strike']
-        
-        # Find support (high put OI) and resistance (high call OI)
-        support_strikes = []
-        resistance_strikes = []
-        for opt in options:
-            if opt['type'] == 'PUT' and opt['strike'] < current_price:
-                if opt.get('openInterest', 0) > 1000:
-                    support_strikes.append(opt['strike'])
-            if opt['type'] == 'CALL' and opt['strike'] > current_price:
-                if opt.get('openInterest', 0) > 1000:
-                    resistance_strikes.append(opt['strike'])
-        
-        # Find best ATM/ITM call and put (Delta ~0.60-0.70)
+        for option in chain_data.get('options', []):
+            if option.get('type') == 'CALL':
+                calls.append(option)
+            elif option.get('type') == 'PUT':
+                puts.append(option)
+
+        # 8. Find best ATM call (Delta ~0.60-0.70)
         best_call = None
         best_put = None
-        best_call_delta_diff = float('inf')
-        best_put_delta_diff = float('inf')
-        
-        for opt in options:
-            delta = opt.get('delta', 0)
-            iv = opt.get('iv', 0) * 100
-            oi = opt.get('openInterest', 0)
-            
-            if opt['type'] == 'CALL' and 0.50 <= delta <= 0.80:
-                diff = abs(delta - 0.65)
-                if diff < best_call_delta_diff:
-                    best_call_delta_diff = diff
-                    best_call = opt
-            elif opt['type'] == 'PUT' and -0.80 <= delta <= -0.50:
-                diff = abs(abs(delta) - 0.65)
-                if diff < best_put_delta_diff:
-                    best_put_delta_diff = diff
-                    best_put = opt
+        best_call_diff = float('inf')
+        best_put_diff = float('inf')
 
-        # 4. Build embed
+        for call in calls:
+            delta = call.get('delta', 0)
+            if 0.50 <= delta <= 0.80:
+                diff = abs(delta - 0.65)
+                if diff < best_call_diff:
+                    best_call_diff = diff
+                    best_call = call
+
+        for put in puts:
+            delta = abs(put.get('delta', 0))
+            if 0.50 <= delta <= 0.80:
+                diff = abs(delta - 0.65)
+                if diff < best_put_diff:
+                    best_put_diff = diff
+                    best_put = put
+
+        # 9. Calculate PCR (Put-Call Ratio)
+        total_call_oi = sum(c.get('openInterest', 0) for c in calls)
+        total_put_oi = sum(p.get('openInterest', 0) for p in puts)
+        pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0
+
+        # 10. Build embed
         embed = discord.Embed(
             title=f"📊 OPTIONS ANALYSIS: {ticker.upper()}",
-            description=f"Current Price: **${current_price:.2f}**\nExpiration: {target_exp['expirationDate']} ({target_dte} days)",
+            description=f"Current Price: **${stock_price:.2f}**\nExpiration: {target_exp['date']} ({target_dte} days)",
             color=0x00ff00
         )
 
@@ -836,72 +931,59 @@ async def options_analysis(ctx, ticker: str):
         sentiment = "🟢 Bullish" if pcr < 0.7 else "🔴 Bearish" if pcr > 1.0 else "⚪ Neutral"
         embed.add_field(
             name="📈 Market Sentiment",
-            value=f"PCR: {pcr:.2f} ({sentiment})\nMax Pain: ${max_pain:.2f}\nSupport: ${', $'.join(str(s) for s in support_strikes[:3])}\nResistance: ${', $'.join(str(r) for r in resistance_strikes[:3])}",
+            value=f"PCR: {pcr:.2f} ({sentiment})",
             inline=False
         )
 
         # Best Call Pick
         if best_call:
-            strike = best_call['strike']
-            premium = (best_call.get('bid', 0) + best_call.get('ask', 0)) / 2
-            delta = best_call.get('delta', 0)
-            iv = best_call.get('iv', 0) * 100
-            oi = best_call.get('openInterest', 0)
-            breakeven = strike + premium
-            
+            bid = float(best_call.get('bid', 0))
+            ask = float(best_call.get('ask', 0))
+            premium = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
             embed.add_field(
                 name="✅ BEST CALL PICK (Bullish)",
-                value=f"Strike: ${strike:.2f} Call\nPremium: ${premium:.2f}\nBreakeven: ${breakeven:.2f}\nDelta: {delta:.2f} ({delta*100:.0f}% ITM chance)\nTheta: -${best_call.get('theta', 0):.2f}/day\nIV: {iv:.0f}% | OI: {oi}",
+                value=f"Strike: ${best_call.get('strike', 0):.2f}\n"
+                      f"Premium: ${premium:.2f}\n"
+                      f"Breakeven: ${best_call.get('strike', 0) + premium:.2f}\n"
+                      f"Delta: {best_call.get('delta', 0):.2f} ({best_call.get('delta', 0)*100:.0f}% ITM)\n"
+                      f"IV: {best_call.get('impliedVolatility', 0)*100:.0f}% | OI: {best_call.get('openInterest', 0)}",
                 inline=True
             )
 
         # Best Put Pick
         if best_put:
-            strike = best_put['strike']
-            premium = (best_put.get('bid', 0) + best_put.get('ask', 0)) / 2
-            delta = best_put.get('delta', 0)
-            iv = best_put.get('iv', 0) * 100
-            oi = best_put.get('openInterest', 0)
-            breakeven = strike - premium
-            
+            bid = float(best_put.get('bid', 0))
+            ask = float(best_put.get('ask', 0))
+            premium = (bid + ask) / 2 if bid > 0 and ask > 0 else 0
             embed.add_field(
                 name="✅ BEST PUT PICK (Bearish)",
-                value=f"Strike: ${strike:.2f} Put\nPremium: ${premium:.2f}\nBreakeven: ${breakeven:.2f}\nDelta: {delta:.2f} ({abs(delta)*100:.0f}% ITM chance)\nTheta: -${best_put.get('theta', 0):.2f}/day\nIV: {iv:.0f}% | OI: {oi}",
+                value=f"Strike: ${best_put.get('strike', 0):.2f}\n"
+                      f"Premium: ${premium:.2f}\n"
+                      f"Breakeven: ${best_put.get('strike', 0) - premium:.2f}\n"
+                      f"Delta: {best_put.get('delta', 0):.2f} ({abs(best_put.get('delta', 0))*100:.0f}% ITM)\n"
+                      f"IV: {best_put.get('impliedVolatility', 0)*100:.0f}% | OI: {best_put.get('openInterest', 0)}",
                 inline=True
             )
 
         # Entry/Exit Strategy
-        # Get signal from your existing analysis if available (simplified here)
-        # In a real implementation, you'd call get_signals on fetched price data
-        trend_signal = "NEUTRAL"
-        if best_call and best_put:
-            trend_signal = "WEAK BUY"  # placeholder
-
         entry_exit = f"""
 📥 **Entry Strategy**
-• CALL: Enter on breakout above ${current_price + 1:.2f} with volume
-• PUT: Enter on breakdown below ${current_price - 1:.2f}
+• CALL: Enter above ${stock_price * 1.01:.2f}
+• PUT: Enter below ${stock_price * 0.99:.2f}
 
 📤 **Exit Plan**
 • Take profit at 30-50% gain
 • Stop loss if premium drops 50%
-• Exit all 5-7 days before expiration
+• Exit 5-7 days before expiration
 """
         embed.add_field(name="📊 Entry & Exit", value=entry_exit, inline=False)
-
-        # Recommendation
-        rec = f"Based on current trend ({trend_signal}), consider the **{'$' + str(best_call['strike']) + ' CALL' if best_call else ''}** with {target_dte} DTE."
-        embed.add_field(name="💡 Recommendation", value=rec, inline=False)
-
-        # Unusual Flow (placeholder)
-        embed.add_field(name="💰 Unusual Flow", value="• No unusual activity detected", inline=False)
 
         # TradingView link
         web_url = get_tradingview_web_link(ticker)
         tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
         embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
 
-        embed.set_footer(text="Data from Finnhub • Options involve risk")
+        embed.set_footer(text="Data from Public.com • Options involve risk")
         await ctx.send(embed=embed)
 
     except Exception as e:
@@ -1390,7 +1472,8 @@ async def help_command(ctx):
 `!signals [daily|weekly|4h]` – Scan only symbols with active signals (with charts)
 `!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
 `!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings, macro events)
-`!options TICKER` – Complete options analysis with recommendations (30-45 DTE)
+`!options TICKER` – Complete options analysis with strike picks, PCR, and entry/exit guidance (30-45 DTE)
+`!test_public` – Test Public.com authentication for options data
 `!zone SYMBOL [timeframe]` – Show buy and sell zones based on support/resistance and EMAs
 `!add SYMBOL` – Add a symbol to watchlist (use `BTC/USD` for crypto)
 `!remove SYMBOL` – Remove a symbol from watchlist
@@ -1400,7 +1483,7 @@ async def help_command(ctx):
 `!help` – This message
 
 **📊 Options Analysis**
-`!options` provides strike picks, entry/exit zones, and market sentiment.
+`!options` provides real options data from Public.com with strike recommendations, market sentiment (PCR), and entry/exit strategy.
         """
         await ctx.send(help_text)
     finally:
