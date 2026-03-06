@@ -190,11 +190,10 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
         print(f"CoinGecko: no coin_id for {symbol}")
         return None
 
-    # CoinGecko doesn't support 5min/15min, so we'll use a different approach for intraday
     days_map = {
-        '5min': 1,    # 1 day of 5min data
-        '15min': 2,   # 2 days of 15min data
-        '1h': 7,      # 7 days of 1h data
+        '5min': 1,
+        '15min': 2,
+        '1h': 7,
         '4h': 7,
         'daily': 30, 
         'weekly': 90
@@ -223,11 +222,6 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
 
 async def fetch_coingecko_price(symbol):
     base = symbol.split('/')[0].lower()
-    coin_map = {
-        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
-        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
-        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
-    }
     coin_id = coin_map.get(base)
     if not coin_id:
         return None
@@ -238,26 +232,19 @@ async def fetch_coingecko_price(symbol):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"CoinGecko price error for {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
                 price = data.get(coin_id, {}).get('usd')
                 if price is None:
-                    print(f"CoinGecko price: no price for {coin_id}")
                     return None
-                # Create synthetic OHLC with appropriate frequency based on timeframe
+                # Create synthetic OHLC
                 np.random.seed(42)
-                
-                # For intraday, generate more frequent data
-                periods = 200
-                freq = 'H'  # Default hourly
-                
-                dates = pd.date_range(end=datetime.now(), periods=periods, freq=freq)
-                close_prices = price * (1 + np.random.normal(0, 0.01, periods).cumsum() * 0.01)
+                dates = pd.date_range(end=datetime.now(), periods=200, freq='H')
+                close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
                 open_prices = close_prices * 0.99
                 high_prices = close_prices * 1.02
                 low_prices = close_prices * 0.98
-                volumes = np.abs(np.random.normal(1e6, 2e5, periods))
+                volumes = np.abs(np.random.normal(1e6, 2e5, 200))
 
                 df = pd.DataFrame({
                     'timestamp': dates,
@@ -275,19 +262,16 @@ async def fetch_coingecko_price(symbol):
 
 async def fetch_ohlcv(symbol, timeframe):
     if '/' in symbol:  # crypto
-        # For intraday crypto, Twelve Data works better
         if timeframe in ['5min', '15min', '1h', '4h']:
             df = await fetch_twelvedata(symbol, timeframe)
             if df is not None:
                 return df
-        # Fallback to CoinGecko for daily/weekly
         df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is not None:
             return df
         df = await fetch_coingecko_price(symbol)
         if df is not None:
             return df
-        print(f"Trying Twelve Data as final fallback for {symbol}")
         return await fetch_twelvedata(symbol, timeframe)
     else:
         return await fetch_twelvedata(symbol, timeframe)
@@ -308,7 +292,6 @@ async def fetch_stock_news(symbol):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Finnhub news error for {symbol}: status {resp.status}")
                     return None
                 data = await resp.json()
                 return data if isinstance(data, list) else None
@@ -323,7 +306,6 @@ async def fetch_earnings_upcoming(symbol, days=14):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Earnings API error {symbol}: {resp.status}")
                     return []
                 data = await resp.json()
                 earnings = data.get('earningsCalendar', [])
@@ -359,7 +341,6 @@ async def fetch_dividends_upcoming(symbol, days=14):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Dividends API error {symbol}: {resp.status}")
                     return []
                 data = await resp.json()
                 return data if isinstance(data, list) else []
@@ -381,7 +362,6 @@ async def fetch_splits_upcoming(symbol, days=14):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Splits API error {symbol}: {resp.status}")
                     return []
                 data = await resp.json()
                 return data if isinstance(data, list) else []
@@ -396,7 +376,6 @@ async def fetch_analyst_ratings(symbol, limit=3):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Analyst ratings API error {symbol}: {resp.status}")
                     return []
                 data = await resp.json()
                 return data[:limit] if data else []
@@ -417,7 +396,6 @@ async def fetch_economic_events(days=14):
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"Economic calendar API error: {resp.status}")
                     return []
                 data = await resp.json()
                 return data.get('economicCalendar', [])
@@ -514,21 +492,6 @@ def get_signals(df):
 
     return signals
 
-def get_signal_emoji(signals):
-    """Return emoji based on signal strength"""
-    net = signals['net_score']
-    if net >= 2:
-        return "🟢🟢 STRONG BUY"
-    elif net == 1:
-        return "🟢 BUY"
-    elif net == 0:
-        return "⚪ NEUTRAL"
-    elif net == -1:
-        return "🔴 SELL"
-    elif net <= -2:
-        return "🔴🔴 STRONG SELL"
-    return "⚪"
-
 def get_rating(signals):
     net = signals['net_score']
     rsi = signals['rsi']
@@ -561,14 +524,12 @@ def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
         return None
     
-    # For intraday charts, show more recent candles
     if timeframe in ['5min', '15min', '1h']:
         chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(50).copy()
     else:
         chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
     
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-
     volume_all_nan = chart_data['Volume'].isna().all()
 
     apds = []
@@ -692,7 +653,6 @@ def format_embed(symbol, signals, timeframe):
     ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
     ema_text = "\n".join(ema_lines) if valid_items else "N/A"
 
-    # TradingView web link
     web_url = get_tradingview_web_link(symbol)
     tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
 
@@ -786,7 +746,142 @@ def format_zone_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# MULTI-TIMEFRAME SIGNALS COMMAND
+# MULTI-TIMEFRAME SUMMARY FUNCTIONS
+# ====================
+
+async def send_symbol_with_chart(ctx, symbol, df, timeframe, all_signals=None):
+    """Send a chart with signals and optionally show multi-timeframe summary"""
+    df_calc = calculate_indicators(df)
+    signals = get_signals(df_calc)
+    embed = format_embed(symbol, signals, timeframe)
+    
+    try:
+        chart_buffer = generate_chart_image(df, symbol, timeframe)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='chart.png')
+            embed.set_image(url='attachment://chart.png')
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(embed=embed)
+            
+        # If we have multi-timeframe data for this symbol, show summary right after chart
+        if all_signals and symbol in all_signals:
+            await send_compact_summary(ctx, symbol, all_signals[symbol])
+            
+    except Exception as e:
+        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
+        await ctx.send(embed=embed)
+
+async def send_compact_summary(ctx, symbol, timeframe_signals):
+    """Send a compact summary under each symbol's chart"""
+    
+    # Sort timeframes
+    timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
+    sorted_items = sorted(timeframe_signals.items(), key=lambda x: timeframe_order.get(x[0], 99))
+    
+    # Count signals
+    bullish = sum(1 for tf, sig in sorted_items if sig['net_score'] > 0)
+    bearish = sum(1 for tf, sig in sorted_items if sig['net_score'] < 0)
+    total = len(sorted_items)
+    
+    # Determine overall bias
+    if bullish > bearish:
+        bias = "🟢 BULLISH"
+        color = 0x00ff00
+    elif bearish > bullish:
+        bias = "🔴 BEARISH" 
+        color = 0xff0000
+    else:
+        bias = "⚪ NEUTRAL"
+        color = 0xffff00
+    
+    # Create signal line with emojis
+    signal_line = ""
+    for tf, sig in sorted_items:
+        if sig['net_score'] >= 2:
+            signal_line += "🟢🟢 "
+        elif sig['net_score'] == 1:
+            signal_line += "🟢 "
+        elif sig['net_score'] == 0:
+            signal_line += "⚪ "
+        elif sig['net_score'] == -1:
+            signal_line += "🔴 "
+        elif sig['net_score'] <= -2:
+            signal_line += "🔴🔴 "
+        signal_line += f"{tf}  "
+    
+    # Compact embed
+    embed = discord.Embed(
+        title=f"📊 {symbol} Multi-Timeframe Summary",
+        description=f"{bias} ({bullish}/{total} bullish)",
+        color=color
+    )
+    
+    embed.add_field(name="⏱️ All Timeframes", value=signal_line, inline=False)
+    
+    # Add recommendation if aligned
+    if bullish == total:
+        embed.add_field(name="🎯 RECOMMENDATION", value="✅ **STRONG BUY** - All timeframes aligned!", inline=False)
+    elif bearish == total:
+        embed.add_field(name="🎯 RECOMMENDATION", value="❌ **STRONG SELL** - All timeframes aligned!", inline=False)
+    elif bullish >= total * 0.6:
+        embed.add_field(name="🎯 RECOMMENDATION", value="🟢 **CAUTIOUS BUY** - Most timeframes bullish", inline=False)
+    elif bearish >= total * 0.6:
+        embed.add_field(name="🎯 RECOMMENDATION", value="🔴 **CAUTIOUS SELL** - Most timeframes bearish", inline=False)
+    
+    await ctx.send(embed=embed)
+
+async def send_final_summary(ctx, signal_summary):
+    """Send a final summary of all symbols with signals"""
+    
+    if not signal_summary:
+        return
+    
+    embed = discord.Embed(
+        title="📊 MULTI-TIMEFRAME SCAN COMPLETE",
+        description=f"Found signals for **{len(signal_summary)}** symbols",
+        color=0x3498db
+    )
+    
+    # Group by signal strength
+    strong_buy = []
+    buy = []
+    neutral = []
+    sell = []
+    strong_sell = []
+    
+    for symbol, timeframes in signal_summary.items():
+        avg_score = sum(sig['net_score'] for sig in timeframes.values()) / len(timeframes)
+        bullish_count = sum(1 for sig in timeframes.values() if sig['net_score'] > 0)
+        bearish_count = sum(1 for sig in timeframes.values() if sig['net_score'] < 0)
+        
+        if avg_score >= 1.5:
+            strong_buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
+        elif avg_score > 0:
+            buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
+        elif avg_score == 0:
+            neutral.append(f"{symbol}")
+        elif avg_score > -1.5:
+            sell.append(f"{symbol} ({bearish_count}/{len(timeframes)})")
+        else:
+            strong_sell.append(f"{symbol} ({bearish_count}/{len(timeframes)})")
+    
+    if strong_buy:
+        embed.add_field(name="🟢🟢 STRONG BUY", value="\n".join(strong_buy[:10]), inline=False)
+    if buy:
+        embed.add_field(name="🟢 BUY", value="\n".join(buy[:10]), inline=False)
+    if neutral:
+        embed.add_field(name="⚪ NEUTRAL", value="\n".join(neutral[:10]), inline=False)
+    if sell:
+        embed.add_field(name="🔴 SELL", value="\n".join(sell[:10]), inline=False)
+    if strong_sell:
+        embed.add_field(name="🔴🔴 STRONG SELL", value="\n".join(strong_sell[:10]), inline=False)
+    
+    embed.set_footer(text="Use !signals SYMBOL for detailed analysis")
+    await ctx.send(embed=embed)
+
+# ====================
+# DISCORD COMMANDS
 # ====================
 
 @bot.event
@@ -808,22 +903,6 @@ async def ping(ctx):
         await ctx.send('pong')
     finally:
         user_busy[ctx.author.id] = False
-
-async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    df_calc = calculate_indicators(df)
-    signals = get_signals(df_calc)
-    embed = format_embed(symbol, signals, timeframe)
-    try:
-        chart_buffer = generate_chart_image(df, symbol, timeframe)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            embed.set_image(url='attachment://chart.png')
-            await ctx.send(embed=embed, file=file)
-        else:
-            await ctx.send(embed=embed)
-    except Exception as e:
-        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
-        await ctx.send(embed=embed)
 
 async def check_cancel(ctx):
     user_id = ctx.author.id
@@ -869,7 +948,7 @@ async def scan(ctx, target='all', timeframe='daily'):
             await send_symbol_with_chart(ctx, symbol, df, timeframe)
             return
 
-        await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe. This may take a few minutes. Results will appear as they come.")
+        await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe...")
 
         for symbol in symbols:
             if await check_cancel(ctx):
@@ -886,7 +965,7 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe: str = 'all'):
-    """Scan for signals across multiple timeframes. Use: !signals [5min|15min|1h|4h|daily|weekly|all]"""
+    """Scan for signals across multiple timeframes"""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -901,10 +980,8 @@ async def signals(ctx, timeframe: str = 'all'):
         watchlist = await load_watchlist()
         symbols = watchlist['stocks'] + watchlist['crypto']
         
-        # Define available timeframes
         all_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
         
-        # Determine which timeframes to scan
         if timeframe == 'all':
             timeframes_to_scan = all_timeframes
             await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
@@ -919,15 +996,15 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send("❌ Invalid timeframe. Use: 5min, 15min, 1h, 4h, daily, weekly, or all")
             return
 
-        # Dictionary to store signals for summary
-        signal_summary = defaultdict(lambda: defaultdict(str))
+        # Store all signals for summary
+        all_symbol_signals = defaultdict(dict)
         found_any = False
         
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
             
-            symbol_signals = []
+            symbol_signals = {}
             
             for tf in timeframes_to_scan:
                 if await check_cancel(ctx):
@@ -939,21 +1016,20 @@ async def signals(ctx, timeframe: str = 'all'):
                     sig = get_signals(df_calc)
                     if sig and sig['net_score'] != 0:
                         found_any = True
-                        signal_summary[symbol][tf] = sig['net_score']
-                        symbol_signals.append((tf, sig))
-                        # Send individual chart for this timeframe
-                        await send_symbol_with_chart(ctx, symbol, df, tf)
-                await asyncio.sleep(2)  # Small delay between timeframes
+                        symbol_signals[tf] = sig
+                        # Send chart - pass all_signals so it can show summary
+                        await send_symbol_with_chart(ctx, symbol, df, tf, all_symbol_signals)
+                await asyncio.sleep(2)
             
-            # If symbol has signals, send a summary embed
+            # Store signals for this symbol
             if symbol_signals:
-                await send_multi_timeframe_summary(ctx, symbol, symbol_signals)
+                all_symbol_signals[symbol] = symbol_signals
                 
-            await asyncio.sleep(5)  # Delay between symbols
+            await asyncio.sleep(5)
 
-        # Send final summary if scanning all timeframes
+        # Send final summary
         if timeframe == 'all' and found_any:
-            await send_final_summary(ctx, signal_summary)
+            await send_final_summary(ctx, all_symbol_signals)
         elif not found_any and not cancellation_flags.get(ctx.author.id, False):
             await ctx.send(f"📭 No symbols with active signals found{ ' on any timeframe' if timeframe == 'all' else ''}.")
             
@@ -961,125 +1037,6 @@ async def signals(ctx, timeframe: str = 'all'):
         await ctx.send(f"✅ Signal scan complete{ ' across all timeframes' if timeframe == 'all' else ''}!")
     finally:
         user_busy[ctx.author.id] = False
-
-async def send_multi_timeframe_summary(ctx, symbol, signals):
-    """Send a summary embed for a symbol with multiple timeframe signals"""
-    
-    # Sort timeframes from lowest to highest
-    timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
-    signals.sort(key=lambda x: timeframe_order.get(x[0], 99))
-    
-    # Count bullish vs bearish signals
-    bullish_count = sum(1 for tf, sig in signals if sig['net_score'] > 0)
-    bearish_count = sum(1 for tf, sig in signals if sig['net_score'] < 0)
-    
-    # Determine overall bias
-    if bullish_count > bearish_count:
-        overall = "🟢 BULLISH BIAS"
-        color = 0x00ff00
-    elif bearish_count > bullish_count:
-        overall = "🔴 BEARISH BIAS"
-        color = 0xff0000
-    else:
-        overall = "⚪ NEUTRAL BIAS"
-        color = 0xffff00
-    
-    # Get current price from the highest timeframe that has data
-    current_price = signals[-1][1]['price'] if signals else 0
-    
-    embed = discord.Embed(
-        title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}",
-        description=f"Current Price: **${current_price:.2f}**\n{overall} ({bullish_count} bullish / {bearish_count} bearish)",
-        color=color
-    )
-    
-    # Add each timeframe signal
-    signal_lines = []
-    for tf, sig in signals:
-        emoji = "🟢" if sig['net_score'] > 0 else "🔴" if sig['net_score'] < 0 else "⚪"
-        strength = "STRONG " if abs(sig['net_score']) >= 2 else ""
-        direction = "BUY" if sig['net_score'] > 0 else "SELL" if sig['net_score'] < 0 else "NEUTRAL"
-        signal_lines.append(f"{emoji} **{tf}**: {strength}{direction} (Score: {sig['net_score']})")
-    
-    embed.add_field(name="⏱️ Timeframe Analysis", value="\n".join(signal_lines), inline=False)
-    
-    # Add trading recommendation based on alignment
-    if len(signals) >= 3:
-        all_bullish = all(sig['net_score'] > 0 for tf, sig in signals)
-        all_bearish = all(sig['net_score'] < 0 for tf, sig in signals)
-        
-        if all_bullish:
-            embed.add_field(name="🎯 RECOMMENDATION", 
-                          value="✅ **STRONG BUY** - All timeframes aligned bullish!\nConsider entering with full position.", 
-                          inline=False)
-        elif all_bearish:
-            embed.add_field(name="🎯 RECOMMENDATION", 
-                          value="❌ **STRONG SELL/AVOID** - All timeframes aligned bearish.\nConsider short or stay out.", 
-                          inline=False)
-        elif bullish_count >= len(signals) * 0.6:
-            embed.add_field(name="🎯 RECOMMENDATION", 
-                          value="🟢 **CAUTIOUS BUY** - Majority of timeframes bullish.\nConsider 50% position.", 
-                          inline=False)
-        elif bearish_count >= len(signals) * 0.6:
-            embed.add_field(name="🎯 RECOMMENDATION", 
-                          value="🔴 **CAUTIOUS SELL** - Majority of timeframes bearish.\nConsider reducing exposure.", 
-                          inline=False)
-    
-    # Add TradingView link
-    web_url = get_tradingview_web_link(symbol)
-    embed.add_field(name="📊 TradingView", value=f"[Click here for chart]({web_url})", inline=False)
-    
-    await ctx.send(embed=embed)
-
-async def send_final_summary(ctx, signal_summary):
-    """Send a final summary of all symbols with signals"""
-    
-    if not signal_summary:
-        return
-    
-    embed = discord.Embed(
-        title="📊 MULTI-TIMEFRAME SCAN COMPLETE",
-        description=f"Found signals for **{len(signal_summary)}** symbols",
-        color=0x3498db
-    )
-    
-    # Group by signal strength
-    strong_buy = []
-    buy = []
-    neutral = []
-    sell = []
-    strong_sell = []
-    
-    for symbol, timeframes in signal_summary.items():
-        # Calculate average score
-        avg_score = sum(timeframes.values()) / len(timeframes)
-        bullish_count = sum(1 for score in timeframes.values() if score > 0)
-        bearish_count = sum(1 for score in timeframes.values() if score < 0)
-        
-        if avg_score >= 1.5:
-            strong_buy.append(f"{symbol} (Bullish: {bullish_count}/{len(timeframes)})")
-        elif avg_score > 0:
-            buy.append(f"{symbol} (Bullish: {bullish_count}/{len(timeframes)})")
-        elif avg_score == 0:
-            neutral.append(f"{symbol}")
-        elif avg_score > -1.5:
-            sell.append(f"{symbol} (Bearish: {bearish_count}/{len(timeframes)})")
-        else:
-            strong_sell.append(f"{symbol} (Bearish: {bearish_count}/{len(timeframes)})")
-    
-    if strong_buy:
-        embed.add_field(name="🟢🟢 STRONG BUY", value="\n".join(strong_buy[:5]), inline=False)
-    if buy:
-        embed.add_field(name="🟢 BUY", value="\n".join(buy[:5]), inline=False)
-    if neutral:
-        embed.add_field(name="⚪ NEUTRAL", value="\n".join(neutral[:5]), inline=False)
-    if sell:
-        embed.add_field(name="🔴 SELL", value="\n".join(sell[:5]), inline=False)
-    if strong_sell:
-        embed.add_field(name="🔴🔴 STRONG SELL", value="\n".join(strong_sell[:5]), inline=False)
-    
-    embed.set_footer(text="Use !signals SYMBOL for detailed analysis")
-    await ctx.send(embed=embed)
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
@@ -1144,7 +1101,7 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send("No stocks in your watchlist to scan for events.")
                 return
 
-            await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events in the next 14 days. This may take a few minutes...")
+            await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
 
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
@@ -1424,20 +1381,19 @@ async def help_command(ctx):
 
 🚀 **SIGNAL COMMANDS**
 `!signals [5min|15min|1h|4h|daily|weekly|all]` – Multi-timeframe signal scanner
-   • `!signals` or `!signals all` – Scans ALL 6 timeframes (5m, 15m, 1h, 4h, daily, weekly)
-   • `!signals 5min` – Scans only 5-minute timeframe
-   • Shows individual charts + summary for each symbol
+   • `!signals` or `!signals all` – Scans ALL 6 timeframes
+   • Shows individual charts + summary under each symbol
    • Final summary of all signals at the end
 
 📰 **NEWS & EVENTS**
-`!news TICKER [limit]` – Fetch latest news headlines (e.g., `!news AAPL 5`)
-`!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings)
+`!news TICKER [limit]` – Fetch latest news headlines
+`!upcoming [TICKER]` – Show upcoming catalysts
 
 🎯 **ZONES**
-`!zone SYMBOL [5min|15min|1h|4h|daily|weekly]` – Show buy/sell zones
+`!zone SYMBOL [timeframe]` – Show buy/sell zones
 
 📋 **WATCHLIST**
-`!add SYMBOL` – Add to watchlist (use `BTC/USD` for crypto)
+`!add SYMBOL` – Add to watchlist
 `!remove SYMBOL` – Remove from watchlist
 `!list` – Show watchlist
 
@@ -1446,16 +1402,16 @@ async def help_command(ctx):
 `!stopscan` – Stop ongoing scan
 `!help` – This message
 
-⏱️ **TIMEFRAMES AVAILABLE:**
-• `5min` – 5 minute candles (earliest entry signals)
-• `15min` – 15 minute candles (confirmation)
-• `1h` – 1 hour candles (trend establishment)
-• `4h` – 4 hour candles (strong trend)
-• `daily` – Daily candles (major trend)
-• `weekly` – Weekly candles (long-term trend)
-• `all` – All timeframes at once (most powerful)
+⏱️ **TIMEFRAMES:**
+• `5min` – Earliest entry signals
+• `15min` – Confirmation
+• `1h` – Trend establishment
+• `4h` – Strong trend
+• `daily` – Major trend
+• `weekly` – Long-term trend
+• `all` – All timeframes at once
 
-💡 **PRO TIP:** Use `!signals all` to catch moves EARLY. Lower timeframes signal first!
+💡 **PRO TIP:** Use `!signals all` to catch moves EARLY!
         """
         await ctx.send(help_text)
     finally:
