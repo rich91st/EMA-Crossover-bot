@@ -769,7 +769,7 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     
     for tf, data in symbol_signals.items():
         net_score = data['signals']['net_score']
-        # Consider absolute value for strength, but keep sign for later
+        # Consider absolute value for strength
         strength = abs(net_score)
         if strength > best_score or (strength == best_score and timeframe_priority.get(tf, 99) < timeframe_priority.get(best_tf, 99)):
             best_score = strength
@@ -804,11 +804,11 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
         print(f"⚠️ Chart generation failed for {symbol}: {e}")
         await ctx.send(embed=main_embed)
     
-    # Send compact summary of ALL timeframes for this symbol
-    await send_symbol_timeframe_summary(ctx, symbol, symbol_signals, best_tf)
+    # Send clean summary of ALL timeframes for this symbol
+    await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
 
-async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals, best_tf):
-    """Send a compact summary of all timeframes for a symbol"""
+async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
+    """Send a clean, easy-to-read summary of all timeframes for a symbol"""
     
     # Sort timeframes by priority
     timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
@@ -819,91 +819,52 @@ async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals, best_tf):
     bearish_count = sum(1 for tf, data in symbol_signals.items() if data['signals']['net_score'] < 0)
     total = len(symbol_signals)
     
-    # Determine overall bias
-    if bullish_count > bearish_count:
-        bias = "🟢 BULLISH BIAS"
-        color = 0x00ff00
-    elif bearish_count > bullish_count:
-        bias = "🔴 BEARISH BIAS" 
-        color = 0xff0000
-    else:
-        bias = "⚪ NEUTRAL BIAS"
-        color = 0xffff00
-    
-    # Get current price from best timeframe
-    current_price = symbol_signals[best_tf]['signals']['price']
-    
-    embed = discord.Embed(
-        title=f"📊 {symbol} Multi-Timeframe Analysis",
-        description=f"Price: **${current_price:.2f}** | {bias} ({bullish_count}/{total} bullish)",
-        color=color
-    )
-    
-    # Create a table-like display for all timeframes
-    timeframe_lines = []
+    # Create the summary lines in the exact format you wanted
+    summary_lines = []
     for tf in sorted_timeframes:
         signals = symbol_signals[tf]['signals']
         net = signals['net_score']
         
-        # Signal emoji
+        # Signal emoji and text
         if net >= 2:
-            emoji = "🟢🟢"
+            emoji = "🟢"
+            signal_text = "STRONG BUY"
         elif net == 1:
             emoji = "🟢"
+            signal_text = "BUY"
         elif net == 0:
             emoji = "⚪"
+            signal_text = "NEUTRAL"
         elif net == -1:
             emoji = "🔴"
+            signal_text = "SELL"
         elif net <= -2:
-            emoji = "🔴🔴"
+            emoji = "🔴"
+            signal_text = "STRONG SELL"
         
-        # Signal direction
-        if net > 0:
-            direction = "BUY"
-        elif net < 0:
-            direction = "SELL"
-        else:
-            direction = "NEUTRAL"
-        
-        # Highlight the best timeframe
-        if tf == best_tf:
-            tf_display = f"**{tf}** ⭐"
-        else:
-            tf_display = tf
-        
-        # Add key metrics
-        rsi = signals['rsi']
-        ema_status = "↑" if signals['ema5'] > signals['ema13'] else "↓"
-        
-        timeframe_lines.append(f"{emoji} {tf_display}: {direction} (Score: {net}) • RSI: {rsi:.1f} • EMA5/13: {ema_status}")
+        # Add score in parentheses
+        summary_lines.append(f"{emoji} {tf}: {signal_text} (Score: {net})")
     
-    embed.add_field(name="⏱️ Timeframe Breakdown", value="\n".join(timeframe_lines), inline=False)
+    # Create the embed
+    embed = discord.Embed(
+        title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}",
+        description="\n".join(summary_lines),
+        color=0x3498db
+    )
     
-    # Add trading recommendation
+    # Add recommendation based on alignment
     if bullish_count == total:
-        recommendation = "✅ **STRONG BUY** - All timeframes aligned bullish!"
+        recommendation = "🎯 **RECOMMENDATION: STRONG BUY - All timeframes aligned!**"
     elif bearish_count == total:
-        recommendation = "❌ **STRONG SELL** - All timeframes aligned bearish!"
+        recommendation = "🎯 **RECOMMENDATION: STRONG SELL - All timeframes aligned!**"
     elif bullish_count >= total * 0.6:
-        recommendation = "🟢 **CAUTIOUS BUY** - Most timeframes bullish"
+        recommendation = "🎯 **RECOMMENDATION: CAUTIOUS BUY - Most timeframes bullish**"
     elif bearish_count >= total * 0.6:
-        recommendation = "🔴 **CAUTIOUS SELL** - Most timeframes bearish"
+        recommendation = "🎯 **RECOMMENDATION: CAUTIOUS SELL - Most timeframes bearish**"
     else:
-        recommendation = "⚪ **NEUTRAL** - Mixed signals across timeframes"
+        recommendation = "🎯 **RECOMMENDATION: NEUTRAL - Mixed signals**"
     
-    embed.add_field(name="🎯 Recommendation", value=recommendation, inline=False)
-    
-    # Add entry strategy based on timeframes
-    if bullish_count > 0:
-        earliest_bullish = next((tf for tf in sorted_timeframes if symbol_signals[tf]['signals']['net_score'] > 0), None)
-        if earliest_bullish:
-            embed.add_field(name="📈 Entry Strategy", 
-                          value=f"First bullish signal on **{earliest_bullish}**. Consider 25% entry now, add on higher timeframe confirmation.", 
-                          inline=False)
-    
-    # TradingView link
-    web_url = get_tradingview_web_link(symbol)
-    embed.add_field(name="📊 TradingView", value=f"[Click here for chart]({web_url})", inline=False)
+    embed.add_field(name="", value=recommendation, inline=False)
     
     await ctx.send(embed=embed)
 
@@ -929,7 +890,6 @@ async def send_final_summary(ctx, signal_summary):
     for symbol, timeframes in signal_summary.items():
         avg_score = sum(sig['net_score'] for sig in timeframes.values()) / len(timeframes)
         bullish_count = sum(1 for sig in timeframes.values() if sig['net_score'] > 0)
-        bearish_count = sum(1 for sig in timeframes.values() if sig['net_score'] < 0)
         
         if avg_score >= 1.5:
             strong_buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
@@ -938,9 +898,9 @@ async def send_final_summary(ctx, signal_summary):
         elif avg_score == 0:
             neutral.append(f"{symbol}")
         elif avg_score > -1.5:
-            sell.append(f"{symbol} ({bearish_count}/{len(timeframes)})")
+            sell.append(f"{symbol}")
         else:
-            strong_sell.append(f"{symbol} ({bearish_count}/{len(timeframes)})")
+            strong_sell.append(f"{symbol}")
     
     if strong_buy:
         embed.add_field(name="🟢🟢 STRONG BUY", value="\n".join(strong_buy[:10]), inline=False)
@@ -1021,7 +981,22 @@ async def scan(ctx, target='all', timeframe='daily'):
             if df is None or df.empty:
                 await ctx.send(f"Could not fetch data for {symbol}.")
                 return
-            await send_symbol_with_chart(ctx, symbol, df, timeframe)
+            
+            df_calc = calculate_indicators(df)
+            signals = get_signals(df_calc)
+            embed = format_embed(symbol, signals, timeframe)
+            
+            try:
+                chart_buffer = generate_chart_image(df, symbol, timeframe)
+                if chart_buffer:
+                    file = discord.File(chart_buffer, filename='chart.png')
+                    embed.set_image(url='attachment://chart.png')
+                    await ctx.send(embed=embed, file=file)
+                else:
+                    await ctx.send(embed=embed)
+            except Exception as e:
+                print(f"⚠️ Chart generation failed: {e}")
+                await ctx.send(embed=embed)
             return
 
         await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe...")
@@ -1031,7 +1006,21 @@ async def scan(ctx, target='all', timeframe='daily'):
                 break
             df = await fetch_ohlcv(symbol, timeframe)
             if df is not None and not df.empty:
-                await send_symbol_with_chart(ctx, symbol, df, timeframe)
+                df_calc = calculate_indicators(df)
+                signals = get_signals(df_calc)
+                embed = format_embed(symbol, signals, timeframe)
+                
+                try:
+                    chart_buffer = generate_chart_image(df, symbol, timeframe)
+                    if chart_buffer:
+                        file = discord.File(chart_buffer, filename='chart.png')
+                        embed.set_image(url='attachment://chart.png')
+                        await ctx.send(embed=embed, file=file)
+                    else:
+                        await ctx.send(embed=embed)
+                except Exception as e:
+                    print(f"⚠️ Chart generation failed: {e}")
+                    await ctx.send(embed=embed)
             await asyncio.sleep(8)
 
         cancellation_flags[ctx.author.id] = False
@@ -1116,24 +1105,6 @@ async def signals(ctx, timeframe: str = 'all'):
         await ctx.send(f"✅ Signal scan complete{ ' across all timeframes' if timeframe == 'all' else ''}!")
     finally:
         user_busy[ctx.author.id] = False
-
-async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    """Send a chart with signals (used by !scan command)"""
-    df_calc = calculate_indicators(df)
-    signals = get_signals(df_calc)
-    embed = format_embed(symbol, signals, timeframe)
-    
-    try:
-        chart_buffer = generate_chart_image(df, symbol, timeframe)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            embed.set_image(url='attachment://chart.png')
-            await ctx.send(embed=embed, file=file)
-        else:
-            await ctx.send(embed=embed)
-    except Exception as e:
-        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
-        await ctx.send(embed=embed)
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
@@ -1479,7 +1450,7 @@ async def help_command(ctx):
 🚀 **SIGNAL COMMANDS**
 `!signals [5min|15min|1h|4h|daily|weekly|all]` – Multi-timeframe signal scanner
    • `!signals` or `!signals all` – Scans ALL 6 timeframes
-   • Shows ONE combined report per symbol with best timeframe chart + all timeframes summary
+   • Shows ONE combined report per symbol with best timeframe chart + clean summary
    • Final summary of all signals at the end
 
 📰 **NEWS & EVENTS**
