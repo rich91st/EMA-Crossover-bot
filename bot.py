@@ -44,8 +44,8 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 bot._skip_check = lambda x, y: False
 
 last_command_time = {}
-user_busy = {}          # per‑user lock to prevent overlapping commands
-cancellation_flags = {} # user_id -> bool (True means cancel requested)
+user_busy = {}
+cancellation_flags = {}
 
 # Public.com token cache
 public_token_cache = {
@@ -124,7 +124,7 @@ def normalize_symbol(symbol):
     return symbol
 
 # ====================
-# TRADINGVIEW WEB LINK GENERATOR
+# TRADINGVIEW WEB LINK
 # ====================
 
 def get_tradingview_web_link(symbol):
@@ -140,7 +140,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING (unchanged)
+# DATA FETCHING
 # ====================
 
 async def fetch_twelvedata(symbol, timeframe):
@@ -272,20 +272,19 @@ async def fetch_ohlcv(symbol, timeframe):
         return await fetch_twelvedata(symbol, timeframe)
 
 # ====================
-# PUBLIC.COM OPTIONS AUTHENTICATION
+# PUBLIC.COM OPTIONS AUTHENTICATION - FIXED URL
 # ====================
 
 async def get_public_access_token():
     """Get a valid access token from Public.com using the secret."""
     global public_token_cache
     
-    # Check if we have a valid cached token
     if public_token_cache['token'] and public_token_cache['expires_at']:
         if datetime.now() < public_token_cache['expires_at']:
             return public_token_cache['token']
     
-    # Get new token using client secret
-    url = "https://trading.public.com/userapiauthservice/personal/access-tokens"
+    # FIXED: Correct URL from documentation
+    url = "https://api.public.com/userpiauthservice"
     headers = {"Content-Type": "application/json"}
     payload = {
         "secret": PUBLIC_CLIENT_SECRET,
@@ -311,7 +310,7 @@ async def get_public_access_token():
         return None
 
 # ====================
-# FINNHUB NEWS FETCHING
+# FINNHUB NEWS & EVENTS
 # ====================
 
 async def fetch_stock_news(symbol):
@@ -333,10 +332,6 @@ async def fetch_stock_news(symbol):
     except Exception as e:
         print(f"Error fetching news for {symbol}: {e}")
         return None
-
-# ====================
-# UPCOMING EVENTS (CATALYSTS)
-# ====================
 
 async def fetch_earnings_upcoming(symbol, days=14):
     url = "https://finnhub.io/api/v1/calendar/earnings"
@@ -726,7 +721,6 @@ def format_zone_embed(symbol, signals, timeframe):
     ema50 = signals['ema50']
     ema200 = signals['ema200']
     
-    # Determine which EMAs act as support or resistance
     support_levels = [support]
     resistance_levels = [resistance]
     
@@ -751,11 +745,9 @@ def format_zone_embed(symbol, signals, timeframe):
         else:
             resistance_levels.append(ema5)
     
-    # Sort levels
-    support_levels.sort(reverse=True)   # highest support first
-    resistance_levels.sort()             # lowest resistance first
+    support_levels.sort(reverse=True)
+    resistance_levels.sort()
 
-    # TradingView web link
     web_url = get_tradingview_web_link(symbol)
     tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
     
@@ -765,7 +757,6 @@ def format_zone_embed(symbol, signals, timeframe):
         color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00
     )
     
-    # Support (Buy) Zone
     sup_text = ""
     for i, level in enumerate(support_levels):
         if i == 0:
@@ -775,7 +766,6 @@ def format_zone_embed(symbol, signals, timeframe):
     if sup_text:
         embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
     
-    # Resistance (Sell) Zone
     res_text = ""
     for i, level in enumerate(resistance_levels):
         if i == 0:
@@ -785,18 +775,14 @@ def format_zone_embed(symbol, signals, timeframe):
     if res_text:
         embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
     
-    # Target
     target = resistance + (resistance - support)
     embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
-    
-    # TradingView web link at the bottom
     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-    
     embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
     return embed
 
 # ====================
-# NEW OPTIONS COMMAND WITH PUBLIC.COM
+# OPTIONS COMMAND WITH PUBLIC.COM - FIXED URLS
 # ====================
 
 @bot.command(name='test_public')
@@ -830,19 +816,13 @@ async def options_analysis(ctx, ticker: str):
             return
         stock_price = float(df['close'].iloc[-1])
 
-        # 3. Get account ID from environment
-        account_id = PUBLIC_ACCOUNT_ID
-        if not account_id:
-            await ctx.send("❌ PUBLIC_ACCOUNT_ID not set in environment.")
-            return
-
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Content-Type": "application/json"
         }
 
-        # 4. Get available expirations
-        exp_url = f"https://trading.public.com/userapigateway/marketdata/{account_id}/option-expirations"
+        # 3. Get available expirations - FIXED URL
+        exp_url = f"https://api.public.com/userapigateway/option-expirations"
         async with aiohttp.ClientSession() as session:
             async with session.get(exp_url, headers=headers, params={"symbol": ticker.upper()}) as resp:
                 if resp.status != 200:
@@ -851,7 +831,7 @@ async def options_analysis(ctx, ticker: str):
                     return
                 exp_data = await resp.json()
 
-        # 5. Find expiration in 30-45 day range
+        # 4. Find expiration in 30-45 day range
         today = datetime.now().date()
         target_exp = None
         target_dte = None
@@ -868,8 +848,8 @@ async def options_analysis(ctx, ticker: str):
             await ctx.send(f"No options expiration found in 30-45 day range for {ticker}.")
             return
 
-        # 6. Get option chain for that expiration
-        chain_url = f"https://trading.public.com/userapigateway/marketdata/{account_id}/option-chain"
+        # 5. Get option chain for that expiration - FIXED URL
+        chain_url = f"https://api.public.com/userapigateway/option-chain"
         params = {
             "symbol": ticker.upper(),
             "expirationDate": target_exp['date']
@@ -883,7 +863,7 @@ async def options_analysis(ctx, ticker: str):
                     return
                 chain_data = await resp.json()
 
-        # 7. Separate calls and puts
+        # 6. Separate calls and puts
         calls = []
         puts = []
         
@@ -893,7 +873,7 @@ async def options_analysis(ctx, ticker: str):
             elif option.get('type') == 'PUT':
                 puts.append(option)
 
-        # 8. Find best ATM call (Delta ~0.60-0.70)
+        # 7. Find best ATM call (Delta ~0.60-0.70)
         best_call = None
         best_put = None
         best_call_diff = float('inf')
@@ -915,12 +895,12 @@ async def options_analysis(ctx, ticker: str):
                     best_put_diff = diff
                     best_put = put
 
-        # 9. Calculate PCR (Put-Call Ratio)
+        # 8. Calculate PCR (Put-Call Ratio)
         total_call_oi = sum(c.get('openInterest', 0) for c in calls)
         total_put_oi = sum(p.get('openInterest', 0) for p in puts)
         pcr = total_put_oi / total_call_oi if total_call_oi > 0 else 0
 
-        # 10. Build embed
+        # 9. Build embed
         embed = discord.Embed(
             title=f"📊 OPTIONS ANALYSIS: {ticker.upper()}",
             description=f"Current Price: **${stock_price:.2f}**\nExpiration: {target_exp['date']} ({target_dte} days)",
@@ -992,7 +972,7 @@ async def options_analysis(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# EXISTING COMMANDS (unchanged)
+# EXISTING COMMANDS
 # ====================
 
 @bot.event
