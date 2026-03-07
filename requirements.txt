@@ -9,3 +9,5 @@ mplfinance
 Pillow
 optionlab
 publicdotcom-py
+freeoptionschain
+yfinance
