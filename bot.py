@@ -13,7 +13,6 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
-from FOC import FOC
 
 # Charting libraries
 import matplotlib
@@ -44,9 +43,6 @@ bot._skip_check = lambda x, y: False
 last_command_time = {}
 user_busy = {}
 cancellation_flags = {}
-
-# Initialize FOC for options data
-foc = FOC()
 
 # ====================
 # WEB SERVER
@@ -151,10 +147,9 @@ async def fetch_twelvedata(symbol, timeframe):
     if not interval:
         return None
 
-    # For intraday timeframes, we need more data points
     outputsize = 200
     if timeframe in ['5min', '15min', '1h']:
-        outputsize = 500  # Get more data for intraday charts
+        outputsize = 500
 
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -755,26 +750,16 @@ def format_zone_embed(symbol, signals, timeframe):
 # ====================
 
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
-    """Send ONE combined message per symbol with best timeframe chart + all timeframes summary"""
-    
-    # Define timeframe priority (lower number = more important for entry)
+    # Define timeframe priority
     timeframe_priority = {
-        '5min': 1,    # Earliest signals
-        '15min': 2,   # Confirmation
-        '1h': 3,      # Trend building
-        '4h': 4,      # Strong trend
-        'daily': 5,   # Major trend
-        'weekly': 6   # Long-term trend
+        '5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6
     }
     
-    # Find the best timeframe to show as main chart
-    # Priority: 1. Strongest signal (highest |net_score|), 2. Earliest timeframe
     best_tf = None
     best_score = -float('inf')
     
     for tf, data in symbol_signals.items():
         net_score = data['signals']['net_score']
-        # Consider absolute value for strength
         strength = abs(net_score)
         if strength > best_score or (strength == best_score and timeframe_priority.get(tf, 99) < timeframe_priority.get(best_tf, 99)):
             best_score = strength
@@ -783,12 +768,10 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     if not best_tf:
         return
     
-    # Get data for best timeframe
     best_data = symbol_signals[best_tf]
     df = best_data['df']
     signals = best_data['signals']
     
-    # Generate and send main chart for best timeframe
     df_calc = calculate_indicators(df)
     main_embed = format_embed(symbol, signals, best_tf)
     
@@ -797,11 +780,7 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
         if chart_buffer:
             file = discord.File(chart_buffer, filename='chart.png')
             main_embed.set_image(url='attachment://chart.png')
-            
-            # Add a note that this is the primary timeframe
             main_embed.description = f"**{symbol}** · ${signals['price']:.2f} · ⭐ **Primary: {best_tf}**"
-            
-            # Send main chart
             await ctx.send(embed=main_embed, file=file)
         else:
             await ctx.send(embed=main_embed)
@@ -809,28 +788,21 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
         print(f"⚠️ Chart generation failed for {symbol}: {e}")
         await ctx.send(embed=main_embed)
     
-    # Send clean summary of ALL timeframes for this symbol
     await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
 
 async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
-    """Send a clean, easy-to-read summary of all timeframes for a symbol"""
-    
-    # Sort timeframes by priority
     timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
     sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x, 99))
     
-    # Count signals
     bullish_count = sum(1 for tf, data in symbol_signals.items() if data['signals']['net_score'] > 0)
     bearish_count = sum(1 for tf, data in symbol_signals.items() if data['signals']['net_score'] < 0)
     total = len(symbol_signals)
     
-    # Create the summary lines in the exact format you wanted
     summary_lines = []
     for tf in sorted_timeframes:
         signals = symbol_signals[tf]['signals']
         net = signals['net_score']
         
-        # Signal emoji and text
         if net >= 2:
             emoji = "🟢"
             signal_text = "STRONG BUY"
@@ -847,17 +819,14 @@ async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
             emoji = "🔴"
             signal_text = "STRONG SELL"
         
-        # Add score in parentheses
         summary_lines.append(f"{emoji} {tf}: {signal_text} (Score: {net})")
     
-    # Create the embed
     embed = discord.Embed(
         title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}",
         description="\n".join(summary_lines),
         color=0x3498db
     )
     
-    # Add recommendation based on alignment
     if bullish_count == total:
         recommendation = "🎯 **RECOMMENDATION: STRONG BUY - All timeframes aligned!**"
     elif bearish_count == total:
@@ -870,12 +839,9 @@ async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
         recommendation = "🎯 **RECOMMENDATION: NEUTRAL - Mixed signals**"
     
     embed.add_field(name="", value=recommendation, inline=False)
-    
     await ctx.send(embed=embed)
 
 async def send_final_summary(ctx, signal_summary):
-    """Send a final summary of all symbols with signals"""
-    
     if not signal_summary:
         return
     
@@ -885,7 +851,6 @@ async def send_final_summary(ctx, signal_summary):
         color=0x3498db
     )
     
-    # Group by signal strength
     strong_buy = []
     buy = []
     neutral = []
@@ -922,7 +887,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER - NEW!
+# OPTIONS FLOW SCANNER (using yfinance)
 # ====================
 
 async def get_stock_price(symbol):
@@ -937,27 +902,34 @@ async def get_stock_price(symbol):
         print(f"Error fetching price for {symbol}: {e}")
         return None
 
-def get_best_expiration():
-    """Get the best expiration date (30-45 days out)"""
-    today = datetime.now()
-    target_days = 38  # Middle of 30-45 range
-    
-    # Find the next Friday that's ~38 days out
-    days_to_friday = (4 - today.weekday()) % 7  # Friday is 4
-    if days_to_friday == 0:
-        days_to_friday = 7
-    
-    # Start with next Friday
-    base_date = today + timedelta(days=days_to_friday)
-    
-    # Add weeks until we're in the 30-45 day range
-    weeks_to_add = 0
-    while True:
-        exp_date = base_date + timedelta(weeks=weeks_to_add)
-        dte = (exp_date - today).days
-        if 30 <= dte <= 45:
-            return exp_date.strftime('%Y-%m-%d'), dte
-        weeks_to_add += 1
+def get_best_expiration(ticker):
+    """Get the best expiration date (30-45 days out) from available expirations"""
+    try:
+        stock = yf.Ticker(ticker)
+        expirations = stock.options
+        if not expirations:
+            return None, None
+        
+        today = datetime.now()
+        best_exp = None
+        best_dte = None
+        min_diff = float('inf')
+        
+        for exp in expirations:
+            exp_date = datetime.strptime(exp, '%Y-%m-%d')
+            dte = (exp_date - today).days
+            if 30 <= dte <= 45:
+                return exp, dte
+            diff = abs(dte - 38)  # target 38 days
+            if diff < min_diff:
+                min_diff = diff
+                best_exp = exp
+                best_dte = dte
+        
+        return best_exp, best_dte
+    except Exception as e:
+        print(f"Error getting expirations for {ticker}: {e}")
+        return None, None
 
 def format_premium(volume, last_price):
     """Calculate total premium (volume * 100 shares * last price)"""
@@ -982,42 +954,31 @@ async def options_flow(ctx, ticker: str):
     try:
         await ctx.send(f"🔍 Analyzing options flow for **{ticker.upper()}**...")
         
-        # Get current stock price
         current_price = await get_stock_price(ticker.upper())
         if not current_price:
             await ctx.send(f"❌ Could not fetch current price for {ticker.upper()}")
             return
         
-        # Get the best expiration date
-        best_exp, dte = get_best_expiration()
-        
-        # Fetch options chain for best expiration
-        try:
-            # Get calls and puts
-            calls = foc.get_options_chain_greeks(ticker.upper(), best_exp, "CALL")
-            puts = foc.get_options_chain_greeks(ticker.upper(), best_exp, "PUT")
-        except:
-            await ctx.send(f"❌ Could not fetch options data for {ticker.upper()}. Symbol may not have options.")
+        best_exp, dte = get_best_expiration(ticker.upper())
+        if not best_exp:
+            await ctx.send(f"❌ No options expirations found for {ticker.upper()}")
             return
         
-        # Combine and analyze all options
-        all_options = []
-        if calls:
-            for opt in calls:
-                opt['type'] = 'CALL'
-                all_options.append(opt)
-        if puts:
-            for opt in puts:
-                opt['type'] = 'PUT'
-                all_options.append(opt)
+        stock = yf.Ticker(ticker.upper())
+        opt_chain = stock.option_chain(best_exp)
         
-        if not all_options:
+        calls = opt_chain.calls
+        puts = opt_chain.puts
+        calls['type'] = 'CALL'
+        puts['type'] = 'PUT'
+        all_options = pd.concat([calls, puts], ignore_index=True)
+        
+        if all_options.empty:
             await ctx.send(f"No options data found for {ticker.upper()} on {best_exp}")
             return
         
-        # Calculate volume/OI ratio and filter for unusual activity
         analyzed = []
-        for opt in all_options:
+        for _, opt in all_options.iterrows():
             try:
                 volume = opt.get('volume', 0)
                 oi = opt.get('openInterest', 0)
@@ -1025,19 +986,21 @@ async def options_flow(ctx, ticker: str):
                 last = opt.get('lastPrice', 0)
                 opt_type = opt.get('type', 'CALL')
                 
+                if pd.isna(volume) or pd.isna(oi):
+                    continue
+                
                 if oi > 0 and volume > 0:
                     vol_oi_ratio = volume / oi
                 else:
                     vol_oi_ratio = volume if volume > 0 else 0
                 
-                # Calculate distance from current price
                 price_distance_pct = abs(strike - current_price) / current_price * 100
                 
                 analyzed.append({
                     'strike': strike,
                     'type': opt_type,
-                    'volume': volume,
-                    'oi': oi,
+                    'volume': int(volume),
+                    'oi': int(oi),
                     'vol_oi_ratio': vol_oi_ratio,
                     'last': last,
                     'distance_pct': price_distance_pct,
@@ -1046,24 +1009,19 @@ async def options_flow(ctx, ticker: str):
             except:
                 continue
         
-        # Sort by volume/OI ratio (highest first)
         analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-        
-        # Filter to only show meaningful data
         significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0]
         
         if not significant:
             await ctx.send(f"📭 No unusual options activity detected for {ticker.upper()} on {best_exp}")
             return
         
-        # Create the embed
         embed = discord.Embed(
             title=f"🔍 OPTIONS FLOW: {ticker.upper()}",
             description=f"Current Price: **${current_price:.2f}**\nExpiration: {best_exp} ({dte} days)",
             color=0x00ff00
         )
         
-        # Create the table header
         table = "```\n"
         table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  ACTION \n"
         table += "------  ----  ------  ----  ------  ------\n"
@@ -1071,14 +1029,13 @@ async def options_flow(ctx, ticker: str):
         unusual_count = 0
         top_picks = []
         
-        for opt in significant[:8]:  # Show top 8
+        for opt in significant[:8]:
             strike = f"${opt['strike']:.2f}"
             opt_type = opt['type']
             volume = opt['volume']
             oi = opt['oi']
             ratio = opt['vol_oi_ratio']
             
-            # Determine action
             if ratio >= 2.0:
                 action = "🟢 BUY"
                 unusual_count += 1
@@ -1093,13 +1050,11 @@ async def options_flow(ctx, ticker: str):
             table += f"{strike:6}  {opt_type:4}  {volume:6}  {oi:4}  {ratio:.1f}x    {action}\n"
         
         table += "```"
-        
         embed.add_field(name="🔥 UNUSUAL ACTIVITY DETECTED", value=table, inline=False)
         
-        # Add top picks if any
         if top_picks:
             picks_text = ""
-            for i, pick in enumerate(top_picks[:3]):  # Show top 3
+            for i, pick in enumerate(top_picks[:3]):
                 if i == 0:
                     medal = "🥇 BEST SHOT"
                 elif i == 1:
@@ -1108,7 +1063,7 @@ async def options_flow(ctx, ticker: str):
                     medal = "🥉 THIRD CHOICE"
                 
                 strike_price = pick['strike']
-                target = strike_price * 1.20  # 20% target
+                target = strike_price * 1.20
                 
                 picks_text += f"\n**{medal}: ${pick['strike']:.2f} {pick['type']}**\n"
                 picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x normal!)\n"
@@ -1120,7 +1075,6 @@ async def options_flow(ctx, ticker: str):
             
             embed.add_field(name="⭐ TOP PICKS", value=picks_text, inline=False)
         
-        # Add explanation
         explanation = """
 📊 **WHAT THIS MEANS:**
 • 🟢 BUY = Smart money accumulating (2x+ volume)
@@ -1149,7 +1103,7 @@ async def scan_options_flow(ctx):
     
     try:
         watchlist = await load_watchlist()
-        symbols = watchlist['stocks']  # Only stocks have options, not crypto
+        symbols = watchlist['stocks']  # Only stocks have options
         
         if not symbols:
             await ctx.send("No stocks in watchlist to scan.")
@@ -1158,9 +1112,6 @@ async def scan_options_flow(ctx):
         await ctx.send(f"🔍 **SCANNING {len(symbols)} SYMBOLS FOR UNUSUAL OPTIONS ACTIVITY**")
         await ctx.send(f"⏱️ This will take 2-3 minutes. Results will appear as they come...\n")
         
-        # Get best expiration
-        best_exp, dte = get_best_expiration()
-        
         all_unusual = []
         
         for symbol in symbols:
@@ -1168,36 +1119,42 @@ async def scan_options_flow(ctx):
                 break
             
             try:
-                # Get current price
                 current_price = await get_stock_price(symbol)
                 if not current_price:
                     continue
                 
-                # Fetch options
-                calls = foc.get_options_chain_greeks(symbol, best_exp, "CALL")
-                
-                if not calls:
+                best_exp, dte = get_best_expiration(symbol)
+                if not best_exp:
                     continue
                 
-                # Check for unusual activity
+                stock = yf.Ticker(symbol)
+                opt_chain = stock.option_chain(best_exp)
+                calls = opt_chain.calls
+                
+                if calls.empty:
+                    continue
+                
                 unusual = []
-                for opt in calls:
+                for _, opt in calls.iterrows():
                     try:
                         volume = opt.get('volume', 0)
                         oi = opt.get('openInterest', 0)
                         strike = opt.get('strike', 0)
                         last = opt.get('lastPrice', 0)
                         
+                        if pd.isna(volume) or pd.isna(oi):
+                            continue
+                        
                         if oi > 0 and volume > 0:
                             vol_oi_ratio = volume / oi
-                            if vol_oi_ratio >= 1.5 and volume >= 10:  # Unusual threshold
+                            if vol_oi_ratio >= 1.5 and volume >= 10:
                                 distance_pct = abs(strike - current_price) / current_price * 100
-                                if distance_pct <= 20:  # Within 20% of price
+                                if distance_pct <= 20:
                                     unusual.append({
                                         'symbol': symbol,
                                         'strike': strike,
-                                        'volume': volume,
-                                        'oi': oi,
+                                        'volume': int(volume),
+                                        'oi': int(oi),
                                         'ratio': vol_oi_ratio,
                                         'price': current_price,
                                         'premium': format_premium(volume, last),
@@ -1208,25 +1165,22 @@ async def scan_options_flow(ctx):
                 
                 if unusual:
                     all_unusual.extend(unusual)
-                    # Send individual alert
-                    for u in unusual[:2]:  # Top 2 per symbol
+                    for u in unusual[:2]:
                         alert = f"**{symbol}** - ${u['strike']:.2f} CALL: {u['volume']} vol ({u['ratio']:.1f}x) Premium: {u['premium']}"
                         await ctx.send(alert)
                 
-                await asyncio.sleep(3)  # Rate limit
+                await asyncio.sleep(3)
                 
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
         
-        # Sort all unusual by ratio
         all_unusual.sort(key=lambda x: x['ratio'], reverse=True)
         
         if not all_unusual:
             await ctx.send("📭 No unusual options activity detected in your watchlist.")
             return
         
-        # Create summary table
         embed = discord.Embed(
             title="🔥 UNUSUAL OPTIONS ACTIVITY SUMMARY",
             description=f"Found {len(all_unusual)} unusual setups across your watchlist",
@@ -1245,7 +1199,6 @@ async def scan_options_flow(ctx):
         table += "```"
         embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
         
-        # Top picks overall
         if top_overall:
             picks = "**TOP 3 SETUPS:**\n\n"
             for i, pick in enumerate(top_overall[:3]):
@@ -1258,7 +1211,7 @@ async def scan_options_flow(ctx):
             
             embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
         
-        embed.set_footer(text=f"Expiration: {best_exp} ({dte} days)")
+        embed.set_footer(text=f"Using nearest 30-45 day expiration")
         await ctx.send(embed=embed)
         
     except Exception as e:
@@ -1267,7 +1220,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# DISCORD COMMANDS
+# DISCORD COMMANDS (existing)
 # ====================
 
 @bot.event
@@ -1380,7 +1333,6 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe: str = 'all'):
-    """Scan for signals across multiple timeframes"""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1411,7 +1363,6 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send("❌ Invalid timeframe. Use: 5min, 15min, 1h, 4h, daily, weekly, or all")
             return
 
-        # Store all signals for each symbol
         all_symbol_signals = defaultdict(dict)
         found_any = False
         
@@ -1421,7 +1372,6 @@ async def signals(ctx, timeframe: str = 'all'):
             
             symbol_signals = {}
             
-            # Collect all timeframe signals for this symbol first
             for tf in timeframes_to_scan:
                 if await check_cancel(ctx):
                     break
@@ -1438,14 +1388,12 @@ async def signals(ctx, timeframe: str = 'all'):
                         }
                 await asyncio.sleep(2)
             
-            # If symbol has any signals, send ONE combined message
             if symbol_signals:
                 await send_combined_symbol_report(ctx, symbol, symbol_signals)
                 all_symbol_signals[symbol] = {tf: data['signals'] for tf, data in symbol_signals.items()}
                 
             await asyncio.sleep(5)
 
-        # Send final summary
         if timeframe == 'all' and found_any:
             await send_final_summary(ctx, all_symbol_signals)
         elif not found_any and not cancellation_flags.get(ctx.author.id, False):
@@ -1457,7 +1405,6 @@ async def signals(ctx, timeframe: str = 'all'):
         user_busy[ctx.author.id] = False
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    """Send a chart with signals (used by !scan command)"""
     df_calc = calculate_indicators(df)
     signals = get_signals(df_calc)
     embed = format_embed(symbol, signals, timeframe)
