@@ -12,6 +12,8 @@ import warnings
 from collections import defaultdict
 from datetime import datetime, timedelta
 import motor.motor_asyncio
+import yfinance as yf
+from FOC import FOC
 
 # Charting libraries
 import matplotlib
@@ -42,6 +44,9 @@ bot._skip_check = lambda x, y: False
 last_command_time = {}
 user_busy = {}
 cancellation_flags = {}
+
+# Initialize FOC for options data
+foc = FOC()
 
 # ====================
 # WEB SERVER
@@ -917,6 +922,351 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
+# OPTIONS FLOW SCANNER - NEW!
+# ====================
+
+async def get_stock_price(symbol):
+    """Get current stock price using yfinance"""
+    try:
+        stock = yf.Ticker(symbol)
+        data = stock.history(period="1d")
+        if not data.empty:
+            return float(data['Close'].iloc[-1])
+        return None
+    except Exception as e:
+        print(f"Error fetching price for {symbol}: {e}")
+        return None
+
+def get_best_expiration():
+    """Get the best expiration date (30-45 days out)"""
+    today = datetime.now()
+    target_days = 38  # Middle of 30-45 range
+    
+    # Find the next Friday that's ~38 days out
+    days_to_friday = (4 - today.weekday()) % 7  # Friday is 4
+    if days_to_friday == 0:
+        days_to_friday = 7
+    
+    # Start with next Friday
+    base_date = today + timedelta(days=days_to_friday)
+    
+    # Add weeks until we're in the 30-45 day range
+    weeks_to_add = 0
+    while True:
+        exp_date = base_date + timedelta(weeks=weeks_to_add)
+        dte = (exp_date - today).days
+        if 30 <= dte <= 45:
+            return exp_date.strftime('%Y-%m-%d'), dte
+        weeks_to_add += 1
+
+def format_premium(volume, last_price):
+    """Calculate total premium (volume * 100 shares * last price)"""
+    try:
+        premium = volume * 100 * last_price
+        if premium >= 1000000:
+            return f"${premium/1000000:.1f}M"
+        elif premium >= 1000:
+            return f"${premium/1000:.0f}K"
+        else:
+            return f"${premium:.0f}"
+    except:
+        return "N/A"
+
+@bot.command(name='flow')
+async def options_flow(ctx, ticker: str):
+    """Check unusual options activity for a specific ticker"""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    
+    try:
+        await ctx.send(f"🔍 Analyzing options flow for **{ticker.upper()}**...")
+        
+        # Get current stock price
+        current_price = await get_stock_price(ticker.upper())
+        if not current_price:
+            await ctx.send(f"❌ Could not fetch current price for {ticker.upper()}")
+            return
+        
+        # Get the best expiration date
+        best_exp, dte = get_best_expiration()
+        
+        # Fetch options chain for best expiration
+        try:
+            # Get calls and puts
+            calls = foc.get_options_chain_greeks(ticker.upper(), best_exp, "CALL")
+            puts = foc.get_options_chain_greeks(ticker.upper(), best_exp, "PUT")
+        except:
+            await ctx.send(f"❌ Could not fetch options data for {ticker.upper()}. Symbol may not have options.")
+            return
+        
+        # Combine and analyze all options
+        all_options = []
+        if calls:
+            for opt in calls:
+                opt['type'] = 'CALL'
+                all_options.append(opt)
+        if puts:
+            for opt in puts:
+                opt['type'] = 'PUT'
+                all_options.append(opt)
+        
+        if not all_options:
+            await ctx.send(f"No options data found for {ticker.upper()} on {best_exp}")
+            return
+        
+        # Calculate volume/OI ratio and filter for unusual activity
+        analyzed = []
+        for opt in all_options:
+            try:
+                volume = opt.get('volume', 0)
+                oi = opt.get('openInterest', 0)
+                strike = opt.get('strike', 0)
+                last = opt.get('lastPrice', 0)
+                opt_type = opt.get('type', 'CALL')
+                
+                if oi > 0 and volume > 0:
+                    vol_oi_ratio = volume / oi
+                else:
+                    vol_oi_ratio = volume if volume > 0 else 0
+                
+                # Calculate distance from current price
+                price_distance_pct = abs(strike - current_price) / current_price * 100
+                
+                analyzed.append({
+                    'strike': strike,
+                    'type': opt_type,
+                    'volume': volume,
+                    'oi': oi,
+                    'vol_oi_ratio': vol_oi_ratio,
+                    'last': last,
+                    'distance_pct': price_distance_pct,
+                    'premium': format_premium(volume, last)
+                })
+            except:
+                continue
+        
+        # Sort by volume/OI ratio (highest first)
+        analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
+        
+        # Filter to only show meaningful data
+        significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0]
+        
+        if not significant:
+            await ctx.send(f"📭 No unusual options activity detected for {ticker.upper()} on {best_exp}")
+            return
+        
+        # Create the embed
+        embed = discord.Embed(
+            title=f"🔍 OPTIONS FLOW: {ticker.upper()}",
+            description=f"Current Price: **${current_price:.2f}**\nExpiration: {best_exp} ({dte} days)",
+            color=0x00ff00
+        )
+        
+        # Create the table header
+        table = "```\n"
+        table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  ACTION \n"
+        table += "------  ----  ------  ----  ------  ------\n"
+        
+        unusual_count = 0
+        top_picks = []
+        
+        for opt in significant[:8]:  # Show top 8
+            strike = f"${opt['strike']:.2f}"
+            opt_type = opt['type']
+            volume = opt['volume']
+            oi = opt['oi']
+            ratio = opt['vol_oi_ratio']
+            
+            # Determine action
+            if ratio >= 2.0:
+                action = "🟢 BUY"
+                unusual_count += 1
+                top_picks.append(opt)
+            elif ratio >= 1.5:
+                action = "🟡 WATCH"
+            elif ratio >= 1.0:
+                action = "⚪ NORMAL"
+            else:
+                action = "🔴 INACTIVE"
+            
+            table += f"{strike:6}  {opt_type:4}  {volume:6}  {oi:4}  {ratio:.1f}x    {action}\n"
+        
+        table += "```"
+        
+        embed.add_field(name="🔥 UNUSUAL ACTIVITY DETECTED", value=table, inline=False)
+        
+        # Add top picks if any
+        if top_picks:
+            picks_text = ""
+            for i, pick in enumerate(top_picks[:3]):  # Show top 3
+                if i == 0:
+                    medal = "🥇 BEST SHOT"
+                elif i == 1:
+                    medal = "🥈 SECOND CHOICE"
+                else:
+                    medal = "🥉 THIRD CHOICE"
+                
+                strike_price = pick['strike']
+                target = strike_price * 1.20  # 20% target
+                
+                picks_text += f"\n**{medal}: ${pick['strike']:.2f} {pick['type']}**\n"
+                picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x normal!)\n"
+                picks_text += f"   • Premium: {pick['premium']}\n"
+                picks_text += f"   • Why: {'High volume spike' if pick['vol_oi_ratio'] >= 2 else 'Strong volume'} near price\n"
+                picks_text += f"   • Entry: Buy when price holds above ${current_price * 1.01:.2f}\n"
+                picks_text += f"   • Target: ${target:.2f} ({(target/current_price-1)*100:.0f}% potential)\n"
+                picks_text += f"   • Expiration: {best_exp} ({dte} days)\n"
+            
+            embed.add_field(name="⭐ TOP PICKS", value=picks_text, inline=False)
+        
+        # Add explanation
+        explanation = """
+📊 **WHAT THIS MEANS:**
+• 🟢 BUY = Smart money accumulating (2x+ volume)
+• 🟡 WATCH = Interesting activity (1.5-2x volume)
+• ⚪ NORMAL = Regular trading
+• 🔴 INACTIVE = Avoid
+
+💡 **RECOMMENDATION:**
+Focus on 🟢 BUY signals near current price. These have the most explosive potential!
+        """
+        embed.add_field(name="", value=explanation, inline=False)
+        
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error analyzing options: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='scanflow')
+async def scan_options_flow(ctx):
+    """Scan entire watchlist for unusual options activity"""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    
+    try:
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks']  # Only stocks have options, not crypto
+        
+        if not symbols:
+            await ctx.send("No stocks in watchlist to scan.")
+            return
+        
+        await ctx.send(f"🔍 **SCANNING {len(symbols)} SYMBOLS FOR UNUSUAL OPTIONS ACTIVITY**")
+        await ctx.send(f"⏱️ This will take 2-3 minutes. Results will appear as they come...\n")
+        
+        # Get best expiration
+        best_exp, dte = get_best_expiration()
+        
+        all_unusual = []
+        
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+            
+            try:
+                # Get current price
+                current_price = await get_stock_price(symbol)
+                if not current_price:
+                    continue
+                
+                # Fetch options
+                calls = foc.get_options_chain_greeks(symbol, best_exp, "CALL")
+                
+                if not calls:
+                    continue
+                
+                # Check for unusual activity
+                unusual = []
+                for opt in calls:
+                    try:
+                        volume = opt.get('volume', 0)
+                        oi = opt.get('openInterest', 0)
+                        strike = opt.get('strike', 0)
+                        last = opt.get('lastPrice', 0)
+                        
+                        if oi > 0 and volume > 0:
+                            vol_oi_ratio = volume / oi
+                            if vol_oi_ratio >= 1.5 and volume >= 10:  # Unusual threshold
+                                distance_pct = abs(strike - current_price) / current_price * 100
+                                if distance_pct <= 20:  # Within 20% of price
+                                    unusual.append({
+                                        'symbol': symbol,
+                                        'strike': strike,
+                                        'volume': volume,
+                                        'oi': oi,
+                                        'ratio': vol_oi_ratio,
+                                        'price': current_price,
+                                        'premium': format_premium(volume, last),
+                                        'distance': distance_pct
+                                    })
+                    except:
+                        continue
+                
+                if unusual:
+                    all_unusual.extend(unusual)
+                    # Send individual alert
+                    for u in unusual[:2]:  # Top 2 per symbol
+                        alert = f"**{symbol}** - ${u['strike']:.2f} CALL: {u['volume']} vol ({u['ratio']:.1f}x) Premium: {u['premium']}"
+                        await ctx.send(alert)
+                
+                await asyncio.sleep(3)  # Rate limit
+                
+            except Exception as e:
+                print(f"Error scanning {symbol}: {e}")
+                continue
+        
+        # Sort all unusual by ratio
+        all_unusual.sort(key=lambda x: x['ratio'], reverse=True)
+        
+        if not all_unusual:
+            await ctx.send("📭 No unusual options activity detected in your watchlist.")
+            return
+        
+        # Create summary table
+        embed = discord.Embed(
+            title="🔥 UNUSUAL OPTIONS ACTIVITY SUMMARY",
+            description=f"Found {len(all_unusual)} unusual setups across your watchlist",
+            color=0x00ff00
+        )
+        
+        table = "```\n"
+        table += "SYMBOL  STRIKE  VOLUME  OI   VOL/OI  PREMIUM\n"
+        table += "------  ------  ------  ---  ------  -------\n"
+        
+        top_overall = []
+        for opt in all_unusual[:10]:
+            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']}\n"
+            top_overall.append(opt)
+        
+        table += "```"
+        embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
+        
+        # Top picks overall
+        if top_overall:
+            picks = "**TOP 3 SETUPS:**\n\n"
+            for i, pick in enumerate(top_overall[:3]):
+                target = pick['strike'] * 1.20
+                picks += f"{i+1}. **{pick['symbol']} ${pick['strike']:.2f} CALL**\n"
+                picks += f"   • Volume: {pick['volume']} ({pick['ratio']:.1f}x normal)\n"
+                picks += f"   • Premium: {pick['premium']}\n"
+                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}\n"
+                picks += f"   • Target: ${target:.2f}\n\n"
+            
+            embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
+        
+        embed.set_footer(text=f"Expiration: {best_exp} ({dte} days)")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error scanning options flow: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
 # DISCORD COMMANDS
 # ====================
 
@@ -1030,7 +1380,7 @@ async def scan(ctx, target='all', timeframe='daily'):
 
 @bot.command(name='signals')
 async def signals(ctx, timeframe: str = 'all'):
-    """Scan for signals across multiple timeframes. Use: !signals [5min|15min|1h|4h|daily|weekly|all]"""
+    """Scan for signals across multiple timeframes"""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1105,6 +1455,24 @@ async def signals(ctx, timeframe: str = 'all'):
         await ctx.send(f"✅ Signal scan complete{ ' across all timeframes' if timeframe == 'all' else ''}!")
     finally:
         user_busy[ctx.author.id] = False
+
+async def send_symbol_with_chart(ctx, symbol, df, timeframe):
+    """Send a chart with signals (used by !scan command)"""
+    df_calc = calculate_indicators(df)
+    signals = get_signals(df_calc)
+    embed = format_embed(symbol, signals, timeframe)
+    
+    try:
+        chart_buffer = generate_chart_image(df, symbol, timeframe)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='chart.png')
+            embed.set_image(url='attachment://chart.png')
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
+        await ctx.send(embed=embed)
 
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
@@ -1460,6 +1828,14 @@ async def help_command(ctx):
 🎯 **ZONES**
 `!zone SYMBOL [timeframe]` – Show buy/sell zones
 
+🔥 **OPTIONS FLOW (NEW!)**
+`!flow TICKER` – Check unusual options activity for a specific stock
+`!scanflow` – Scan entire watchlist for unusual options setups
+   • Shows volume vs open interest ratios
+   • Flags 🟢 BUY signals (2x+ volume)
+   • Recommends best strikes and entry prices
+   • Suggests optimal expiration (30-45 days)
+
 📋 **WATCHLIST**
 `!add SYMBOL` – Add to watchlist
 `!remove SYMBOL` – Remove from watchlist
@@ -1479,7 +1855,9 @@ async def help_command(ctx):
 • `weekly` – Long-term trend
 • `all` – All timeframes at once
 
-💡 **PRO TIP:** Use `!signals all` to catch moves EARLY!
+💡 **PRO TIPS:**
+• Use `!signals all` to catch moves EARLY
+• Use `!scanflow` to find explosive options setups (like your NIO example!)
         """
         await ctx.send(help_text)
     finally:
