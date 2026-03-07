@@ -7,7 +7,5 @@ motor
 matplotlib
 mplfinance
 Pillow
-optionlab
-publicdotcom-py
-freeoptionschain
 yfinance
+freeoptionschain
