@@ -1775,13 +1775,18 @@ async def help_command(ctx):
 🎯 **ZONES**
 `!zone SYMBOL [timeframe]` – Show buy/sell zones
 
-🔥 **OPTIONS FLOW (NEW!)**
+🔥 **OPTIONS FLOW**
 `!flow TICKER` – Check unusual options activity for a specific stock
 `!scanflow` – Scan entire watchlist for unusual options setups
    • Shows volume vs open interest ratios
    • Flags 🟢 BUY signals (2x+ volume)
    • Recommends best strikes and entry prices
    • Suggests optimal expiration (30-45 days)
+
+📈 **BACKTESTING**
+`!backtest SYMBOL [days=365]` – Backtest EMA crossover strategy on historical data
+   • Simulates trades based on your signal logic
+   • Returns win rate, profit factor, max drawdown, and more
 
 📋 **WATCHLIST**
 `!add SYMBOL` – Add to watchlist
@@ -1805,6 +1810,7 @@ async def help_command(ctx):
 💡 **PRO TIPS:**
 • Use `!signals all` to catch moves EARLY
 • Use `!scanflow` to find explosive options setups (like your NIO example!)
+• Use `!backtest SYMBOL` to see how your strategy would have performed historically
         """
         await ctx.send(help_text)
     finally:
