@@ -1159,20 +1159,26 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# BACKTESTING COMMAND
+# IMPROVED BACKTESTING COMMAND (with equity curve plot)
 # ====================
 
 @bot.command(name='backtest')
-async def backtest(ctx, symbol: str, days: int = 365):
-    """Backtest the EMA crossover strategy on historical daily data."""
+async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
+    """
+    Backtest EMA crossover strategy with realistic assumptions.
+    - Enters at next day's open
+    - Compounds returns
+    - Includes transaction cost (default 0.1%)
+    - Proper max drawdown
+    """
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
 
     try:
-        await ctx.send(f"⏳ Backtesting **{symbol.upper()}** over the last {days} days...")
+        await ctx.send(f"⏳ Backtesting **{symbol.upper()}** over the last {days} days (cost: {cost*100:.1f}%)...")
 
-        # Fetch historical data
+        # Fetch historical data (daily)
         ticker = yf.Ticker(symbol.upper())
         df = ticker.history(period=f"{days}d", interval="1d")
         if df.empty:
@@ -1194,100 +1200,123 @@ async def backtest(ctx, symbol: str, days: int = 365):
             if sig:
                 signals_list.append(sig)
 
-        # Simulate trades
-        trades = []
+        # Prepare equity curve
+        dates = df.index.tolist()
+        equity = [1.0]  # start with $1
         in_position = False
         entry_price = 0
         entry_date = None
-        position_type = None  # 'long' or 'short'
+        position_type = None
+        trades = []
+        equity_dates = [dates[0]]
 
+        # We'll use next day's open for entry/exit
         for i in range(1, len(signals_list)):
             sig = signals_list[i]
             prev_sig = signals_list[i-1]
+            today_open = df['open'].iloc[i] if i < len(df) else None
 
-            # Entry logic (using net_score as signal direction)
+            # If not in position, check for entry signal (using previous day's close)
             if not in_position:
-                if sig['net_score'] > 0:      # Buy signal
+                if prev_sig['net_score'] > 0:  # Buy signal at previous close
+                    if today_open is None:
+                        continue
                     in_position = True
                     position_type = 'long'
-                    entry_price = sig['price']
+                    entry_price = today_open
                     entry_date = df.index[i]
-                elif sig['net_score'] < 0:     # Sell signal (short)
+                    # Pay transaction cost at entry
+                    equity[-1] *= (1 - cost)
+                elif prev_sig['net_score'] < 0:  # Sell (short) signal
+                    if today_open is None:
+                        continue
                     in_position = True
                     position_type = 'short'
-                    entry_price = sig['price']
+                    entry_price = today_open
                     entry_date = df.index[i]
+                    equity[-1] *= (1 - cost)
 
-            # Exit logic (signal flips or opposite signal)
+            # If in position, check for exit signal
             elif in_position:
                 exit_signal = False
-                if position_type == 'long' and sig['net_score'] < 0:
+                if position_type == 'long' and prev_sig['net_score'] < 0:
                     exit_signal = True
-                elif position_type == 'short' and sig['net_score'] > 0:
+                elif position_type == 'short' and prev_sig['net_score'] > 0:
                     exit_signal = True
 
                 if exit_signal:
-                    exit_price = sig['price']
-                    exit_date = df.index[i]
+                    exit_price = today_open if today_open is not None else df['close'].iloc[-1]
+                    exit_date = df.index[i] if today_open is not None else df.index[-1]
+
+                    # Calculate return
                     if position_type == 'long':
-                        profit_pct = (exit_price - entry_price) / entry_price * 100
+                        ret = (exit_price - entry_price) / entry_price
                     else:
-                        profit_pct = (entry_price - exit_price) / entry_price * 100
+                        ret = (entry_price - exit_price) / entry_price
+
+                    # Update equity: apply exit cost
+                    new_equity = equity[-1] * (1 + ret) * (1 - cost)
+                    equity.append(new_equity)
+                    equity_dates.append(exit_date)
 
                     trades.append({
                         'entry_date': entry_date,
                         'exit_date': exit_date,
-                        'entry': entry_price,
-                        'exit': exit_price,
                         'type': position_type,
-                        'profit_pct': profit_pct
+                        'ret': ret,
                     })
                     in_position = False
-                    position_type = None
 
-        # If still in position at end, close at last price
+        # If still in position at end, close at last close
         if in_position:
-            exit_price = signals_list[-1]['price']
+            exit_price = df['close'].iloc[-1]
             exit_date = df.index[-1]
             if position_type == 'long':
-                profit_pct = (exit_price - entry_price) / entry_price * 100
+                ret = (exit_price - entry_price) / entry_price
             else:
-                profit_pct = (entry_price - exit_price) / entry_price * 100
+                ret = (entry_price - exit_price) / entry_price
+            new_equity = equity[-1] * (1 + ret) * (1 - cost)
+            equity.append(new_equity)
+            equity_dates.append(exit_date)
             trades.append({
                 'entry_date': entry_date,
                 'exit_date': exit_date,
-                'entry': entry_price,
-                'exit': exit_price,
                 'type': position_type,
-                'profit_pct': profit_pct
+                'ret': ret,
             })
+            in_position = False
 
         if not trades:
             await ctx.send("No trades generated during this period.")
             return
 
-        # Calculate statistics
-        total_return = sum(t['profit_pct'] for t in trades)
-        winning_trades = [t for t in trades if t['profit_pct'] > 0]
-        losing_trades = [t for t in trades if t['profit_pct'] <= 0]
-        win_rate = len(winning_trades) / len(trades) * 100
-        avg_win = np.mean([t['profit_pct'] for t in winning_trades]) if winning_trades else 0
-        avg_loss = np.mean([t['profit_pct'] for t in losing_trades]) if losing_trades else 0
-        profit_factor = abs(sum(t['profit_pct'] for t in winning_trades) / sum(t['profit_pct'] for t in losing_trades)) if losing_trades else float('inf')
+        # Calculate statistics from equity curve
+        final_equity = equity[-1]
+        total_return = (final_equity - 1) * 100
 
-        # Max drawdown (simplified – using equity curve)
-        equity = [0]
-        for t in trades:
-            equity.append(equity[-1] + t['profit_pct'])
-        equity = equity[1:]
+        # Win rate
+        winning_trades = [t for t in trades if t['ret'] > 0]
+        losing_trades = [t for t in trades if t['ret'] <= 0]
+        win_rate = len(winning_trades) / len(trades) * 100
+
+        # Average win/loss (as percentage)
+        avg_win = np.mean([t['ret']*100 for t in winning_trades]) if winning_trades else 0
+        avg_loss = np.mean([t['ret']*100 for t in losing_trades]) if losing_trades else 0
+
+        # Profit factor
+        gross_profit = sum(t['ret'] for t in winning_trades)
+        gross_loss = abs(sum(t['ret'] for t in losing_trades))
+        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
+
+        # Max drawdown
         peak = np.maximum.accumulate(equity)
         drawdown = (peak - equity) / peak * 100
-        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0
+        max_drawdown = np.max(drawdown)
 
-        # Build result embed
+        # Build embed
         embed = discord.Embed(
             title=f"📈 BACKTEST RESULTS: {symbol.upper()}",
-            description=f"Period: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}",
+            description=f"Period: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}\nTransaction cost: {cost*100:.1f}% per trade",
             color=0x00ff00 if total_return > 0 else 0xff0000
         )
         embed.add_field(name="Total Return", value=f"{total_return:.2f}%", inline=True)
@@ -1299,20 +1328,74 @@ async def backtest(ctx, symbol: str, days: int = 365):
         embed.add_field(name="Max Drawdown", value=f"{max_drawdown:.2f}%", inline=True)
 
         # Sample trades
-        if len(trades) > 5:
-            sample = trades[:5]
-        else:
-            sample = trades
+        sample = trades[:5]
         trade_list = "\n".join([
-            f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['profit_pct']:+.2f}%"
+            f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['ret']*100:+.2f}%"
             for t in sample
         ])
         embed.add_field(name="Sample Trades", value=trade_list or "None", inline=False)
 
         await ctx.send(embed=embed)
 
+        # Generate equity curve plot
+        plt.figure(figsize=(10, 5))
+        plt.plot(equity_dates, equity, color='blue', linewidth=2)
+        plt.title(f'{symbol.upper()} Equity Curve (Backtest)')
+        plt.ylabel('Equity ($)')
+        plt.xlabel('Date')
+        plt.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='PNG')
+        buf.seek(0)
+        plt.close()
+
+        file = discord.File(buf, filename='equity.png')
+        await ctx.send(file=file)
+
     except Exception as e:
         await ctx.send(f"❌ Backtest error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# NEW COMMAND: !signal (single symbol multi-timeframe report)
+# ====================
+
+@bot.command(name='signal')
+async def signal_single(ctx, ticker: str):
+    """Get multi-timeframe signal report for a single symbol."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(ticker)
+        await ctx.send(f"🔍 Fetching multi-timeframe signals for **{symbol}**...")
+
+        all_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
+        symbol_signals = {}
+
+        for tf in all_timeframes:
+            df = await fetch_ohlcv(symbol, tf)
+            if df is not None and not df.empty:
+                df_calc = calculate_indicators(df)
+                sig = get_signals(df_calc)
+                if sig and sig['net_score'] != 0:
+                    symbol_signals[tf] = {
+                        'signals': sig,
+                        'df': df
+                    }
+            await asyncio.sleep(2)  # delay to avoid rate limits
+
+        if not symbol_signals:
+            await ctx.send(f"📭 No active signals found for {symbol} on any timeframe.")
+            return
+
+        await send_combined_symbol_report(ctx, symbol, symbol_signals)
+
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
@@ -1865,6 +1948,8 @@ async def help_command(ctx):
    • Shows ONE combined report per symbol with best timeframe chart + clean summary
    • Final summary of all signals at the end
 
+`!signal SYMBOL` – Get multi‑timeframe report for a single symbol (no scan)
+
 📰 **NEWS & EVENTS**
 `!news TICKER [limit]` – Fetch latest news headlines
 `!upcoming [TICKER]` – Show upcoming catalysts
@@ -1882,8 +1967,8 @@ async def help_command(ctx):
 
 📈 **BACKTESTING**
 `!backtest SYMBOL [days=365]` – Backtest EMA crossover strategy on historical data
-   • Simulates trades based on your signal logic
-   • Returns win rate, profit factor, max drawdown, and more
+   • Enters at next day's open, compounds returns, includes transaction costs
+   • Returns win rate, profit factor, max drawdown, and equity curve chart
 
 📋 **WATCHLIST**
 `!add SYMBOL` – Add to watchlist
@@ -1905,9 +1990,10 @@ async def help_command(ctx):
 • `all` – All timeframes at once
 
 💡 **PRO TIPS:**
-• Use `!signals all` to catch moves EARLY
-• Use `!scanflow` to find explosive options setups (like your NIO example!)
-• Use `!backtest SYMBOL` to see how your strategy would have performed historically
+• Use `!signals all` to scan your whole watchlist for opportunities.
+• Use `!signal AAPL` to drill down on a specific symbol.
+• Use `!scanflow` to find explosive options setups before they run.
+• Use `!backtest` to validate your strategy before risking real money.
         """
         await ctx.send(help_text)
     finally:
