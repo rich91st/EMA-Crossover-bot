@@ -750,7 +750,6 @@ def format_zone_embed(symbol, signals, timeframe):
 # ====================
 
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
-    # Define timeframe priority
     timeframe_priority = {
         '5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6
     }
@@ -891,7 +890,6 @@ async def send_final_summary(ctx, signal_summary):
 # ====================
 
 async def get_stock_price(symbol):
-    """Get current stock price using yfinance"""
     try:
         stock = yf.Ticker(symbol)
         data = stock.history(period="1d")
@@ -903,36 +901,31 @@ async def get_stock_price(symbol):
         return None
 
 def get_best_expiration(ticker):
-    """Get the best expiration date (30-45 days out) from available expirations"""
     try:
         stock = yf.Ticker(ticker)
         expirations = stock.options
         if not expirations:
             return None, None
-        
         today = datetime.now()
         best_exp = None
         best_dte = None
         min_diff = float('inf')
-        
         for exp in expirations:
             exp_date = datetime.strptime(exp, '%Y-%m-%d')
             dte = (exp_date - today).days
             if 30 <= dte <= 45:
                 return exp, dte
-            diff = abs(dte - 38)  # target 38 days
+            diff = abs(dte - 38)
             if diff < min_diff:
                 min_diff = diff
                 best_exp = exp
                 best_dte = dte
-        
         return best_exp, best_dte
     except Exception as e:
         print(f"Error getting expirations for {ticker}: {e}")
         return None, None
 
 def format_premium(volume, last_price):
-    """Calculate total premium (volume * 100 shares * last price)"""
     try:
         premium = volume * 100 * last_price
         if premium >= 1000000:
@@ -946,37 +939,29 @@ def format_premium(volume, last_price):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    """Check unusual options activity for a specific ticker"""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
-    
     try:
         await ctx.send(f"🔍 Analyzing options flow for **{ticker.upper()}**...")
-        
         current_price = await get_stock_price(ticker.upper())
         if not current_price:
             await ctx.send(f"❌ Could not fetch current price for {ticker.upper()}")
             return
-        
         best_exp, dte = get_best_expiration(ticker.upper())
         if not best_exp:
             await ctx.send(f"❌ No options expirations found for {ticker.upper()}")
             return
-        
         stock = yf.Ticker(ticker.upper())
         opt_chain = stock.option_chain(best_exp)
-        
         calls = opt_chain.calls
         puts = opt_chain.puts
         calls['type'] = 'CALL'
         puts['type'] = 'PUT'
         all_options = pd.concat([calls, puts], ignore_index=True)
-        
         if all_options.empty:
             await ctx.send(f"No options data found for {ticker.upper()} on {best_exp}")
             return
-        
         analyzed = []
         for _, opt in all_options.iterrows():
             try:
@@ -985,17 +970,13 @@ async def options_flow(ctx, ticker: str):
                 strike = opt.get('strike', 0)
                 last = opt.get('lastPrice', 0)
                 opt_type = opt.get('type', 'CALL')
-                
                 if pd.isna(volume) or pd.isna(oi):
                     continue
-                
                 if oi > 0 and volume > 0:
                     vol_oi_ratio = volume / oi
                 else:
                     vol_oi_ratio = volume if volume > 0 else 0
-                
                 price_distance_pct = abs(strike - current_price) / current_price * 100
-                
                 analyzed.append({
                     'strike': strike,
                     'type': opt_type,
@@ -1008,34 +989,27 @@ async def options_flow(ctx, ticker: str):
                 })
             except:
                 continue
-        
         analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
         significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0]
-        
         if not significant:
             await ctx.send(f"📭 No unusual options activity detected for {ticker.upper()} on {best_exp}")
             return
-        
         embed = discord.Embed(
             title=f"🔍 OPTIONS FLOW: {ticker.upper()}",
             description=f"Current Price: **${current_price:.2f}**\nExpiration: {best_exp} ({dte} days)",
             color=0x00ff00
         )
-        
         table = "```\n"
         table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  ACTION \n"
         table += "------  ----  ------  ----  ------  ------\n"
-        
         unusual_count = 0
         top_picks = []
-        
         for opt in significant[:8]:
             strike = f"${opt['strike']:.2f}"
             opt_type = opt['type']
             volume = opt['volume']
             oi = opt['oi']
             ratio = opt['vol_oi_ratio']
-            
             if ratio >= 2.0:
                 action = "🟢 BUY"
                 unusual_count += 1
@@ -1046,12 +1020,9 @@ async def options_flow(ctx, ticker: str):
                 action = "⚪ NORMAL"
             else:
                 action = "🔴 INACTIVE"
-            
             table += f"{strike:6}  {opt_type:4}  {volume:6}  {oi:4}  {ratio:.1f}x    {action}\n"
-        
         table += "```"
         embed.add_field(name="🔥 UNUSUAL ACTIVITY DETECTED", value=table, inline=False)
-        
         if top_picks:
             picks_text = ""
             for i, pick in enumerate(top_picks[:3]):
@@ -1061,10 +1032,8 @@ async def options_flow(ctx, ticker: str):
                     medal = "🥈 SECOND CHOICE"
                 else:
                     medal = "🥉 THIRD CHOICE"
-                
                 strike_price = pick['strike']
                 target = strike_price * 1.20
-                
                 picks_text += f"\n**{medal}: ${pick['strike']:.2f} {pick['type']}**\n"
                 picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x normal!)\n"
                 picks_text += f"   • Premium: {pick['premium']}\n"
@@ -1072,9 +1041,7 @@ async def options_flow(ctx, ticker: str):
                 picks_text += f"   • Entry: Buy when price holds above ${current_price * 1.01:.2f}\n"
                 picks_text += f"   • Target: ${target:.2f} ({(target/current_price-1)*100:.0f}% potential)\n"
                 picks_text += f"   • Expiration: {best_exp} ({dte} days)\n"
-            
             embed.add_field(name="⭐ TOP PICKS", value=picks_text, inline=False)
-        
         explanation = """
 📊 **WHAT THIS MEANS:**
 • 🟢 BUY = Smart money accumulating (2x+ volume)
@@ -1086,9 +1053,7 @@ async def options_flow(ctx, ticker: str):
 Focus on 🟢 BUY signals near current price. These have the most explosive potential!
         """
         embed.add_field(name="", value=explanation, inline=False)
-        
         await ctx.send(embed=embed)
-        
     except Exception as e:
         await ctx.send(f"❌ Error analyzing options: {str(e)}")
     finally:
@@ -1096,44 +1061,33 @@ Focus on 🟢 BUY signals near current price. These have the most explosive pote
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    """Scan entire watchlist for unusual options activity"""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
-    
     try:
         watchlist = await load_watchlist()
-        symbols = watchlist['stocks']  # Only stocks have options
-        
+        symbols = watchlist['stocks']
         if not symbols:
             await ctx.send("No stocks in watchlist to scan.")
             return
-        
         await ctx.send(f"🔍 **SCANNING {len(symbols)} SYMBOLS FOR UNUSUAL OPTIONS ACTIVITY**")
         await ctx.send(f"⏱️ This will take 2-3 minutes. Results will appear as they come...\n")
-        
         all_unusual = []
-        
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
-            
             try:
                 current_price = await get_stock_price(symbol)
                 if not current_price:
                     continue
-                
                 best_exp, dte = get_best_expiration(symbol)
                 if not best_exp:
                     continue
-                
                 stock = yf.Ticker(symbol)
                 opt_chain = stock.option_chain(best_exp)
                 calls = opt_chain.calls
-                
                 if calls.empty:
                     continue
-                
                 unusual = []
                 for _, opt in calls.iterrows():
                     try:
@@ -1141,10 +1095,8 @@ async def scan_options_flow(ctx):
                         oi = opt.get('openInterest', 0)
                         strike = opt.get('strike', 0)
                         last = opt.get('lastPrice', 0)
-                        
                         if pd.isna(volume) or pd.isna(oi):
                             continue
-                        
                         if oi > 0 and volume > 0:
                             vol_oi_ratio = volume / oi
                             if vol_oi_ratio >= 1.5 and volume >= 10:
@@ -1162,43 +1114,33 @@ async def scan_options_flow(ctx):
                                     })
                     except:
                         continue
-                
                 if unusual:
                     all_unusual.extend(unusual)
                     for u in unusual[:2]:
                         alert = f"**{symbol}** - ${u['strike']:.2f} CALL: {u['volume']} vol ({u['ratio']:.1f}x) Premium: {u['premium']}"
                         await ctx.send(alert)
-                
                 await asyncio.sleep(3)
-                
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
-        
         all_unusual.sort(key=lambda x: x['ratio'], reverse=True)
-        
         if not all_unusual:
             await ctx.send("📭 No unusual options activity detected in your watchlist.")
             return
-        
         embed = discord.Embed(
             title="🔥 UNUSUAL OPTIONS ACTIVITY SUMMARY",
             description=f"Found {len(all_unusual)} unusual setups across your watchlist",
             color=0x00ff00
         )
-        
         table = "```\n"
         table += "SYMBOL  STRIKE  VOLUME  OI   VOL/OI  PREMIUM\n"
         table += "------  ------  ------  ---  ------  -------\n"
-        
         top_overall = []
         for opt in all_unusual[:10]:
             table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']}\n"
             top_overall.append(opt)
-        
         table += "```"
         embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
-        
         if top_overall:
             picks = "**TOP 3 SETUPS:**\n\n"
             for i, pick in enumerate(top_overall[:3]):
@@ -1208,19 +1150,174 @@ async def scan_options_flow(ctx):
                 picks += f"   • Premium: {pick['premium']}\n"
                 picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}\n"
                 picks += f"   • Target: ${target:.2f}\n\n"
-            
             embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
-        
         embed.set_footer(text=f"Using nearest 30-45 day expiration")
         await ctx.send(embed=embed)
-        
     except Exception as e:
         await ctx.send(f"❌ Error scanning options flow: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
 # ====================
-# DISCORD COMMANDS (existing)
+# BACKTESTING COMMAND
+# ====================
+
+@bot.command(name='backtest')
+async def backtest(ctx, symbol: str, days: int = 365):
+    """Backtest the EMA crossover strategy on historical daily data."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+
+    try:
+        await ctx.send(f"⏳ Backtesting **{symbol.upper()}** over the last {days} days...")
+
+        # Fetch historical data
+        ticker = yf.Ticker(symbol.upper())
+        df = ticker.history(period=f"{days}d", interval="1d")
+        if df.empty:
+            await ctx.send("❌ No historical data found.")
+            return
+
+        # Prepare dataframe
+        df = df.rename(columns={
+            'Open': 'open', 'High': 'high', 'Low': 'low',
+            'Close': 'close', 'Volume': 'volume'
+        })
+        df = df[['open', 'high', 'low', 'close', 'volume']]
+
+        # Calculate indicators and signals
+        df = calculate_indicators(df)
+        signals_list = []
+        for i in range(len(df)):
+            sig = get_signals(df.iloc[:i+1])
+            if sig:
+                signals_list.append(sig)
+
+        # Simulate trades
+        trades = []
+        in_position = False
+        entry_price = 0
+        entry_date = None
+        position_type = None  # 'long' or 'short'
+
+        for i in range(1, len(signals_list)):
+            sig = signals_list[i]
+            prev_sig = signals_list[i-1]
+
+            # Entry logic (using net_score as signal direction)
+            if not in_position:
+                if sig['net_score'] > 0:      # Buy signal
+                    in_position = True
+                    position_type = 'long'
+                    entry_price = sig['price']
+                    entry_date = df.index[i]
+                elif sig['net_score'] < 0:     # Sell signal (short)
+                    in_position = True
+                    position_type = 'short'
+                    entry_price = sig['price']
+                    entry_date = df.index[i]
+
+            # Exit logic (signal flips or opposite signal)
+            elif in_position:
+                exit_signal = False
+                if position_type == 'long' and sig['net_score'] < 0:
+                    exit_signal = True
+                elif position_type == 'short' and sig['net_score'] > 0:
+                    exit_signal = True
+
+                if exit_signal:
+                    exit_price = sig['price']
+                    exit_date = df.index[i]
+                    if position_type == 'long':
+                        profit_pct = (exit_price - entry_price) / entry_price * 100
+                    else:
+                        profit_pct = (entry_price - exit_price) / entry_price * 100
+
+                    trades.append({
+                        'entry_date': entry_date,
+                        'exit_date': exit_date,
+                        'entry': entry_price,
+                        'exit': exit_price,
+                        'type': position_type,
+                        'profit_pct': profit_pct
+                    })
+                    in_position = False
+                    position_type = None
+
+        # If still in position at end, close at last price
+        if in_position:
+            exit_price = signals_list[-1]['price']
+            exit_date = df.index[-1]
+            if position_type == 'long':
+                profit_pct = (exit_price - entry_price) / entry_price * 100
+            else:
+                profit_pct = (entry_price - exit_price) / entry_price * 100
+            trades.append({
+                'entry_date': entry_date,
+                'exit_date': exit_date,
+                'entry': entry_price,
+                'exit': exit_price,
+                'type': position_type,
+                'profit_pct': profit_pct
+            })
+
+        if not trades:
+            await ctx.send("No trades generated during this period.")
+            return
+
+        # Calculate statistics
+        total_return = sum(t['profit_pct'] for t in trades)
+        winning_trades = [t for t in trades if t['profit_pct'] > 0]
+        losing_trades = [t for t in trades if t['profit_pct'] <= 0]
+        win_rate = len(winning_trades) / len(trades) * 100
+        avg_win = np.mean([t['profit_pct'] for t in winning_trades]) if winning_trades else 0
+        avg_loss = np.mean([t['profit_pct'] for t in losing_trades]) if losing_trades else 0
+        profit_factor = abs(sum(t['profit_pct'] for t in winning_trades) / sum(t['profit_pct'] for t in losing_trades)) if losing_trades else float('inf')
+
+        # Max drawdown (simplified – using equity curve)
+        equity = [0]
+        for t in trades:
+            equity.append(equity[-1] + t['profit_pct'])
+        equity = equity[1:]
+        peak = np.maximum.accumulate(equity)
+        drawdown = (peak - equity) / peak * 100
+        max_drawdown = np.max(drawdown) if len(drawdown) > 0 else 0
+
+        # Build result embed
+        embed = discord.Embed(
+            title=f"📈 BACKTEST RESULTS: {symbol.upper()}",
+            description=f"Period: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}",
+            color=0x00ff00 if total_return > 0 else 0xff0000
+        )
+        embed.add_field(name="Total Return", value=f"{total_return:.2f}%", inline=True)
+        embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
+        embed.add_field(name="Profit Factor", value=f"{profit_factor:.2f}", inline=True)
+        embed.add_field(name="Number of Trades", value=str(len(trades)), inline=True)
+        embed.add_field(name="Avg Win", value=f"{avg_win:.2f}%", inline=True)
+        embed.add_field(name="Avg Loss", value=f"{avg_loss:.2f}%", inline=True)
+        embed.add_field(name="Max Drawdown", value=f"{max_drawdown:.2f}%", inline=True)
+
+        # Sample trades
+        if len(trades) > 5:
+            sample = trades[:5]
+        else:
+            sample = trades
+        trade_list = "\n".join([
+            f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['profit_pct']:+.2f}%"
+            for t in sample
+        ])
+        embed.add_field(name="Sample Trades", value=trade_list or "None", inline=False)
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Backtest error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# EXISTING COMMANDS (scan, signals, news, upcoming, zone, add, remove, list, help)
 # ====================
 
 @bot.event
