@@ -14,10 +14,6 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
-# Alpaca imports
-from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
-from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-
 # Charting libraries
 import matplotlib
 matplotlib.use('Agg')
@@ -33,10 +29,6 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
-
-# Alpaca keys
-ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
-ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
 # MongoDB setup
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
@@ -145,7 +137,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING – Alpaca (fixed) + Fallbacks
+# DATA FETCHING – Twelve Data + CoinGecko fallback
 # ====================
 
 async def fetch_twelvedata_batch(symbols, timeframe, retries=1):
@@ -291,8 +283,8 @@ async def fetch_coingecko_price(symbol):
 async def fetch_ohlcv(symbol, timeframe):
     """
     Fetch OHLCV data for a single symbol, with caching.
-    Primary: Alpaca (stocks with keys, crypto without keys)
-    Fallback: Twelve Data / CoinGecko
+    Primary: Twelve Data
+    Fallback: CoinGecko for crypto.
     """
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
@@ -301,79 +293,23 @@ async def fetch_ohlcv(symbol, timeframe):
 
     df = None
 
-    # --- Step 1: Try Alpaca ---
-    # Map our timeframe strings to Alpaca's string format (e.g., "5Min", "1H", "1D")
-    alpaca_tf_map = {
-        '5min': '5Min',
-        '15min': '15Min',
-        '1h': '1H',
-        '4h': '4H',
-        'daily': '1D',
-        'weekly': '1W',
-    }
-    alpaca_tf = alpaca_tf_map.get(timeframe)
-
-    if alpaca_tf:
-        if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            # Stocks
-            try:
-                client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-                request = StockBarsRequest(
-                    symbol_or_symbols=symbol,
-                    timeframe=alpaca_tf,
-                    start=now - timedelta(days=60),
-                    end=now
-                )
-                bars = client.get_stock_bars(request)
-                if bars.data:
-                    # Convert to DataFrame
-                    df = bars.df
-                    df = df.reset_index(level=0, drop=True)
-                    df = df[['open', 'high', 'low', 'close', 'volume']]
-                    print(f"✅ Alpaca stock data for {symbol} ({timeframe})")
-            except Exception as e:
-                print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
-                df = None
-
-        elif '/' in symbol:
-            # Crypto: Alpaca Crypto client does NOT need keys
-            try:
-                client = CryptoHistoricalDataClient()
-                alpaca_symbol = symbol.replace('/', '')
-                request = CryptoBarsRequest(
-                    symbol_or_symbols=alpaca_symbol,
-                    timeframe=alpaca_tf,
-                    start=now - timedelta(days=60),
-                    end=now
-                )
-                bars = client.get_crypto_bars(request)
-                if bars.data:
-                    df = bars.df
-                    df = df.reset_index(level=0, drop=True)
-                    df = df[['open', 'high', 'low', 'close', 'volume']]
-                    print(f"✅ Alpaca crypto data for {symbol} ({timeframe})")
-            except Exception as e:
-                print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back... {e}")
-                df = None
-
-    # --- Step 2: Fallback to Twelve Data / CoinGecko ---
-    if df is None:
-        if '/' in symbol:  # crypto
-            if timeframe in ['5min', '15min', '1h', '4h']:
-                result = await fetch_twelvedata_batch([symbol], timeframe)
-                df = result.get(symbol) if result else None
-            else:
-                df = await fetch_coingecko_ohlc(symbol, timeframe)
-            if df is None:
-                df = await fetch_coingecko_price(symbol)
-            if df is None:
-                result = await fetch_twelvedata_batch([symbol], timeframe)
-                df = result.get(symbol) if result else None
-        else:
+    # Try Twelve Data first
+    if '/' in symbol:  # crypto
+        if timeframe in ['5min', '15min', '1h', '4h']:
             result = await fetch_twelvedata_batch([symbol], timeframe)
             df = result.get(symbol) if result else None
+        else:
+            df = await fetch_coingecko_ohlc(symbol, timeframe)
+        if df is None:
+            df = await fetch_coingecko_price(symbol)
+        if df is None:
+            result = await fetch_twelvedata_batch([symbol], timeframe)
+            df = result.get(symbol) if result else None
+    else:
+        # stocks
+        result = await fetch_twelvedata_batch([symbol], timeframe)
+        df = result.get(symbol) if result else None
 
-    # Cache the result if successful
     if df is not None and not df.empty:
         data_cache[cache_key] = (df, now + CACHE_DURATION)
 
@@ -382,7 +318,6 @@ async def fetch_ohlcv(symbol, timeframe):
 # ====================
 # FINNHUB NEWS & EVENTS
 # ====================
-# (All your existing Finnhub functions remain exactly as they were – I'm keeping them here for completeness)
 async def fetch_stock_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
     params = {
@@ -1521,7 +1456,7 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
             await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(timeframes_to_scan)} timeframes**")
             await ctx.send(f"⏱️ Timeframes: 5min, 15min, 1h, 4h, daily, weekly")
-            await ctx.send(f"📈 Total API calls: ~{len(timeframes_to_scan)} (using batch requests + Alpaca)")
+            await ctx.send(f"📈 Total API calls: ~{len(timeframes_to_scan)} (using batch requests)")
             await ctx.send("⏳ This will be fast. Results will appear as they come...\n")
         elif timeframe in all_timeframes:
             timeframes_to_scan = [timeframe]
