@@ -8,4 +8,3 @@ matplotlib
 mplfinance
 Pillow
 yfinance
-alpaca-py
