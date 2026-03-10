@@ -17,7 +17,6 @@ import yfinance as yf
 # Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.timeframe import TimeFrame
 
 # Charting libraries
 import matplotlib
@@ -146,7 +145,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING – Alpaca + Fallbacks
+# DATA FETCHING – Alpaca (fixed) + Fallbacks
 # ====================
 
 async def fetch_twelvedata_batch(symbols, timeframe, retries=1):
@@ -303,19 +302,21 @@ async def fetch_ohlcv(symbol, timeframe):
     df = None
 
     # --- Step 1: Try Alpaca ---
-    if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        # Stocks
-        try:
-            alpaca_tf_map = {
-                '5min': TimeFrame.Minute(5),
-                '15min': TimeFrame.Minute(15),
-                '1h': TimeFrame.Hour(1),
-                '4h': TimeFrame.Hour(4),
-                'daily': TimeFrame.Day(1),
-                'weekly': TimeFrame.Week(1),
-            }
-            alpaca_tf = alpaca_tf_map.get(timeframe)
-            if alpaca_tf:
+    # Map our timeframe strings to Alpaca's string format (e.g., "5Min", "1H", "1D")
+    alpaca_tf_map = {
+        '5min': '5Min',
+        '15min': '15Min',
+        '1h': '1H',
+        '4h': '4H',
+        'daily': '1D',
+        'weekly': '1W',
+    }
+    alpaca_tf = alpaca_tf_map.get(timeframe)
+
+    if alpaca_tf:
+        if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            # Stocks
+            try:
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
                 request = StockBarsRequest(
                     symbol_or_symbols=symbol,
@@ -330,23 +331,13 @@ async def fetch_ohlcv(symbol, timeframe):
                     df = df.reset_index(level=0, drop=True)
                     df = df[['open', 'high', 'low', 'close', 'volume']]
                     print(f"✅ Alpaca stock data for {symbol} ({timeframe})")
-        except Exception as e:
-            print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
-            df = None
+            except Exception as e:
+                print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
+                df = None
 
-    elif '/' in symbol:
-        # Crypto: Alpaca Crypto client does NOT need keys
-        try:
-            alpaca_tf_map = {
-                '5min': TimeFrame.Minute(5),
-                '15min': TimeFrame.Minute(15),
-                '1h': TimeFrame.Hour(1),
-                '4h': TimeFrame.Hour(4),
-                'daily': TimeFrame.Day(1),
-                'weekly': TimeFrame.Week(1),
-            }
-            alpaca_tf = alpaca_tf_map.get(timeframe)
-            if alpaca_tf:
+        elif '/' in symbol:
+            # Crypto: Alpaca Crypto client does NOT need keys
+            try:
                 client = CryptoHistoricalDataClient()
                 alpaca_symbol = symbol.replace('/', '')
                 request = CryptoBarsRequest(
@@ -361,9 +352,9 @@ async def fetch_ohlcv(symbol, timeframe):
                     df = df.reset_index(level=0, drop=True)
                     df = df[['open', 'high', 'low', 'close', 'volume']]
                     print(f"✅ Alpaca crypto data for {symbol} ({timeframe})")
-        except Exception as e:
-            print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back... {e}")
-            df = None
+            except Exception as e:
+                print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back... {e}")
+                df = None
 
     # --- Step 2: Fallback to Twelve Data / CoinGecko ---
     if df is None:
@@ -391,7 +382,7 @@ async def fetch_ohlcv(symbol, timeframe):
 # ====================
 # FINNHUB NEWS & EVENTS
 # ====================
-
+# (All your existing Finnhub functions remain exactly as they were – I'm keeping them here for completeness)
 async def fetch_stock_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
     params = {
@@ -518,7 +509,6 @@ async def fetch_economic_events(days=14):
 # ====================
 # INDICATOR CALCULATIONS
 # ====================
-
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
@@ -631,7 +621,6 @@ def get_rating(signals):
 # ====================
 # CHART GENERATION
 # ====================
-
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
         return None
@@ -697,7 +686,6 @@ def generate_chart_image(df, symbol, timeframe):
 # ====================
 # EMBED FORMATTING
 # ====================
-
 def format_embed(symbol, signals, timeframe):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
@@ -861,7 +849,6 @@ def format_zone_embed(symbol, signals, timeframe):
 # ====================
 # COMBINED SYMBOL REPORT FUNCTIONS
 # ====================
-
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     timeframe_priority = {
         '5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6
@@ -1001,7 +988,6 @@ async def send_final_summary(ctx, signal_summary):
 # ====================
 # OPTIONS FLOW SCANNER (using yfinance)
 # ====================
-
 async def get_stock_price(symbol):
     try:
         stock = yf.Ticker(symbol)
@@ -1272,9 +1258,8 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# IMPROVED BACKTESTING COMMAND (with equity curve plot)
+# BACKTESTING COMMAND
 # ====================
-
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
     """
@@ -1475,7 +1460,6 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
 # ====================
 # COMMAND: !signal (single symbol multi-timeframe report)
 # ====================
-
 @bot.command(name='signal')
 async def signal_single(ctx, ticker: str):
     """Get multi-timeframe signal report for a single symbol."""
@@ -1513,9 +1497,8 @@ async def signal_single(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPDATED COMMAND: !signals (now uses batch + new fetch)
+# COMMAND: !signals (watchlist scan with batch + caching)
 # ====================
-
 @bot.command(name='signals')
 async def signals(ctx, timeframe: str = 'all'):
     if user_busy.get(ctx.author.id):
@@ -1585,7 +1568,6 @@ async def signals(ctx, timeframe: str = 'all'):
 # ====================
 # OTHER COMMANDS (scan, news, upcoming, zone, add, remove, list, help, ping, stopscan)
 # ====================
-
 @bot.event
 async def on_ready():
     print(f'{bot.user} has connected to Discord!')
