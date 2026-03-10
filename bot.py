@@ -14,6 +14,11 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
+# Alpaca imports
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+from alpaca.data.timeframe import TimeFrame
+
 # Charting libraries
 import matplotlib
 matplotlib.use('Agg')
@@ -29,6 +34,10 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
+
+# Alpaca keys
+ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
+ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
 # MongoDB setup
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
@@ -137,12 +146,12 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# OPTIMIZED DATA FETCHING with BATCH and CACHE
+# DATA FETCHING – Alpaca + Fallbacks
 # ====================
 
-async def fetch_twelvedata_batch(symbols, timeframe):
+async def fetch_twelvedata_batch(symbols, timeframe, retries=1):
     """
-    Fetch data for multiple symbols in a single API call.
+    Fetch data for multiple symbols in a single API call (Twelve Data).
     Returns a dict {symbol: DataFrame} or None for failed symbols.
     """
     interval_map = {
@@ -153,12 +162,10 @@ async def fetch_twelvedata_batch(symbols, timeframe):
     if not interval:
         return {}
 
-    # Determine output size based on timeframe
     outputsize = 200
     if timeframe in ['5min', '15min', '1h']:
         outputsize = 500
 
-    # Join symbols with commas
     symbol_str = ','.join(symbols)
     url = "https://api.twelvedata.com/time_series"
     params = {
@@ -172,6 +179,14 @@ async def fetch_twelvedata_batch(symbols, timeframe):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
+                if resp.status == 429:
+                    if retries > 0:
+                        print("Twelve Data rate limit hit, waiting 60s...")
+                        await asyncio.sleep(60)
+                        return await fetch_twelvedata_batch(symbols, timeframe, retries-1)
+                    else:
+                        print("Twelve Data rate limit exceeded – giving up on this batch.")
+                        return {}
                 data = await resp.json()
                 results = {}
                 for sym in symbols:
@@ -277,33 +292,100 @@ async def fetch_coingecko_price(symbol):
 async def fetch_ohlcv(symbol, timeframe):
     """
     Fetch OHLCV data for a single symbol, with caching.
+    Primary: Alpaca (stocks with keys, crypto without keys)
+    Fallback: Twelve Data / CoinGecko
     """
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
     if cache_key in data_cache and data_cache[cache_key][1] > now:
         return data_cache[cache_key][0]
 
-    # Not in cache, fetch
-    if '/' in symbol:  # crypto
-        if timeframe in ['5min', '15min', '1h', '4h']:
-            # Try Twelve Data first for intraday crypto
-            df = await fetch_twelvedata_batch([symbol], timeframe)
-            df = df.get(symbol) if df else None
+    df = None
+
+    # --- Step 1: Try Alpaca ---
+    if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+        # Stocks
+        try:
+            alpaca_tf_map = {
+                '5min': TimeFrame.Minute(5),
+                '15min': TimeFrame.Minute(15),
+                '1h': TimeFrame.Hour(1),
+                '4h': TimeFrame.Hour(4),
+                'daily': TimeFrame.Day(1),
+                'weekly': TimeFrame.Week(1),
+            }
+            alpaca_tf = alpaca_tf_map.get(timeframe)
+            if alpaca_tf:
+                client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                request = StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe=alpaca_tf,
+                    start=now - timedelta(days=60),
+                    end=now
+                )
+                bars = client.get_stock_bars(request)
+                if bars.data:
+                    # Convert to DataFrame
+                    df = bars.df
+                    df = df.reset_index(level=0, drop=True)
+                    df = df[['open', 'high', 'low', 'close', 'volume']]
+                    print(f"✅ Alpaca stock data for {symbol} ({timeframe})")
+        except Exception as e:
+            print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
+            df = None
+
+    elif '/' in symbol:
+        # Crypto: Alpaca Crypto client does NOT need keys
+        try:
+            alpaca_tf_map = {
+                '5min': TimeFrame.Minute(5),
+                '15min': TimeFrame.Minute(15),
+                '1h': TimeFrame.Hour(1),
+                '4h': TimeFrame.Hour(4),
+                'daily': TimeFrame.Day(1),
+                'weekly': TimeFrame.Week(1),
+            }
+            alpaca_tf = alpaca_tf_map.get(timeframe)
+            if alpaca_tf:
+                client = CryptoHistoricalDataClient()
+                alpaca_symbol = symbol.replace('/', '')
+                request = CryptoBarsRequest(
+                    symbol_or_symbols=alpaca_symbol,
+                    timeframe=alpaca_tf,
+                    start=now - timedelta(days=60),
+                    end=now
+                )
+                bars = client.get_crypto_bars(request)
+                if bars.data:
+                    df = bars.df
+                    df = df.reset_index(level=0, drop=True)
+                    df = df[['open', 'high', 'low', 'close', 'volume']]
+                    print(f"✅ Alpaca crypto data for {symbol} ({timeframe})")
+        except Exception as e:
+            print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back... {e}")
+            df = None
+
+    # --- Step 2: Fallback to Twelve Data / CoinGecko ---
+    if df is None:
+        if '/' in symbol:  # crypto
+            if timeframe in ['5min', '15min', '1h', '4h']:
+                result = await fetch_twelvedata_batch([symbol], timeframe)
+                df = result.get(symbol) if result else None
+            else:
+                df = await fetch_coingecko_ohlc(symbol, timeframe)
+            if df is None:
+                df = await fetch_coingecko_price(symbol)
+            if df is None:
+                result = await fetch_twelvedata_batch([symbol], timeframe)
+                df = result.get(symbol) if result else None
         else:
-            df = await fetch_coingecko_ohlc(symbol, timeframe)
-        if df is None:
-            df = await fetch_coingecko_price(symbol)
-        if df is None:
-            # Final fallback to Twelve Data
             result = await fetch_twelvedata_batch([symbol], timeframe)
             df = result.get(symbol) if result else None
-    else:
-        # stocks: use Twelve Data
-        result = await fetch_twelvedata_batch([symbol], timeframe)
-        df = result.get(symbol) if result else None
 
-    if df is not None:
+    # Cache the result if successful
+    if df is not None and not df.empty:
         data_cache[cache_key] = (df, now + CACHE_DURATION)
+
     return df
 
 # ====================
@@ -563,14 +645,15 @@ def generate_chart_image(df, symbol, timeframe):
     volume_all_nan = chart_data['Volume'].isna().all()
 
     apds = []
-    if not df['ema5'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema5'].tail(30), color='#00ff00', width=2.5, label='EMA5'))
-    if not df['ema13'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema13'].tail(30), color='#ffd700', width=2.5, label='EMA13'))
-    if not df['ema50'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema50'].tail(30), color='#ff4444', width=2.5, label='EMA50'))
-    if not df['ema200'].tail(30).isna().all():
-        apds.append(mpf.make_addplot(df['ema200'].tail(30), color='#ff00ff', width=3.5, label='EMA200'))
+    chart_len = len(chart_data)
+    if not df['ema5'].tail(chart_len).isna().all():
+        apds.append(mpf.make_addplot(df['ema5'].tail(chart_len), color='#00ff00', width=2.5, label='EMA5'))
+    if not df['ema13'].tail(chart_len).isna().all():
+        apds.append(mpf.make_addplot(df['ema13'].tail(chart_len), color='#ffd700', width=2.5, label='EMA13'))
+    if not df['ema50'].tail(chart_len).isna().all():
+        apds.append(mpf.make_addplot(df['ema50'].tail(chart_len), color='#ff4444', width=2.5, label='EMA50'))
+    if not df['ema200'].tail(chart_len).isna().all():
+        apds.append(mpf.make_addplot(df['ema200'].tail(chart_len), color='#ff00ff', width=3.5, label='EMA200'))
 
     mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
@@ -1416,7 +1499,7 @@ async def signal_single(ctx, ticker: str):
                         'signals': sig,
                         'df': df
                     }
-            await asyncio.sleep(1)  # small delay to avoid rate limits, though cache helps
+            await asyncio.sleep(1)  # small delay to be gentle
 
         if not symbol_signals:
             await ctx.send(f"📭 No active signals found for {symbol} on any timeframe.")
@@ -1430,7 +1513,7 @@ async def signal_single(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPDATED COMMAND: !signals (now uses batch)
+# UPDATED COMMAND: !signals (now uses batch + new fetch)
 # ====================
 
 @bot.command(name='signals')
@@ -1455,7 +1538,7 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
             await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(timeframes_to_scan)} timeframes**")
             await ctx.send(f"⏱️ Timeframes: 5min, 15min, 1h, 4h, daily, weekly")
-            await ctx.send(f"📈 Total API calls: ~{len(timeframes_to_scan)} (using batch requests)")
+            await ctx.send(f"📈 Total API calls: ~{len(timeframes_to_scan)} (using batch requests + Alpaca)")
             await ctx.send("⏳ This will be fast. Results will appear as they come...\n")
         elif timeframe in all_timeframes:
             timeframes_to_scan = [timeframe]
@@ -1467,26 +1550,14 @@ async def signals(ctx, timeframe: str = 'all'):
         all_symbol_signals = defaultdict(dict)
         found_any = False
 
-        # For each timeframe, fetch data for all symbols in one batch
         for tf in timeframes_to_scan:
             if await check_cancel(ctx):
                 break
 
-            # Attempt batch for all symbols (stocks + crypto, but Twelve Data may fail for some crypto)
-            batch_data = await fetch_twelvedata_batch(symbols, tf)
-            if not batch_data:
-                batch_data = {}
-
-            # Process each symbol
             for symbol in symbols:
                 if await check_cancel(ctx):
                     break
-
-                df = batch_data.get(symbol)
-                # If batch returned None for this symbol, try individual fallback (e.g., crypto via CoinGecko)
-                if df is None:
-                    df = await fetch_ohlcv(symbol, tf)  # this uses cache and fallbacks
-
+                df = await fetch_ohlcv(symbol, tf)
                 if df is not None and not df.empty:
                     df_calc = calculate_indicators(df)
                     sig = get_signals(df_calc)
@@ -1498,12 +1569,8 @@ async def signals(ctx, timeframe: str = 'all'):
                             'signals': sig,
                             'df': df
                         }
-                # No sleep needed because batch already did all calls at once
+                await asyncio.sleep(0.5)  # tiny delay to avoid overwhelming
 
-            # Small delay between timeframes to be gentle
-            await asyncio.sleep(1)
-
-        # Now send combined reports for each symbol that has signals
         for symbol, tf_signals in all_symbol_signals.items():
             await send_combined_symbol_report(ctx, symbol, tf_signals)
 
@@ -1516,7 +1583,7 @@ async def signals(ctx, timeframe: str = 'all'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# OTHER COMMANDS (unchanged)
+# OTHER COMMANDS (scan, news, upcoming, zone, add, remove, list, help, ping, stopscan)
 # ====================
 
 @bot.event
@@ -1620,7 +1687,7 @@ async def scan(ctx, target='all', timeframe='daily'):
                 except Exception as e:
                     print(f"⚠️ Chart generation failed: {e}")
                     await ctx.send(embed=embed)
-            await asyncio.sleep(5)  # delay between symbols (reduced because caching helps)
+            await asyncio.sleep(5)
 
         cancellation_flags[ctx.author.id] = False
         await ctx.send("Scan complete.")
