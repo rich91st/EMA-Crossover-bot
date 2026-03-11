@@ -886,7 +886,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (using yfinance) – ENHANCED VERSION (FIXED)
+# OPTIONS FLOW SCANNER (using yfinance) – ORIGINAL VERSION
 # ====================
 
 async def get_stock_price(symbol):
@@ -937,63 +937,8 @@ def format_premium(volume, last_price):
     except:
         return "N/A"
 
-# Helper to analyze a single expiration – FIXED VERSION
-def analyze_expiration(opt_chain, current_price, min_volume=5):
-    """Return list of significant options with Greeks and score."""
-    # Check if both calls and puts are empty
-    if opt_chain.calls.empty and opt_chain.puts.empty:
-        return []
-    calls = opt_chain.calls.copy()
-    puts = opt_chain.puts.copy()
-    if not calls.empty:
-        calls['type'] = 'CALL'
-    if not puts.empty:
-        puts['type'] = 'PUT'
-    all_options = pd.concat([calls, puts], ignore_index=True)
-
-    analyzed = []
-    for _, opt in all_options.iterrows():
-        try:
-            volume = opt.get('volume', 0)
-            oi = opt.get('openInterest', 0)
-            strike = opt.get('strike', 0)
-            last = opt.get('lastPrice', 0)
-            opt_type = opt.get('type', 'CALL')
-            delta = opt.get('delta', 0)
-            gamma = opt.get('gamma', 0)
-            theta = opt.get('theta', 0)
-            vega = opt.get('vega', 0)
-
-            if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
-                continue
-
-            vol_oi_ratio = volume / oi
-            premium = volume * 100 * last
-            # Score: volume/OI * log(premium+1) to give weight to premium
-            score = vol_oi_ratio * np.log1p(premium) if premium > 0 else 0
-
-            analyzed.append({
-                'strike': strike,
-                'type': opt_type,
-                'volume': int(volume),
-                'oi': int(oi),
-                'vol_oi_ratio': vol_oi_ratio,
-                'last': last,
-                'premium': format_premium(volume, last),
-                'raw_premium': premium,
-                'delta': delta,
-                'gamma': gamma,
-                'theta': theta,
-                'vega': vega,
-                'score': score
-            })
-        except:
-            continue
-    return analyzed
-
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    """Enhanced options flow with Greeks, multiple expirations, and scoring."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1003,139 +948,112 @@ async def options_flow(ctx, ticker: str):
         if not current_price:
             await ctx.send(f"❌ Could not fetch current price for {ticker.upper()}")
             return
-
-        stock = yf.Ticker(ticker.upper())
-        expirations = stock.options
-        if not expirations:
+        best_exp, dte = get_best_expiration(ticker.upper())
+        if not best_exp:
             await ctx.send(f"❌ No options expirations found for {ticker.upper()}")
             return
-
-        # Identify primary expiration (30-45 DTE) and a couple of others (nearest weekly, next monthly)
-        today = datetime.now().date()
-        exp_dates = [datetime.strptime(e, '%Y-%m-%d').date() for e in expirations]
-        primary_exp = None
-        primary_dte = None
-        other_expirations = []
-
-        for exp_date, exp_str in zip(exp_dates, expirations):
-            dte = (exp_date - today).days
-            if 30 <= dte <= 45:
-                primary_exp = exp_str
-                primary_dte = dte
-                break
-
-        if not primary_exp:
-            # fallback to closest to 38 days
-            min_diff = float('inf')
-            for exp_date, exp_str in zip(exp_dates, expirations):
-                dte = (exp_date - today).days
-                diff = abs(dte - 38)
-                if diff < min_diff:
-                    min_diff = diff
-                    primary_exp = exp_str
-                    primary_dte = dte
-
-        # Gather other expirations: nearest weekly (0-7 DTE) and next monthly (maybe 60+ DTE)
-        for exp_date, exp_str in zip(exp_dates, expirations):
-            dte = (exp_date - today).days
-            if exp_str == primary_exp:
+        stock = yf.Ticker(ticker.upper())
+        opt_chain = stock.option_chain(best_exp)
+        calls = opt_chain.calls
+        puts = opt_chain.puts
+        calls['type'] = 'CALL'
+        puts['type'] = 'PUT'
+        all_options = pd.concat([calls, puts], ignore_index=True)
+        if all_options.empty:
+            await ctx.send(f"No options data found for {ticker.upper()} on {best_exp}")
+            return
+        analyzed = []
+        for _, opt in all_options.iterrows():
+            try:
+                volume = opt.get('volume', 0)
+                oi = opt.get('openInterest', 0)
+                strike = opt.get('strike', 0)
+                last = opt.get('lastPrice', 0)
+                opt_type = opt.get('type', 'CALL')
+                if pd.isna(volume) or pd.isna(oi):
+                    continue
+                if oi > 0 and volume > 0:
+                    vol_oi_ratio = volume / oi
+                else:
+                    vol_oi_ratio = volume if volume > 0 else 0
+                price_distance_pct = abs(strike - current_price) / current_price * 100
+                analyzed.append({
+                    'strike': strike,
+                    'type': opt_type,
+                    'volume': int(volume),
+                    'oi': int(oi),
+                    'vol_oi_ratio': vol_oi_ratio,
+                    'last': last,
+                    'distance_pct': price_distance_pct,
+                    'premium': format_premium(volume, last)
+                })
+            except:
                 continue
-            if dte <= 7 or dte >= 60:
-                other_expirations.append((exp_str, dte))
-            if len(other_expirations) >= 2:
-                break
-
-        # Build embed
+        analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
+        significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0]
+        if not significant:
+            await ctx.send(f"📭 No unusual options activity detected for {ticker.upper()} on {best_exp}")
+            return
         embed = discord.Embed(
             title=f"🔍 OPTIONS FLOW: {ticker.upper()}",
-            description=f"Current Price: **${current_price:.2f}**",
+            description=f"Current Price: **${current_price:.2f}**\nExpiration: {best_exp} ({dte} days)",
             color=0x00ff00
         )
-
-        # Primary expiration
-        opt_chain_primary = stock.option_chain(primary_exp)
-        primary_analyzed = analyze_expiration(opt_chain_primary, current_price)
-        primary_analyzed.sort(key=lambda x: x['score'], reverse=True)
-        significant_primary = [opt for opt in primary_analyzed if opt['volume'] >= 5 and opt['oi'] > 0]
-
-        if significant_primary:
-            table = f"```\n🔥 PRIMARY EXPIRATION ({primary_exp}, {primary_dte} days)\n"
-            table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  DELTA  THETA    SCORE  SIGNAL\n"
-            table += "------  ----  ------  ----  ------  -----  ------   -----  ------\n"
-            top_picks = []
-            for opt in significant_primary[:8]:
-                strike = f"${opt['strike']:.2f}"
-                opt_type = opt['type']
-                volume = opt['volume']
-                oi = opt['oi']
-                ratio = opt['vol_oi_ratio']
-                delta = opt['delta']
-                theta = opt['theta']
-                score = int(opt['score'])
-
-                # Determine signal strength
-                if ratio >= 2.0 and opt['raw_premium'] >= 10000:
-                    signal = "🟢 STRONG"
-                    top_picks.append(opt)
-                elif ratio >= 2.0:
-                    signal = "🟡 MEDIUM"
-                elif ratio >= 1.5:
-                    signal = "⚪ WATCH"
+        table = "```\n"
+        table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  ACTION \n"
+        table += "------  ----  ------  ----  ------  ------\n"
+        unusual_count = 0
+        top_picks = []
+        for opt in significant[:8]:
+            strike = f"${opt['strike']:.2f}"
+            opt_type = opt['type']
+            volume = opt['volume']
+            oi = opt['oi']
+            ratio = opt['vol_oi_ratio']
+            if ratio >= 2.0:
+                action = "🟢 BUY"
+                unusual_count += 1
+                top_picks.append(opt)
+            elif ratio >= 1.5:
+                action = "🟡 WATCH"
+            elif ratio >= 1.0:
+                action = "⚪ NORMAL"
+            else:
+                action = "🔴 INACTIVE"
+            table += f"{strike:6}  {opt_type:4}  {volume:6}  {oi:4}  {ratio:.1f}x    {action}\n"
+        table += "```"
+        embed.add_field(name="🔥 UNUSUAL ACTIVITY DETECTED", value=table, inline=False)
+        if top_picks:
+            picks_text = ""
+            for i, pick in enumerate(top_picks[:3]):
+                if i == 0:
+                    medal = "🥇 BEST SHOT"
+                elif i == 1:
+                    medal = "🥈 SECOND CHOICE"
                 else:
-                    signal = "🔴 AVOID"
-
-                table += f"{strike:6}  {opt_type:4}  {volume:6}  {oi:4}  {ratio:.1f}x    {delta:.2f}   {theta:.4f}  {score:<5} {signal}\n"
-            table += "```"
-            embed.add_field(name="", value=table, inline=False)
-
-            # Top picks from primary
-            if top_picks:
-                picks_text = ""
-                for i, pick in enumerate(top_picks[:3]):
-                    medal = ["🥇 BEST SHOT", "🥈 SECOND CHOICE", "🥉 THIRD CHOICE"][i]
-                    target = pick['strike'] * 1.20
-                    entry_above = current_price * 1.01
-                    picks_text += f"\n**{medal}: ${pick['strike']:.2f} {pick['type']}**\n"
-                    picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                    picks_text += f"   • Delta: {pick['delta']:.2f}  Gamma: {pick['gamma']:.2f}  Theta: {pick['theta']:.4f}\n"
-                    picks_text += f"   • Entry: Above ${entry_above:.2f}  Target: ${target:.2f}\n"
-                embed.add_field(name="⭐ TOP PICKS", value=picks_text, inline=False)
-
-        # Other expirations
-        for exp_str, dte in other_expirations:
-            opt_chain = stock.option_chain(exp_str)
-            analyzed = analyze_expiration(opt_chain, current_price)
-            analyzed.sort(key=lambda x: x['score'], reverse=True)
-            significant = [opt for opt in analyzed if opt['vol_oi_ratio'] >= 1.5 and opt['raw_premium'] >= 5000][:3]
-            if significant:
-                table = f"```\n📅 OTHER EXPIRATION ({exp_str}, {dte} days)\n"
-                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  DELTA  THETA    SCORE\n"
-                table += "------  ----  ------  ----  ------  -----  ------   -----\n"
-                for opt in significant:
-                    strike = f"${opt['strike']:.2f}"
-                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x    {opt['delta']:.2f}   {opt['theta']:.4f}  {int(opt['score'])}\n"
-                table += "```"
-                embed.add_field(name="", value=table, inline=False)
-
-        # Explanation
+                    medal = "🥉 THIRD CHOICE"
+                strike_price = pick['strike']
+                target = strike_price * 1.20
+                picks_text += f"\n**{medal}: ${pick['strike']:.2f} {pick['type']}**\n"
+                picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x normal!)\n"
+                picks_text += f"   • Premium: {pick['premium']}\n"
+                picks_text += f"   • Why: {'High volume spike' if pick['vol_oi_ratio'] >= 2 else 'Strong volume'} near price\n"
+                picks_text += f"   • Entry: Buy when price holds above ${current_price * 1.01:.2f}\n"
+                picks_text += f"   • Target: ${target:.2f} ({(target/current_price-1)*100:.0f}% potential)\n"
+                picks_text += f"   • Expiration: {best_exp} ({dte} days)\n"
+            embed.add_field(name="⭐ TOP PICKS", value=picks_text, inline=False)
         explanation = """
-📊 **GREEKS GUIDE:**
-• **Delta** (0–1): How much option moves with stock. 0.3–0.7 is ideal.
-• **Gamma**: Speed of delta change. High near strike = explosive.
-• **Theta**: Daily time decay (negative). Smaller is better (e.g., -0.01 vs -0.05).
-• **Score**: Our custom ranking (volume/OI × log(premium)). Higher = stronger.
+📊 **WHAT THIS MEANS:**
+• 🟢 BUY = Smart money accumulating (2x+ volume)
+• 🟡 WATCH = Interesting activity (1.5-2x volume)
+• ⚪ NORMAL = Regular trading
+• 🔴 INACTIVE = Avoid
 
-🟢 STRONG = high volume + meaningful premium (>$10K)
-🟡 MEDIUM = high volume but low premium
-⚪ WATCH = interesting volume
-🔴 AVOID = low volume or poor liquidity
-
-💡 **TIP:** Primary expiration (30-45 DTE) is the sweet spot. Shorter expirations are riskier.
+💡 **RECOMMENDATION:**
+Focus on 🟢 BUY signals near current price. These have the most explosive potential!
         """
         embed.add_field(name="", value=explanation, inline=False)
-
         await ctx.send(embed=embed)
-
     except Exception as e:
         await ctx.send(f"❌ Error analyzing options: {str(e)}")
     finally:
@@ -1143,7 +1061,6 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    # (unchanged from your original)
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1244,6 +1161,7 @@ async def scan_options_flow(ctx):
 # ====================
 # BACKTESTING COMMAND
 # ====================
+
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
     """
@@ -2040,7 +1958,7 @@ async def help_command(ctx):
 `!zone SYMBOL [timeframe]` – Show buy/sell zones
 
 🔥 **OPTIONS FLOW**
-`!flow TICKER` – Check unusual options activity for a specific stock (now with Greeks, scoring, and multiple expirations!)
+`!flow TICKER` – Check unusual options activity for a specific stock
 `!scanflow` – Scan entire watchlist for unusual options setups
    • Shows volume vs open interest ratios
    • Flags 🟢 BUY signals (2x+ volume)
