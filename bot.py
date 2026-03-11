@@ -14,6 +14,10 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
+# Alpaca imports
+from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
+from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+
 # Charting libraries
 import matplotlib
 matplotlib.use('Agg')
@@ -29,6 +33,10 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
+
+# Alpaca keys
+ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
+ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
 # MongoDB setup
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
@@ -49,30 +57,6 @@ cancellation_flags = {}
 # ====================
 data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
 CACHE_DURATION = timedelta(minutes=5)
-
-# ====================
-# RATE LIMITER (for Twelve Data)
-# ====================
-class RateLimiter:
-    def __init__(self, max_calls, period):
-        self.max_calls = max_calls
-        self.period = period
-        self.calls = []
-        self.lock = asyncio.Lock()
-
-    async def wait_if_needed(self):
-        async with self.lock:
-            now = datetime.now()
-            # Remove calls older than period
-            self.calls = [t for t in self.calls if now - t < timedelta(seconds=self.period)]
-            if len(self.calls) >= self.max_calls:
-                oldest = self.calls[0]
-                sleep_time = (oldest + timedelta(seconds=self.period) - now).total_seconds()
-                if sleep_time > 0:
-                    await asyncio.sleep(sleep_time)
-            self.calls.append(now)
-
-twelvedata_limiter = RateLimiter(max_calls=8, period=60)
 
 # ====================
 # WEB SERVER
@@ -106,16 +90,16 @@ async def load_watchlist():
         else:
             default = {
                 "_id": "main",
-                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-                "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL", "NKLA"],
+                "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD", "LINK/USD"]
             }
             await watchlist_collection.insert_one(default)
             return default
     except Exception as e:
         print(f"❌ Error loading watchlist: {e}")
         return {
-            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG"],
-            "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD"]
+            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL", "NKLA"],
+            "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD", "LINK/USD"]
         }
 
 async def save_watchlist(watchlist):
@@ -161,89 +145,54 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# OPTIMIZED DATA FETCHING with BATCH and CACHE
+# DATA FETCHING – Alpaca first, then Twelve Data / CoinGecko
 # ====================
 
-async def fetch_twelvedata_batch(symbols, timeframe, retries=1):
-    """
-    Fetch data for multiple symbols in a single API call.
-    Handles both single and multiple symbols correctly.
-    Returns a dict {symbol: DataFrame} or None for failed symbols.
-    """
+async def fetch_twelvedata(symbol, timeframe):
+    """Fallback: fetch single symbol from Twelve Data."""
     interval_map = {
         '5min': '5min', '15min': '15min', '1h': '1h',
         '4h': '4h', 'daily': '1day', 'weekly': '1week'
     }
     interval = interval_map.get(timeframe)
     if not interval:
-        return {}
+        return None
 
     outputsize = 200
     if timeframe in ['5min', '15min', '1h']:
         outputsize = 500
 
-    # Remove duplicates and symbols with '/'
-    symbols = list(dict.fromkeys([s for s in symbols if '/' not in s]))  # Twelve Data only supports stocks
-    if not symbols:
-        return {}
-
-    symbol_str = ','.join(symbols)
     url = "https://api.twelvedata.com/time_series"
     params = {
-        'symbol': symbol_str,
+        'symbol': symbol,
         'interval': interval,
         'apikey': TWELVEDATA_API_KEY,
         'outputsize': outputsize,
         'format': 'JSON'
     }
 
-    await twelvedata_limiter.wait_if_needed()
-
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status == 429:
-                    if retries > 0:
-                        print("Twelve Data rate limit hit, waiting 60s...")
-                        await asyncio.sleep(60)
-                        return await fetch_twelvedata_batch(symbols, timeframe, retries-1)
-                    else:
-                        print("Twelve Data rate limit exceeded – giving up on this batch.")
-                        return {}
+                    print("Twelve Data rate limit hit, waiting 60s...")
+                    await asyncio.sleep(60)
+                    # No retry; just return None
+                    return None
                 data = await resp.json()
-                results = {}
-                # If only one symbol requested, Twelve Data returns a single object (not a dict keyed by symbol)
-                if len(symbols) == 1:
-                    sym = symbols[0]
-                    if 'values' in data:
-                        df = pd.DataFrame(data['values'])
-                        df = df.rename(columns={'datetime': 'timestamp'})
-                        df['timestamp'] = pd.to_datetime(df['timestamp'])
-                        df.set_index('timestamp', inplace=True)
-                        df = df.astype(float)
-                        df = df.sort_index()
-                        results[sym] = df
-                    else:
-                        print(f"Twelve Data single-symbol error for {sym}: {data}")
-                        results[sym] = None
-                else:
-                    for sym in symbols:
-                        sym_data = data.get(sym)
-                        if sym_data and 'values' in sym_data:
-                            df = pd.DataFrame(sym_data['values'])
-                            df = df.rename(columns={'datetime': 'timestamp'})
-                            df['timestamp'] = pd.to_datetime(df['timestamp'])
-                            df.set_index('timestamp', inplace=True)
-                            df = df.astype(float)
-                            df = df.sort_index()
-                            results[sym] = df
-                        else:
-                            print(f"Twelve Data batch error for {sym}: {data}")
-                            results[sym] = None
-                return results
+                if 'values' not in data:
+                    print(f"Twelve Data error for {symbol}: {data}")
+                    return None
+                df = pd.DataFrame(data['values'])
+                df = df.rename(columns={'datetime': 'timestamp'})
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+                df = df.astype(float)
+                df = df.sort_index()
+                return df
     except Exception as e:
-        print(f"Twelve Data batch exception: {e}")
-        return {}
+        print(f"Twelve Data exception for {symbol}: {e}")
+        return None
 
 async def fetch_coingecko_ohlc(symbol, timeframe):
     base = symbol.split('/')[0].lower()
@@ -330,8 +279,8 @@ async def fetch_coingecko_price(symbol):
 async def fetch_ohlcv(symbol, timeframe):
     """
     Fetch OHLCV data for a single symbol, with caching.
-    For stocks, uses batch (but with single symbol) – still benefits from cache.
-    For crypto, falls back to CoinGecko.
+    Primary: Alpaca for stocks, CoinGecko for crypto.
+    Fallback: Twelve Data for stocks, CoinGecko price fallback for crypto.
     """
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
@@ -340,34 +289,80 @@ async def fetch_ohlcv(symbol, timeframe):
 
     df = None
 
-    if '/' in symbol:  # crypto
-        if timeframe in ['5min', '15min', '1h', '4h']:
-            # Try Twelve Data first for intraday crypto (if available)
-            df = await fetch_twelvedata_batch([symbol], timeframe)
-            df = df.get(symbol) if df else None
+    # Map our timeframe strings to Alpaca's string format
+    alpaca_tf_map = {
+        '5min': '5Min',
+        '15min': '15Min',
+        '1h': '1H',
+        '4h': '4H',
+        'daily': '1D',
+        'weekly': '1W',
+    }
+    alpaca_tf = alpaca_tf_map.get(timeframe)
+
+    # --- Step 1: Try Alpaca for stocks ---
+    if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY and alpaca_tf:
+        try:
+            client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+            request = StockBarsRequest(
+                symbol_or_symbols=symbol,
+                timeframe=alpaca_tf,
+                start=now - timedelta(days=60),
+                end=now
+            )
+            bars = client.get_stock_bars(request)
+            if bars.data:
+                df = bars.df
+                df = df.reset_index(level=0, drop=True)
+                df = df[['open', 'high', 'low', 'close', 'volume']]
+                print(f"✅ Alpaca stock data for {symbol} ({timeframe})")
+        except Exception as e:
+            print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
+            df = None
+
+    # --- Step 2: If stock failed, try Twelve Data ---
+    if df is None and '/' not in symbol:
+        df = await fetch_twelvedata(symbol, timeframe)
+
+    # --- Step 3: For crypto, try Alpaca crypto (no keys needed) then CoinGecko ---
+    if '/' in symbol:
+        # Alpaca crypto client does not need keys
+        try:
+            if alpaca_tf:
+                client = CryptoHistoricalDataClient()
+                alpaca_symbol = symbol.replace('/', '')
+                request = CryptoBarsRequest(
+                    symbol_or_symbols=alpaca_symbol,
+                    timeframe=alpaca_tf,
+                    start=now - timedelta(days=60),
+                    end=now
+                )
+                bars = client.get_crypto_bars(request)
+                if bars.data:
+                    df = bars.df
+                    df = df.reset_index(level=0, drop=True)
+                    df = df[['open', 'high', 'low', 'close', 'volume']]
+                    print(f"✅ Alpaca crypto data for {symbol} ({timeframe})")
+        except Exception as e:
+            print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back to CoinGecko... {e}")
+            df = None
+
         if df is None:
             df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is None:
             df = await fetch_coingecko_price(symbol)
-        if df is None:
-            # Final fallback to Twelve Data
-            result = await fetch_twelvedata_batch([symbol], timeframe)
-            df = result.get(symbol) if result else None
-    else:
-        # stocks: use Twelve Data batch
-        result = await fetch_twelvedata_batch([symbol], timeframe)
-        df = result.get(symbol) if result else None
 
+    # Cache the result if successful
     if df is not None and not df.empty:
         data_cache[cache_key] = (df, now + CACHE_DURATION)
 
     return df
 
 # ====================
-# FINNHUB NEWS & EVENTS
+# FINNHUB NEWS & EVENTS (unchanged)
 # ====================
-
 async def fetch_stock_news(symbol):
+    # ... same as before ...
     url = "https://finnhub.io/api/v1/company-news"
     params = {
         'symbol': symbol,
@@ -387,6 +382,7 @@ async def fetch_stock_news(symbol):
         return None
 
 async def fetch_earnings_upcoming(symbol, days=14):
+    # ... same ...
     url = "https://finnhub.io/api/v1/calendar/earnings"
     params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
     try:
@@ -493,8 +489,8 @@ async def fetch_economic_events(days=14):
 # ====================
 # INDICATOR CALCULATIONS (unchanged)
 # ====================
-
 def calculate_indicators(df):
+    # ... same as before ...
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -515,6 +511,7 @@ def calculate_indicators(df):
     return df
 
 def get_signals(df):
+    # ... same ...
     if len(df) < 2:
         return {}
     latest = df.iloc[-1]
@@ -604,9 +601,8 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION
+# CHART GENERATION (unchanged)
 # ====================
-
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
         return None
@@ -670,9 +666,8 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# EMBED FORMATTING
+# EMBED FORMATTING (unchanged)
 # ====================
-
 def format_embed(symbol, signals, timeframe):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
@@ -764,6 +759,7 @@ def format_embed(symbol, signals, timeframe):
     return embed
 
 def format_zone_embed(symbol, signals, timeframe):
+    # ... unchanged ...
     sym_type = "Crypto" if '/' in symbol else "Stock"
     price = signals['price']
     support = signals['support_20']
@@ -834,10 +830,10 @@ def format_zone_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# COMBINED SYMBOL REPORT FUNCTIONS
+# COMBINED SYMBOL REPORT FUNCTIONS (unchanged)
 # ====================
-
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
+    # ... same as before ...
     timeframe_priority = {
         '5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6
     }
@@ -878,6 +874,7 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
 
 async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
+    # ... same ...
     timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
     sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x, 99))
 
@@ -929,6 +926,7 @@ async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
     await ctx.send(embed=embed)
 
 async def send_final_summary(ctx, signal_summary):
+    # ... same ...
     if not signal_summary:
         return
 
@@ -974,9 +972,8 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (using yfinance) – SIMPLE VERSION (like screenshot)
+# OPTIONS FLOW SCANNER (using yfinance) – unchanged
 # ====================
-
 async def get_stock_price(symbol):
     try:
         stock = yf.Ticker(symbol)
@@ -1027,6 +1024,7 @@ def format_premium(volume, last_price):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
+    # ... same simple version ...
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1149,6 +1147,7 @@ Focus on 🟢 BUY signals near current price. These have the most explosive pote
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
+    # ... unchanged ...
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1247,75 +1246,51 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# BACKTESTING COMMAND
+# BACKTESTING COMMAND (unchanged)
 # ====================
-
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
-    """
-    Backtest EMA crossover strategy with realistic assumptions.
-    - Enters at next day's open
-    - Compounds returns
-    - Includes transaction cost (default 0.1%)
-    - Proper max drawdown
-    """
+    # ... unchanged ...
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
-
     try:
         await ctx.send(f"⏳ Backtesting **{symbol.upper()}** over the last {days} days (cost: {cost*100:.1f}%)...")
-
-        # Fetch historical data (daily)
         ticker = yf.Ticker(symbol.upper())
         df = ticker.history(period=f"{days}d", interval="1d")
         if df.empty:
             await ctx.send("❌ No historical data found.")
             return
-
-        # Prepare dataframe
-        df = df.rename(columns={
-            'Open': 'open', 'High': 'high', 'Low': 'low',
-            'Close': 'close', 'Volume': 'volume'
-        })
+        df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
         df = df[['open', 'high', 'low', 'close', 'volume']]
-
-        # Calculate indicators and signals
         df = calculate_indicators(df)
         signals_list = []
         for i in range(len(df)):
             sig = get_signals(df.iloc[:i+1])
             if sig:
                 signals_list.append(sig)
-
-        # Prepare equity curve
         dates = df.index.tolist()
-        equity = [1.0]  # start with $1
+        equity = [1.0]
         in_position = False
         entry_price = 0
         entry_date = None
         position_type = None
         trades = []
         equity_dates = [dates[0]]
-
-        # We'll use next day's open for entry/exit
         for i in range(1, len(signals_list)):
             sig = signals_list[i]
             prev_sig = signals_list[i-1]
             today_open = df['open'].iloc[i] if i < len(df) else None
-
-            # If not in position, check for entry signal (using previous day's close)
             if not in_position:
-                if prev_sig['net_score'] > 0:  # Buy signal at previous close
+                if prev_sig['net_score'] > 0:
                     if today_open is None:
                         continue
                     in_position = True
                     position_type = 'long'
                     entry_price = today_open
                     entry_date = df.index[i]
-                    # Pay transaction cost at entry
                     equity[-1] *= (1 - cost)
-                elif prev_sig['net_score'] < 0:  # Sell (short) signal
+                elif prev_sig['net_score'] < 0:
                     if today_open is None:
                         continue
                     in_position = True
@@ -1323,39 +1298,24 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
                     entry_price = today_open
                     entry_date = df.index[i]
                     equity[-1] *= (1 - cost)
-
-            # If in position, check for exit signal
             elif in_position:
                 exit_signal = False
                 if position_type == 'long' and prev_sig['net_score'] < 0:
                     exit_signal = True
                 elif position_type == 'short' and prev_sig['net_score'] > 0:
                     exit_signal = True
-
                 if exit_signal:
                     exit_price = today_open if today_open is not None else df['close'].iloc[-1]
                     exit_date = df.index[i] if today_open is not None else df.index[-1]
-
-                    # Calculate return
                     if position_type == 'long':
                         ret = (exit_price - entry_price) / entry_price
                     else:
                         ret = (entry_price - exit_price) / entry_price
-
-                    # Update equity: apply exit cost
                     new_equity = equity[-1] * (1 + ret) * (1 - cost)
                     equity.append(new_equity)
                     equity_dates.append(exit_date)
-
-                    trades.append({
-                        'entry_date': entry_date,
-                        'exit_date': exit_date,
-                        'type': position_type,
-                        'ret': ret,
-                    })
+                    trades.append({'entry_date': entry_date, 'exit_date': exit_date, 'type': position_type, 'ret': ret})
                     in_position = False
-
-        # If still in position at end, close at last close
         if in_position:
             exit_price = df['close'].iloc[-1]
             exit_date = df.index[-1]
@@ -1366,42 +1326,23 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
             new_equity = equity[-1] * (1 + ret) * (1 - cost)
             equity.append(new_equity)
             equity_dates.append(exit_date)
-            trades.append({
-                'entry_date': entry_date,
-                'exit_date': exit_date,
-                'type': position_type,
-                'ret': ret,
-            })
-            in_position = False
-
+            trades.append({'entry_date': entry_date, 'exit_date': exit_date, 'type': position_type, 'ret': ret})
         if not trades:
             await ctx.send("No trades generated during this period.")
             return
-
-        # Calculate statistics from equity curve
         final_equity = equity[-1]
         total_return = (final_equity - 1) * 100
-
-        # Win rate
         winning_trades = [t for t in trades if t['ret'] > 0]
         losing_trades = [t for t in trades if t['ret'] <= 0]
         win_rate = len(winning_trades) / len(trades) * 100
-
-        # Average win/loss (as percentage)
         avg_win = np.mean([t['ret']*100 for t in winning_trades]) if winning_trades else 0
         avg_loss = np.mean([t['ret']*100 for t in losing_trades]) if losing_trades else 0
-
-        # Profit factor
         gross_profit = sum(t['ret'] for t in winning_trades)
         gross_loss = abs(sum(t['ret'] for t in losing_trades))
         profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
-
-        # Max drawdown
         peak = np.maximum.accumulate(equity)
         drawdown = (peak - equity) / peak * 100
         max_drawdown = np.max(drawdown)
-
-        # Build embed
         embed = discord.Embed(
             title=f"📈 BACKTEST RESULTS: {symbol.upper()}",
             description=f"Period: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}\nTransaction cost: {cost*100:.1f}% per trade",
@@ -1414,18 +1355,10 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
         embed.add_field(name="Avg Win", value=f"{avg_win:.2f}%", inline=True)
         embed.add_field(name="Avg Loss", value=f"{avg_loss:.2f}%", inline=True)
         embed.add_field(name="Max Drawdown", value=f"{max_drawdown:.2f}%", inline=True)
-
-        # Sample trades
         sample = trades[:5]
-        trade_list = "\n".join([
-            f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['ret']*100:+.2f}%"
-            for t in sample
-        ])
+        trade_list = "\n".join([f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['ret']*100:+.2f}%" for t in sample])
         embed.add_field(name="Sample Trades", value=trade_list or "None", inline=False)
-
         await ctx.send(embed=embed)
-
-        # Generate equity curve plot
         plt.figure(figsize=(10, 5))
         plt.plot(equity_dates, equity, color='blue', linewidth=2)
         plt.title(f'{symbol.upper()} Equity Curve (Backtest)')
@@ -1433,64 +1366,50 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
         plt.xlabel('Date')
         plt.grid(True, alpha=0.3)
         plt.tight_layout()
-
         buf = io.BytesIO()
         plt.savefig(buf, format='PNG')
         buf.seek(0)
         plt.close()
-
         file = discord.File(buf, filename='equity.png')
         await ctx.send(file=file)
-
     except Exception as e:
         await ctx.send(f"❌ Backtest error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signal (single symbol multi-timeframe report)
+# COMMAND: !signal (single symbol multi-timeframe report) – unchanged
 # ====================
-
 @bot.command(name='signal')
 async def signal_single(ctx, ticker: str):
-    """Get multi-timeframe signal report for a single symbol."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
     try:
         symbol = normalize_symbol(ticker)
         await ctx.send(f"🔍 Fetching multi-timeframe signals for **{symbol}**...")
-
         all_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
         symbol_signals = {}
-
         for tf in all_timeframes:
             df = await fetch_ohlcv(symbol, tf)
             if df is not None and not df.empty:
                 df_calc = calculate_indicators(df)
                 sig = get_signals(df_calc)
                 if sig and sig['net_score'] != 0:
-                    symbol_signals[tf] = {
-                        'signals': sig,
-                        'df': df
-                    }
-            await asyncio.sleep(2)  # delay to avoid rate limits
-
+                    symbol_signals[tf] = {'signals': sig, 'df': df}
+            await asyncio.sleep(2)
         if not symbol_signals:
             await ctx.send(f"📭 No active signals found for {symbol} on any timeframe.")
             return
-
         await send_combined_symbol_report(ctx, symbol, symbol_signals)
-
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPDATED COMMAND: !signals (symbol-by-symbol with 60s wait)
+# COMMAND: !signals (fast batch version, but with Alpaca it's safe)
 # ====================
-
 @bot.command(name='signals')
 async def signals(ctx, timeframe: str = 'all'):
     if user_busy.get(ctx.author.id):
@@ -1513,8 +1432,8 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
             await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(timeframes_to_scan)} timeframes**")
             await ctx.send(f"⏱️ Timeframes: 5min, 15min, 1h, 4h, daily, weekly")
-            await ctx.send(f"📈 Each symbol will use up to 6 API credits. Waiting 60 seconds between symbols to stay under the limit.")
-            await ctx.send("⏳ This will take several minutes. Results will appear as they come...\n")
+            await ctx.send(f"📈 Using Alpaca (high limits) for stocks – this will be fast!")
+            await ctx.send("⏳ Results will appear as they come...\n")
         elif timeframe in all_timeframes:
             timeframes_to_scan = [timeframe]
             await ctx.send(f"🔍 Scanning **{len(symbols)}** symbols on **{timeframe}** timeframe...")
@@ -1525,40 +1444,29 @@ async def signals(ctx, timeframe: str = 'all'):
         all_symbol_signals = defaultdict(dict)
         found_any = False
 
+        # For each timeframe, fetch all symbols in a batch (using Alpaca via fetch_ohlcv per symbol – but we can't batch Alpaca easily)
+        # However, with 200 req/min, we can just loop quickly. We'll use the existing per-symbol fetch but no 60s waits.
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
 
-            await ctx.send(f"🔄 Processing **{symbol}**...")
-
-            # Fetch all timeframes for this symbol
+            symbol_signals = {}
             for tf in timeframes_to_scan:
                 if await check_cancel(ctx):
                     break
-
                 df = await fetch_ohlcv(symbol, tf)
                 if df is not None and not df.empty:
                     df_calc = calculate_indicators(df)
                     sig = get_signals(df_calc)
                     if sig and sig['net_score'] != 0:
                         found_any = True
-                        if symbol not in all_symbol_signals:
-                            all_symbol_signals[symbol] = {}
-                        all_symbol_signals[symbol][tf] = {
-                            'signals': sig,
-                            'df': df
-                        }
-                # Small delay between timeframes (optional)
-                await asyncio.sleep(1)
+                        symbol_signals[tf] = {'signals': sig, 'df': df}
+                # small delay to avoid hammering (but Alpaca can handle it)
+                await asyncio.sleep(0.5)
 
-            # If symbol had any signals, send the report now
-            if symbol in all_symbol_signals:
-                await send_combined_symbol_report(ctx, symbol, all_symbol_signals[symbol])
-
-            # Wait a full minute before the next symbol to respect the credit limit
-            if symbol != symbols[-1]:  # Don't wait after the last symbol
-                await ctx.send(f"⏸️ Waiting 60 seconds before next symbol to stay under API limit...")
-                await asyncio.sleep(60)
+            if symbol_signals:
+                all_symbol_signals[symbol] = symbol_signals
+                await send_combined_symbol_report(ctx, symbol, symbol_signals)
 
         if not found_any and not cancellation_flags.get(ctx.author.id, False):
             await ctx.send(f"📭 No symbols with active signals found.")
@@ -1569,11 +1477,60 @@ async def signals(ctx, timeframe: str = 'all'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !scan (optimized with batch)
+# OTHER COMMANDS (scan, news, upcoming, zone, add, remove, list, help, ping, stopscan) – unchanged
 # ====================
+@bot.event
+async def on_ready():
+    print(f'{bot.user} has connected to Discord!')
+
+@bot.event
+async def on_message(message):
+    if message.author == bot.user:
+        return
+    await bot.process_commands(message)
+
+@bot.command(name='ping')
+async def ping(ctx):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send('pong')
+    finally:
+        user_busy[ctx.author.id] = False
+
+async def check_cancel(ctx):
+    user_id = ctx.author.id
+    if cancellation_flags.get(user_id, False):
+        cancellation_flags[user_id] = False
+        await ctx.send("🛑 Scan cancelled.")
+        return True
+    return False
+
+@bot.command(name='stopscan')
+async def stop_scan(ctx):
+    cancellation_flags[ctx.author.id] = True
+    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
+
+async def send_symbol_with_chart(ctx, symbol, df, timeframe):
+    df_calc = calculate_indicators(df)
+    signals = get_signals(df_calc)
+    embed = format_embed(symbol, signals, timeframe)
+    try:
+        chart_buffer = generate_chart_image(df, symbol, timeframe)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='chart.png')
+            embed.set_image(url='attachment://chart.png')
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(embed=embed)
+    except Exception as e:
+        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
+        await ctx.send(embed=embed)
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
+    # unchanged, uses fetch_ohlcv which now uses Alpaca
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1616,34 +1573,12 @@ async def scan(ctx, target='all', timeframe='daily'):
                 await ctx.send(embed=embed)
             return
 
-        # Scan all symbols
         await ctx.send(f"Scanning all symbols ({len(symbols)}) on {timeframe} timeframe...")
 
-        # Separate stocks and crypto
-        stock_symbols = [s for s in symbols if '/' not in s]
-        crypto_symbols = [s for s in symbols if '/' in s]
-
-        # Fetch stocks in batch
-        stock_data = {}
-        if stock_symbols:
-            stock_data = await fetch_twelvedata_batch(stock_symbols, timeframe) or {}
-
-        # Fetch crypto individually
-        crypto_data = {}
-        for sym in crypto_symbols:
-            if await check_cancel(ctx):
-                break
-            df = await fetch_ohlcv(sym, timeframe)
-            if df is not None:
-                crypto_data[sym] = df
-            await asyncio.sleep(0.5)
-
-        # Combine and send
-        all_data = {**stock_data, **crypto_data}
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
-            df = all_data.get(symbol)
+            df = await fetch_ohlcv(symbol, timeframe)
             if df is not None and not df.empty:
                 df_calc = calculate_indicators(df)
                 signals = get_signals(df_calc)
@@ -1659,69 +1594,16 @@ async def scan(ctx, target='all', timeframe='daily'):
                 except Exception as e:
                     print(f"⚠️ Chart generation failed: {e}")
                     await ctx.send(embed=embed)
-            await asyncio.sleep(1)  # delay between messages, not API calls
+            await asyncio.sleep(1)  # delay between messages
 
         cancellation_flags[ctx.author.id] = False
         await ctx.send("Scan complete.")
     finally:
         user_busy[ctx.author.id] = False
 
-# ====================
-# OTHER COMMANDS (news, upcoming, zone, add, remove, list, help, ping, stopscan)
-# ====================
-
-@bot.event
-async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-    await bot.process_commands(message)
-
-@bot.command(name='ping')
-async def ping(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        await ctx.send('pong')
-    finally:
-        user_busy[ctx.author.id] = False
-
-async def check_cancel(ctx):
-    user_id = ctx.author.id
-    if cancellation_flags.get(user_id, False):
-        cancellation_flags[user_id] = False
-        await ctx.send("🛑 Scan cancelled.")
-        return True
-    return False
-
-@bot.command(name='stopscan')
-async def stop_scan(ctx):
-    cancellation_flags[ctx.author.id] = True
-    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
-
-async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    df_calc = calculate_indicators(df)
-    signals = get_signals(df_calc)
-    embed = format_embed(symbol, signals, timeframe)
-
-    try:
-        chart_buffer = generate_chart_image(df, symbol, timeframe)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            embed.set_image(url='attachment://chart.png')
-            await ctx.send(embed=embed, file=file)
-        else:
-            await ctx.send(embed=embed)
-    except Exception as e:
-        print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
-        await ctx.send(embed=embed)
-
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
+    # unchanged
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1731,21 +1613,14 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-
         await ctx.send(f"📰 Fetching the latest **{limit}** news headlines for **{ticker.upper()}**...")
-
         news_data = await fetch_stock_news(ticker.upper())
         if not news_data or len(news_data) == 0:
             await ctx.send(f"Could not fetch news for {ticker.upper()}.")
             return
-
         web_url = get_tradingview_web_link(ticker.upper())
         tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-
-        embed = discord.Embed(
-            title=f"Latest News for {ticker.upper()}",
-            color=0x3498db
-        )
+        embed = discord.Embed(title=f"Latest News for {ticker.upper()}", color=0x3498db)
         for article in news_data[:limit]:
             headline = article.get('headline', 'No Headline')
             source = article.get('source', 'Unknown')
@@ -1753,11 +1628,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
             url = article.get('url', '')
             if len(headline) > 256:
                 headline = headline[:253] + "..."
-            embed.add_field(
-                name=f"{source} - {date}",
-                value=f"[{headline}]({url})",
-                inline=False
-            )
+            embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
         embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
         embed.set_footer(text=f"Requested by {ctx.author.display_name}")
         await ctx.send(embed=embed)
@@ -1766,6 +1637,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str = None):
+    # unchanged
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1775,22 +1647,16 @@ async def upcoming_events(ctx, ticker: str = None):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-
         if ticker is None:
             watchlist = await load_watchlist()
             stocks = watchlist['stocks']
             if not stocks:
                 await ctx.send("No stocks in your watchlist to scan for events.")
                 return
-
             await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
-
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
-                econ_embed = discord.Embed(
-                    title="📆 Upcoming Macroeconomic Events (next 14 days)",
-                    color=0x3498db
-                )
+                econ_embed = discord.Embed(title="📆 Upcoming Macroeconomic Events (next 14 days)", color=0x3498db)
                 for ev in econ_events:
                     date = ev.get('date', 'N/A')
                     event = ev.get('event', 'N/A')
@@ -1800,34 +1666,23 @@ async def upcoming_events(ctx, ticker: str = None):
                         star = "★" if importance == "high" else "☆" if importance == "medium" else "·"
                     else:
                         star = ""
-                    econ_embed.add_field(
-                        name=f"{date} {country}",
-                        value=f"{event} {star}",
-                        inline=False
-                    )
+                    econ_embed.add_field(name=f"{date} {country}", value=f"{event} {star}", inline=False)
                 await ctx.send(embed=econ_embed)
-
             found_any = False
             for sym in stocks:
                 if cancellation_flags.get(ctx.author.id, False):
                     cancellation_flags[ctx.author.id] = False
                     await ctx.send("🛑 Scan cancelled.")
                     break
-
                 earnings = await fetch_earnings_upcoming(sym)
                 dividends = await fetch_dividends_upcoming(sym)
                 splits = await fetch_splits_upcoming(sym)
                 ratings = await fetch_analyst_ratings(sym, limit=3)
-
                 if earnings or dividends or splits or ratings:
                     found_any = True
                     web_url = get_tradingview_web_link(sym)
                     tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-
-                    embed = discord.Embed(
-                        title=f"📅 Upcoming Catalysts for {sym}",
-                        color=0x00ff00
-                    )
+                    embed = discord.Embed(title=f"📅 Upcoming Catalysts for {sym}", color=0x00ff00)
                     if earnings:
                         lines = []
                         for e in earnings:
@@ -1870,35 +1725,25 @@ async def upcoming_events(ctx, ticker: str = None):
                             else:
                                 lines.append(f"**{period}** – No data")
                         embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
-
                     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
                     await ctx.send(embed=embed)
-
                 await asyncio.sleep(5)
-
             if not found_any:
                 await ctx.send("No upcoming events found for any stock in your watchlist.")
             else:
                 await ctx.send("✅ Upcoming events scan complete.")
-
         else:
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
             earnings = await fetch_earnings_upcoming(ticker.upper())
             dividends = await fetch_dividends_upcoming(ticker.upper())
             splits = await fetch_splits_upcoming(ticker.upper())
             ratings = await fetch_analyst_ratings(ticker.upper(), limit=3)
-
             if not (earnings or dividends or splits or ratings):
                 await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
                 return
-
             web_url = get_tradingview_web_link(ticker.upper())
             tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-
-            embed = discord.Embed(
-                title=f"📅 Upcoming Catalysts for {ticker.upper()}",
-                color=0x00ff00
-            )
+            embed = discord.Embed(title=f"📅 Upcoming Catalysts for {ticker.upper()}", color=0x00ff00)
             if earnings:
                 lines = []
                 for e in earnings:
@@ -1941,15 +1786,14 @@ async def upcoming_events(ctx, ticker: str = None):
                     else:
                         lines.append(f"**{period}** – No data")
                 embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
-
             embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
             await ctx.send(embed=embed)
-
     finally:
         user_busy[ctx.author.id] = False
 
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = 'daily'):
+    # unchanged
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1959,21 +1803,17 @@ async def zone(ctx, ticker: str, timeframe: str = 'daily'):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-
         timeframe = timeframe.lower()
         valid_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
             await ctx.send("Invalid timeframe. Use 5min, 15min, 1h, 4h, daily, or weekly.")
             return
-
         symbol = normalize_symbol(ticker)
         await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
-
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
             await ctx.send(f"Could not fetch data for {symbol}.")
             return
-
         df = calculate_indicators(df)
         signals = get_signals(df)
         embed = format_zone_embed(symbol, signals, timeframe)
@@ -2121,7 +1961,6 @@ async def help_command(ctx):
 # ====================
 # MAIN ENTRY POINT
 # ====================
-
 async def main():
     asyncio.create_task(start_web_server())
     await bot.start(DISCORD_TOKEN)
