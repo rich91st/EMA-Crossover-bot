@@ -886,7 +886,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (using yfinance) – ENHANCED VERSION
+# OPTIONS FLOW SCANNER (using yfinance) – ENHANCED VERSION (FIXED)
 # ====================
 
 async def get_stock_price(symbol):
@@ -937,15 +937,18 @@ def format_premium(volume, last_price):
     except:
         return "N/A"
 
-# Helper to analyze a single expiration
+# Helper to analyze a single expiration – FIXED VERSION
 def analyze_expiration(opt_chain, current_price, min_volume=5):
     """Return list of significant options with Greeks and score."""
-    if opt_chain.empty:
+    # Check if both calls and puts are empty
+    if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
     puts = opt_chain.puts.copy()
-    calls['type'] = 'CALL'
-    puts['type'] = 'PUT'
+    if not calls.empty:
+        calls['type'] = 'CALL'
+    if not puts.empty:
+        puts['type'] = 'PUT'
     all_options = pd.concat([calls, puts], ignore_index=True)
 
     analyzed = []
