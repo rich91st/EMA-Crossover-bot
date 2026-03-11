@@ -1488,7 +1488,7 @@ async def signal_single(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signals (optimized with batch)
+# UPDATED COMMAND: !signals (symbol-by-symbol with 60s wait)
 # ====================
 
 @bot.command(name='signals')
@@ -1513,8 +1513,8 @@ async def signals(ctx, timeframe: str = 'all'):
             await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
             await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(timeframes_to_scan)} timeframes**")
             await ctx.send(f"⏱️ Timeframes: 5min, 15min, 1h, 4h, daily, weekly")
-            await ctx.send(f"📈 Total API calls: ~{len(timeframes_to_scan)} (using batch requests)")
-            await ctx.send("⏳ This will be fast. Results will appear as they come...\n")
+            await ctx.send(f"📈 Each symbol will use up to 6 API credits. Waiting 60 seconds between symbols to stay under the limit.")
+            await ctx.send("⏳ This will take several minutes. Results will appear as they come...\n")
         elif timeframe in all_timeframes:
             timeframes_to_scan = [timeframe]
             await ctx.send(f"🔍 Scanning **{len(symbols)}** symbols on **{timeframe}** timeframe...")
@@ -1525,34 +1525,18 @@ async def signals(ctx, timeframe: str = 'all'):
         all_symbol_signals = defaultdict(dict)
         found_any = False
 
-        for tf in timeframes_to_scan:
+        for symbol in symbols:
             if await check_cancel(ctx):
                 break
 
-            # Separate stocks and crypto
-            stock_symbols = [s for s in symbols if '/' not in s]
-            crypto_symbols = [s for s in symbols if '/' in s]
+            await ctx.send(f"🔄 Processing **{symbol}**...")
 
-            # Fetch stocks in batch
-            stock_data = {}
-            if stock_symbols:
-                stock_data = await fetch_twelvedata_batch(stock_symbols, tf) or {}
-
-            # Fetch crypto individually (CoinGecko fallback)
-            crypto_data = {}
-            for sym in crypto_symbols:
-                df = await fetch_ohlcv(sym, tf)
-                if df is not None:
-                    crypto_data[sym] = df
-                await asyncio.sleep(0.5)  # be gentle
-
-            # Combine data
-            all_data = {**stock_data, **crypto_data}
-
-            for symbol in symbols:
+            # Fetch all timeframes for this symbol
+            for tf in timeframes_to_scan:
                 if await check_cancel(ctx):
                     break
-                df = all_data.get(symbol)
+
+                df = await fetch_ohlcv(symbol, tf)
                 if df is not None and not df.empty:
                     df_calc = calculate_indicators(df)
                     sig = get_signals(df_calc)
@@ -1564,15 +1548,23 @@ async def signals(ctx, timeframe: str = 'all'):
                             'signals': sig,
                             'df': df
                         }
+                # Small delay between timeframes (optional)
+                await asyncio.sleep(1)
 
-        for symbol, tf_signals in all_symbol_signals.items():
-            await send_combined_symbol_report(ctx, symbol, tf_signals)
+            # If symbol had any signals, send the report now
+            if symbol in all_symbol_signals:
+                await send_combined_symbol_report(ctx, symbol, all_symbol_signals[symbol])
+
+            # Wait a full minute before the next symbol to respect the credit limit
+            if symbol != symbols[-1]:  # Don't wait after the last symbol
+                await ctx.send(f"⏸️ Waiting 60 seconds before next symbol to stay under API limit...")
+                await asyncio.sleep(60)
 
         if not found_any and not cancellation_flags.get(ctx.author.id, False):
-            await ctx.send(f"📭 No symbols with active signals found{ ' on any timeframe' if timeframe == 'all' else ''}.")
+            await ctx.send(f"📭 No symbols with active signals found.")
 
         cancellation_flags[ctx.author.id] = False
-        await ctx.send(f"✅ Signal scan complete{ ' across all timeframes' if timeframe == 'all' else ''}!")
+        await ctx.send(f"✅ Signal scan complete!")
     finally:
         user_busy[ctx.author.id] = False
 
