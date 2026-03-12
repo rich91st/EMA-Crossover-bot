@@ -78,12 +78,17 @@ async def get_tasty_session():
     global tasty_session
     async with tasty_session_lock:
         if tasty_session is None or tasty_session.is_closed:
-            tasty_session = await asyncio.to_thread(
-                Session,
-                client_id=TASTY_CLIENT_ID,
-                client_secret=TASTY_CLIENT_SECRET,
-                refresh_token=TASTY_REFRESH_TOKEN
-            )
+            try:
+                tasty_session = await asyncio.to_thread(
+                    Session,
+                    client_id=TASTY_CLIENT_ID,
+                    client_secret=TASTY_CLIENT_SECRET,
+                    refresh_token=TASTY_REFRESH_TOKEN
+                )
+                print("✅ Tastytrade session created")
+            except Exception as e:
+                print(f"❌ Tastytrade login failed: {e}")
+                tasty_session = None
         return tasty_session
 
 # ====================
@@ -402,7 +407,7 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# FINNHUB NEWS & EVENTS (unchanged)
+# FINNHUB NEWS & EVENTS
 # ====================
 async def fetch_stock_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
@@ -528,7 +533,7 @@ async def fetch_economic_events(days=14):
         return []
 
 # ====================
-# INDICATOR CALCULATIONS (unchanged)
+# INDICATOR CALCULATIONS
 # ====================
 
 def calculate_indicators(df):
@@ -641,7 +646,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (unchanged)
+# CHART GENERATION
 # ====================
 
 def generate_chart_image(df, symbol, timeframe):
@@ -707,7 +712,7 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# EMBED FORMATTING (unchanged)
+# EMBED FORMATTING
 # ====================
 
 def format_embed(symbol, signals, timeframe):
@@ -871,7 +876,7 @@ def format_zone_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# COMBINED SYMBOL REPORT FUNCTIONS (unchanged)
+# COMBINED SYMBOL REPORT FUNCTIONS
 # ====================
 
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
@@ -1011,11 +1016,42 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (TASTYTRADE) – ENHANCED (FIXED)
+# DIAGNOSTIC: TASTYTRADE TEST COMMAND
+# ====================
+@bot.command(name='tastytest')
+async def test_tasty(ctx, ticker: str):
+    """Test Tastytrade connection and fetch expirations for a symbol."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send(f"🔄 Testing Tastytrade for **{ticker.upper()}**...")
+        session = await get_tasty_session()
+        if not session:
+            await ctx.send("❌ Failed to create Tastytrade session. Check your credentials and logs.")
+            return
+
+        await ctx.send("✅ Session created. Fetching option chain...")
+        chain = await asyncio.to_thread(get_option_chain, session, ticker.upper())
+        expirations = list(chain.keys())
+        if expirations:
+            await ctx.send(f"✅ Found {len(expirations)} expirations: {', '.join(expirations[:5])}...")
+            first_exp = expirations[0]
+            options = chain[first_exp]
+            await ctx.send(f"   • {first_exp} has {len(options)} options")
+        else:
+            await ctx.send(f"❌ No expirations found for {ticker.upper()}.")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# OPTIONS FLOW SCANNER (TASTYTRADE + FALLBACK)
 # ====================
 
 async def get_stock_price(symbol):
-    """Fetch current stock price using Tastytrade (if available) or fallback to yfinance."""
+    """Fetch current stock price using yfinance (fallback)."""
     try:
         stock = yf.Ticker(symbol)
         data = stock.history(period="1d")
@@ -1049,11 +1085,15 @@ def format_premium(volume, last_price):
         return "N/A"
 
 async def get_key_expirations_tasty(symbol):
-    """Fetch all expirations from Tastytrade and return the three key ones: weekly (0-7 DTE), monthly (8-21 DTE), and primary (30-45 DTE)."""
+    """Fetch all expirations from Tastytrade and return the three key ones."""
     try:
         session = await get_tasty_session()
+        if not session:
+            return []
         chain = await asyncio.to_thread(get_option_chain, session, symbol)
         expirations = sorted(chain.keys())
+        if not expirations:
+            return []
         today = datetime.now().date()
         exp_dates = [datetime.strptime(exp, '%Y-%m-%d').date() for exp in expirations]
 
@@ -1070,7 +1110,7 @@ async def get_key_expirations_tasty(symbol):
             if 8 <= dte <= 21:
                 key_exps.append((exp_str, dte, "💎 MONTHLY (8-21 DTE)"))
                 break
-        # Primary (30-45 DTE) – find closest to 38 DTE
+        # Primary (30-45 DTE)
         best_exp = None
         best_dte = None
         min_diff = float('inf')
@@ -1089,9 +1129,11 @@ async def get_key_expirations_tasty(symbol):
         return []
 
 async def analyze_expiration_tasty(symbol, expiration_date):
-    """Fetch option chain for a specific expiration and return list of options with volume/OI, etc."""
+    """Fetch option chain for a specific expiration and return list of options."""
     try:
         session = await get_tasty_session()
+        if not session:
+            return []
         chain = await asyncio.to_thread(get_option_chain, session, symbol)
         options = chain.get(expiration_date, [])
         if not options:
@@ -1099,12 +1141,11 @@ async def analyze_expiration_tasty(symbol, expiration_date):
         analyzed = []
         for opt in options:
             try:
-                # Option objects returned by get_option_chain already contain quote data
                 volume = opt.volume if opt.volume else 0
                 oi = opt.open_interest if opt.open_interest else 0
                 last = opt.last if opt.last else 0
                 strike = opt.strike_price
-                opt_type = opt.option_type  # 'C' or 'P'
+                opt_type = opt.option_type
                 type_str = "CALL" if opt_type == 'C' else "PUT"
 
                 if volume >= 5 and oi > 0:
@@ -1119,7 +1160,7 @@ async def analyze_expiration_tasty(symbol, expiration_date):
                         'last': last,
                         'premium': format_premium(volume, last),
                         'raw_premium': premium,
-                        'symbol': opt.symbol  # streamer symbol if needed
+                        'symbol': opt.symbol
                     })
             except Exception as e:
                 print(f"Error processing option {opt.symbol}: {e}")
@@ -1129,61 +1170,124 @@ async def analyze_expiration_tasty(symbol, expiration_date):
         print(f"Error analyzing expiration {expiration_date} for {symbol}: {e}")
         return []
 
+# Fallback yfinance functions
+def get_best_expiration_yf(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        expirations = stock.options
+        if not expirations:
+            return None, None
+        today = datetime.now()
+        best_exp = None
+        best_dte = None
+        min_diff = float('inf')
+        for exp in expirations:
+            exp_date = datetime.strptime(exp, '%Y-%m-%d')
+            dte = (exp_date - today).days
+            if 30 <= dte <= 45:
+                return exp, dte
+            diff = abs(dte - 38)
+            if diff < min_diff:
+                min_diff = diff
+                best_exp = exp
+                best_dte = dte
+        return best_exp, best_dte
+    except Exception as e:
+        print(f"Error getting expirations for {ticker}: {e}")
+        return None, None
+
+def analyze_expiration_yf(opt_chain, current_price, min_volume=5):
+    if opt_chain.calls.empty and opt_chain.puts.empty:
+        return []
+    calls = opt_chain.calls.copy()
+    puts = opt_chain.puts.copy()
+    if not calls.empty:
+        calls['type'] = 'CALL'
+    if not puts.empty:
+        puts['type'] = 'PUT'
+    all_options = pd.concat([calls, puts], ignore_index=True)
+
+    analyzed = []
+    for _, opt in all_options.iterrows():
+        try:
+            volume = opt.get('volume', 0)
+            oi = opt.get('openInterest', 0)
+            strike = opt.get('strike', 0)
+            last = opt.get('lastPrice', 0)
+            opt_type = opt.get('type', 'CALL')
+
+            if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
+                continue
+
+            vol_oi_ratio = volume / oi
+            premium = volume * 100 * last
+            analyzed.append({
+                'strike': strike,
+                'type': opt_type,
+                'volume': int(volume),
+                'oi': int(oi),
+                'vol_oi_ratio': vol_oi_ratio,
+                'last': last,
+                'premium': format_premium(volume, last),
+                'raw_premium': premium,
+            })
+        except:
+            continue
+    return analyzed
+
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    """Enhanced options flow using Tastytrade data – multiple expirations, accurate real-time data."""
+    """Options flow – tries Tastytrade first, falls back to yfinance."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
     try:
-        await ctx.send(f"🔍 Analyzing options flow for **{ticker.upper()}** (Tastytrade)...")
+        await ctx.send(f"🔍 Analyzing options flow for **{ticker.upper()}**...")
         current_price = await get_stock_price(ticker.upper())
         if not current_price:
             await ctx.send(f"❌ Could not fetch current price for {ticker.upper()}")
             return
 
-        key_exps = await get_key_expirations_tasty(ticker.upper())
-        if not key_exps:
-            await ctx.send(f"❌ No options expirations found for {ticker.upper()}")
-            return
-
+        # Try Tastytrade first
+        tasty_worked = False
         embed = discord.Embed(
             title=f"🔍 OPTIONS FLOW: {ticker.upper()}",
             description=f"Current Price: **${current_price:.2f}**",
             color=0x00ff00
         )
 
-        all_significant = []
-        for exp_str, dte, label in key_exps:
-            analyzed = await analyze_expiration_tasty(ticker.upper(), exp_str)
-            analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]  # top 6 per expiration
+        key_exps = await get_key_expirations_tasty(ticker.upper())
+        if key_exps:
+            tasty_worked = True
+            all_significant = []
+            for exp_str, dte, label in key_exps:
+                analyzed = await analyze_expiration_tasty(ticker.upper(), exp_str)
+                analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
+                significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]
+                if significant:
+                    table = f"```\n{label} ({exp_str}, {dte} days)\n"
+                    table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE\n"
+                    table += "------  ----  ------  ----  ------  --------  -----\n"
+                    for opt in significant:
+                        strike = f"${opt['strike']:.2f}"
+                        whale = get_whale_emoji(opt['raw_premium'])
+                        table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
+                    table += "```"
+                    embed.add_field(name="", value=table, inline=False)
+                    all_significant.extend(significant)
 
-            if significant:
-                table = f"```\n{label} ({exp_str}, {dte} days)\n"
-                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE\n"
-                table += "------  ----  ------  ----  ------  --------  -----\n"
-                for opt in significant:
-                    strike = f"${opt['strike']:.2f}"
-                    whale = get_whale_emoji(opt['raw_premium'])
-                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
-                table += "```"
-                embed.add_field(name="", value=table, inline=False)
-                all_significant.extend(significant)
+            lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
+            lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
+            if lottery:
+                picks_text = "**🎰 LOTTERY PICKS (short DTE, high ratio):**\n"
+                for i, pick in enumerate(lottery[:3]):
+                    target = pick['strike'] * 1.20
+                    picks_text += f"\n**{i+1}. ${pick['strike']:.2f} {pick['type']}**\n"
+                    picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x)  Premium: {pick['premium']}\n"
+                    picks_text += f"   • Entry: Above ${current_price*1.01:.2f}  Target: ${target:.2f}\n"
+                embed.add_field(name="🔥 HIGH RISK / HIGH REWARD", value=picks_text, inline=False)
 
-        # Lottery picks (short DTE, high vol/OI, decent premium)
-        lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
-        lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
-        if lottery:
-            picks_text = "**🎰 LOTTERY PICKS (short DTE, high ratio):**\n"
-            for i, pick in enumerate(lottery[:3]):
-                target = pick['strike'] * 1.20
-                picks_text += f"\n**{i+1}. ${pick['strike']:.2f} {pick['type']}**\n"
-                picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks_text += f"   • Entry: Above ${current_price*1.01:.2f}  Target: ${target:.2f}\n"
-            embed.add_field(name="🔥 HIGH RISK / HIGH REWARD", value=picks_text, inline=False)
-
-        explanation = """
+            explanation = """
 📊 **WHALE RATINGS:**
 • 🐋🐋 = >$1M premium (massive institutional)
 • 🐋 = $100K–$1M (strong interest)
@@ -1191,8 +1295,32 @@ async def options_flow(ctx, ticker: str):
 • 🐟 = <$10K (small)
 
 💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
-        """
-        embed.add_field(name="", value=explanation, inline=False)
+            """
+            embed.add_field(name="", value=explanation, inline=False)
+
+        if not tasty_worked:
+            # Fallback to yfinance
+            best_exp, dte = get_best_expiration_yf(ticker.upper())
+            if not best_exp:
+                await ctx.send(f"❌ No options expirations found for {ticker.upper()}")
+                return
+            stock = yf.Ticker(ticker.upper())
+            opt_chain = stock.option_chain(best_exp)
+            analyzed = analyze_expiration_yf(opt_chain, current_price)
+            analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
+            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:8]
+            if not significant:
+                await ctx.send(f"📭 No unusual options activity detected for {ticker.upper()} on {best_exp}")
+                return
+            embed.description = f"Current Price: **${current_price:.2f}**\nExpiration: {best_exp} ({dte} days)\n*Using fallback data (yfinance)*"
+            table = "```\n"
+            table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM\n"
+            table += "------  ----  ------  ----  ------  --------\n"
+            for opt in significant:
+                strike = f"${opt['strike']:.2f}"
+                table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']}\n"
+            table += "```"
+            embed.add_field(name="🔥 UNUSUAL ACTIVITY DETECTED", value=table, inline=False)
 
         await ctx.send(embed=embed)
 
@@ -1203,7 +1331,7 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    """Scan entire watchlist for unusual options activity using Tastytrade."""
+    """Scan watchlist for unusual options activity – tries Tastytrade first, falls back to yfinance."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1217,6 +1345,7 @@ async def scan_options_flow(ctx):
         await ctx.send(f"⏱️ Checking weekly (0‑7 DTE) and primary (30‑45 DTE) expirations...\n")
 
         all_unusual = []
+        # Try Tastytrade first
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
@@ -1247,10 +1376,63 @@ async def scan_options_flow(ctx):
                                         'distance': distance_pct,
                                         'label': label
                                     })
-                await asyncio.sleep(1)  # be gentle
+                await asyncio.sleep(1)
             except Exception as e:
-                print(f"Error scanning {symbol}: {e}")
+                print(f"Error scanning {symbol} with Tastytrade: {e}")
                 continue
+
+        # If Tastytrade found nothing, fallback to yfinance
+        if not all_unusual:
+            await ctx.send("⚠️ Tastytrade found no activity, falling back to yfinance...")
+            for symbol in symbols:
+                if await check_cancel(ctx):
+                    break
+                try:
+                    current_price = await get_stock_price(symbol)
+                    if not current_price:
+                        continue
+                    best_exp, dte = get_best_expiration_yf(symbol)
+                    if not best_exp:
+                        continue
+                    stock = yf.Ticker(symbol)
+                    opt_chain = stock.option_chain(best_exp)
+                    calls = opt_chain.calls
+                    if calls.empty:
+                        continue
+                    for _, opt in calls.iterrows():
+                        try:
+                            volume = opt.get('volume', 0)
+                            oi = opt.get('openInterest', 0)
+                            strike = opt.get('strike', 0)
+                            last = opt.get('lastPrice', 0)
+                            if pd.isna(volume) or pd.isna(oi):
+                                continue
+                            if oi > 0 and volume > 0:
+                                vol_oi_ratio = volume / oi
+                                if vol_oi_ratio >= 1.5 and volume >= 10:
+                                    distance_pct = abs(strike - current_price) / current_price * 100
+                                    if distance_pct <= 20:
+                                        premium = volume * 100 * last
+                                        all_unusual.append({
+                                            'symbol': symbol,
+                                            'strike': strike,
+                                            'expiration': best_exp,
+                                            'dte': dte,
+                                            'volume': int(volume),
+                                            'oi': int(oi),
+                                            'ratio': vol_oi_ratio,
+                                            'price': current_price,
+                                            'premium': format_premium(volume, last),
+                                            'raw_premium': premium,
+                                            'distance': distance_pct,
+                                            'label': "🔄 YFINANCE (fallback)"
+                                        })
+                        except:
+                            continue
+                    await asyncio.sleep(1)
+                except Exception as e:
+                    print(f"Error scanning {symbol} with yfinance: {e}")
+                    continue
 
         all_unusual.sort(key=lambda x: x['raw_premium'], reverse=True)
 
@@ -1293,11 +1475,11 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# BACKTESTING COMMAND (unchanged)
+# BACKTESTING COMMAND
 # ====================
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
-    """Backtest EMA crossover strategy with realistic assumptions."""
+    """Backtest EMA crossover strategy."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1610,7 +1792,7 @@ async def scan(ctx, target='all', timeframe='daily'):
                 except Exception as e:
                     print(f"⚠️ Chart generation failed: {e}")
                     await ctx.send(embed=embed)
-            await asyncio.sleep(1)  # delay between messages
+            await asyncio.sleep(1)
 
         cancellation_flags[ctx.author.id] = False
         await ctx.send("Scan complete.")
@@ -1618,7 +1800,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# NEWS COMMAND (unchanged)
+# NEWS COMMAND
 # ====================
 @bot.command(name='news')
 async def stock_news(ctx, ticker: str, limit: int = 5):
@@ -1654,7 +1836,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ZONE COMMAND (unchanged)
+# ZONE COMMAND
 # ====================
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = 'daily'):
@@ -1689,10 +1871,6 @@ async def zone(ctx, ticker: str, timeframe: str = 'daily'):
 # UPCOMING COMMAND (ENHANCED with expected move)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
-    """
-    Calculate expected move from options (nearest expiration after earnings)
-    Returns (expected_move_str, historical_avg_str).
-    """
     try:
         stock = yf.Ticker(symbol)
         earn_dt = datetime.strptime(earnings_date, '%Y-%m-%d')
@@ -1702,7 +1880,6 @@ async def get_earnings_stats(symbol, earnings_date):
         if not expirations:
             return "N/A", "N/A"
 
-        # Find first expiration after earnings
         target_exp = None
         for exp in expirations:
             exp_dt = datetime.strptime(exp, '%Y-%m-%d')
@@ -1721,7 +1898,6 @@ async def get_earnings_stats(symbol, earnings_date):
         if calls.empty or puts.empty:
             return "N/A", "N/A"
 
-        # ATM straddle
         calls['diff'] = abs(calls['strike'] - current_price)
         puts['diff'] = abs(puts['strike'] - current_price)
         atm_call = calls.loc[calls['diff'].idxmin()]
@@ -1733,9 +1909,7 @@ async def get_earnings_stats(symbol, earnings_date):
 
         expected_pct = (straddle / current_price) * 100
 
-        # Historical average move – optional, we'll return N/A for now
         return f"{expected_pct:.1f}%", "N/A"
-
     except Exception as e:
         print(f"Error getting earnings stats for {symbol}: {e}")
         return "N/A", "N/A"
@@ -1948,7 +2122,7 @@ async def upcoming_events(ctx, ticker: str = None):
         user_busy[ctx.author.id] = False
 
 # ====================
-# WATCHLIST COMMANDS (unchanged)
+# WATCHLIST COMMANDS
 # ====================
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
@@ -2048,8 +2222,11 @@ async def help_command(ctx):
 `!zone SYMBOL [timeframe]` – Show buy/sell zones based on support/resistance and EMAs
 
 🔥 **OPTIONS FLOW**
-`!flow TICKER` – Check unusual options activity for a specific stock (Tastytrade – real‑time, multiple expirations, whale ratings)
-`!scanflow` – Scan entire watchlist for unusual options setups (Tastytrade – accurate, real‑time data)
+`!flow TICKER` – Check unusual options activity for a specific stock (Tastytrade first, fallback to yfinance)
+`!scanflow` – Scan entire watchlist for unusual options setups (Tastytrade first, fallback to yfinance)
+
+🛠️ **DIAGNOSTIC**
+`!tastytest TICKER` – Test Tastytrade connection and fetch expirations
 
 📈 **BACKTESTING**
 `!backtest SYMBOL [days=365]` – Backtest EMA crossover strategy on historical data
@@ -2077,7 +2254,7 @@ async def help_command(ctx):
 💡 **PRO TIPS:**
 • Use `!signals` to scan your whole watchlist for opportunities – now super fast with Alpaca!
 • Use `!signal AAPL` to drill down on a specific symbol.
-• Use `!scanflow` to find explosive options setups before they run (Tastytrade data = accurate).
+• Use `!scanflow` to find explosive options setups before they run (Tastytrade data = accurate when working).
 • Use `!upcoming` to see expected moves on earnings dates.
 • Use `!backtest` to validate your strategy before risking real money.
         """
