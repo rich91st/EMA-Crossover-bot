@@ -21,7 +21,6 @@ from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 # Tastytrade imports
 from tastytrade import Session
 from tastytrade.instruments import get_option_chain
-from tastytrade.option import get_option_quote
 
 # Charting libraries
 import matplotlib
@@ -1012,14 +1011,12 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (TASTYTRADE) – ENHANCED
+# OPTIONS FLOW SCANNER (TASTYTRADE) – ENHANCED (FIXED)
 # ====================
 
 async def get_stock_price(symbol):
     """Fetch current stock price using Tastytrade (if available) or fallback to yfinance."""
     try:
-        # Tastytrade doesn't have a direct stock price endpoint, but we can get option quotes which include underlying price.
-        # For simplicity, we'll keep using yfinance for price for now – it's usually accurate for current price.
         stock = yf.Ticker(symbol)
         data = stock.history(period="1d")
         if not data.empty:
@@ -1102,11 +1099,10 @@ async def analyze_expiration_tasty(symbol, expiration_date):
         analyzed = []
         for opt in options:
             try:
-                # Get quote for volume and last price
-                quote = await asyncio.to_thread(get_option_quote, session, opt.symbol)
-                volume = quote.volume if quote.volume else 0
-                oi = quote.open_interest if quote.open_interest else 0
-                last = quote.last if quote.last else 0
+                # Option objects returned by get_option_chain already contain quote data
+                volume = opt.volume if opt.volume else 0
+                oi = opt.open_interest if opt.open_interest else 0
+                last = opt.last if opt.last else 0
                 strike = opt.strike_price
                 opt_type = opt.option_type  # 'C' or 'P'
                 type_str = "CALL" if opt_type == 'C' else "PUT"
