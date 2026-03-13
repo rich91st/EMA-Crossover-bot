@@ -760,64 +760,68 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# NEW: ZONE CHART GENERATION (with demand zones)
+# IMPROVED ZONE CHART GENERATION (with demand zones)
 # ====================
 def generate_zone_chart(df, symbol, zones):
-    """Generate a candlestick chart with horizontal lines at demand zone levels."""
+    """Generate a clean candlestick chart with solid demand zone lines and volume."""
     if len(df) < 20:
         return None
 
-    # Use last 100 candles for visibility
+    # Use last 100 candles for good visibility
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(100).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    volume_all_nan = chart_data['Volume'].isna().all()
+    # Define a clean style
+    mc = mpf.make_marketcolors(
+        up='#26a69a',    # teal for up
+        down='#ef5350',  # red for down
+        edge='inherit',
+        wick='inherit',
+        volume='in'
+    )
+    s = mpf.make_mpf_style(
+        marketcolors=mc,
+        gridstyle='--',
+        y_on_right=False,
+        facecolor='#f0f0f0',  # light background
+        figcolor='white'
+    )
 
-    # Create additional plots for each zone (horizontal lines)
+    # Create additional plots for each zone (solid lines)
     apds = []
-    colors = ['#00ff00', '#ffff00', '#ff8800', '#ff00ff']  # distinct colors
+    colors = ['#2962ff', '#ff6d00', '#aa00ff', '#2e7d32']  # distinct solid colors
     for i, zone in enumerate(zones):
         level = zone['level']
         color = colors[i % len(colors)]
         # Add a horizontal line using a constant array
-        apds.append(mpf.make_addplot([level] * len(chart_data), 
-                                     color=color, 
-                                     width=1.5, 
-                                     linestyle='--',
-                                     label=f"Demand ${level:.2f}"))
-
-    mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
+        apds.append(mpf.make_addplot(
+            [level] * len(chart_data),
+            color=color,
+            width=2.0,
+            linestyle='-',          # solid line
+            label=f"Demand ${level:.2f}"
+        ))
 
     try:
-        if volume_all_nan:
-            fig, axes = mpf.plot(
-                chart_data,
-                type='candle',
-                style=s,
-                addplot=apds,
-                volume=False,
-                figsize=(10,6),
-                returnfig=True,
-                title=f'{symbol} Demand Zones (30min)',
-                tight_layout=True
-            )
-        else:
-            fig, axes = mpf.plot(
-                chart_data,
-                type='candle',
-                style=s,
-                addplot=apds,
-                volume=True,
-                figsize=(10,6),
-                returnfig=True,
-                title=f'{symbol} Demand Zones (30min)',
-                tight_layout=True
-            )
+        # Plot with volume
+        fig, axes = mpf.plot(
+            chart_data,
+            type='candle',
+            style=s,
+            addplot=apds,
+            volume=True,
+            figsize=(12, 7),
+            returnfig=True,
+            title=f'\n{symbol} Demand Zones (30min)',
+            tight_layout=True,
+            scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
+        )
         if apds:
-            axes[0].legend(loc='upper left')
+            axes[0].legend(loc='upper left', fontsize='small')
+        # Adjust volume panel to match
+        axes[2].set_ylabel('Volume')
         buf = io.BytesIO()
-        fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
+        fig.savefig(buf, format='PNG', dpi=150, bbox_inches='tight')  # higher DPI for sharpness
         buf.seek(0)
         plt.close(fig)
         return buf
@@ -2065,7 +2069,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ZONE COMMAND (UPDATED with 30min default and chart)
+# ZONE COMMAND (UPDATED with 30min default and improved chart)
 # ====================
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
     """
@@ -2231,7 +2235,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            # Generate and attach the zone chart
+            # Generate and attach the improved zone chart
             chart_buffer = generate_zone_chart(df, symbol, zones)
             if chart_buffer:
                 file = discord.File(chart_buffer, filename='zone_chart.png')
