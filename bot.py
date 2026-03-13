@@ -873,9 +873,10 @@ def generate_zone_chart(df, symbol, zones):
         axes[0].set_facecolor('#000000')
         axes[2].set_facecolor('#000000')
 
-        # Instead of BytesIO, use a temporary file (more reliable on some hosts)
+        # Save to a temporary file and read back
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-            fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s.facecolor)
+            # FIX: s is a dict, so use s['facecolor']
+            fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
             # Read the file back into a BytesIO for discord
             with open(tmpfile.name, 'rb') as f:
