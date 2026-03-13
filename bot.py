@@ -468,8 +468,9 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# FINNHUB NEWS & EVENTS (unchanged, but add timeout)
+# FINNHUB NEWS & EVENTS
 # ====================
+
 async def fetch_stock_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
     params = {
@@ -600,7 +601,7 @@ async def fetch_economic_events(days=14):
         return []
 
 # ====================
-# INDICATOR CALCULATIONS (unchanged)
+# INDICATOR CALCULATIONS
 # ====================
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
@@ -712,7 +713,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (standard)
+# CHART GENERATION (standard) – now with dark background
 # ====================
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
@@ -724,8 +725,26 @@ def generate_chart_image(df, symbol, timeframe):
         chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(30).copy()
 
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
-    volume_all_nan = chart_data['Volume'].isna().all()
 
+    # Define dark style (same as zone chart)
+    mc = mpf.make_marketcolors(
+        up='#26a69a',      # teal for up
+        down='#ef5350',    # red for down
+        edge='white',
+        wick='white',
+        volume='in',
+        inherit=True
+    )
+    s = mpf.make_mpf_style(
+        marketcolors=mc,
+        gridstyle='--',
+        y_on_right=False,
+        facecolor='#1e1e1e',      # dark gray background
+        figcolor='#1e1e1e',
+        gridcolor='#444444'
+    )
+
+    # EMA plots (keep original colors)
     apds = []
     chart_len = len(chart_data)
     if not df['ema5'].tail(chart_len).isna().all():
@@ -737,10 +756,8 @@ def generate_chart_image(df, symbol, timeframe):
     if not df['ema200'].tail(chart_len).isna().all():
         apds.append(mpf.make_addplot(df['ema200'].tail(chart_len), color='#ff00ff', width=3.5, label='EMA200'))
 
-    mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
-    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
-
     try:
+        volume_all_nan = chart_data['Volume'].isna().all()
         if volume_all_nan:
             fig, axes = mpf.plot(
                 chart_data,
@@ -766,18 +783,40 @@ def generate_chart_image(df, symbol, timeframe):
                 tight_layout=True
             )
         if apds:
-            axes[0].legend(loc='upper left')
-        buf = io.BytesIO()
-        fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
-        buf.seek(0)
+            # Style legend
+            axes[0].legend(
+                loc='upper left',
+                fontsize=9,
+                facecolor='#333333',
+                edgecolor='white',
+                labelcolor='white',
+                framealpha=0.8
+            )
+        # Style axes
+        axes[0].tick_params(colors='white')
+        axes[0].yaxis.label.set_color('white')
+        axes[0].xaxis.label.set_color('white')
+        axes[0].set_facecolor('#1e1e1e')
+        if not volume_all_nan:
+            axes[2].set_ylabel('Volume', color='white')
+            axes[2].tick_params(colors='white')
+            axes[2].yaxis.label.set_color('white')
+            axes[2].set_facecolor('#1e1e1e')
+        # Save to temp file
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+            fig.savefig(tmpfile.name, format='PNG', dpi=120, bbox_inches='tight', facecolor=s['facecolor'])
+            tmpfile.flush()
+            with open(tmpfile.name, 'rb') as f:
+                img_data = f.read()
+        os.unlink(tmpfile.name)
         plt.close(fig)
-        return buf
+        return io.BytesIO(img_data)
     except Exception as e:
         print(f"⚠️ Chart generation failed for {symbol}: {e}")
         return None
 
 # ====================
-# ZONE CHART GENERATION – Dark gray background, improved legend
+# ZONE CHART GENERATION – Dark background, demand lines by strength (green = most respected)
 # ====================
 def generate_zone_chart(df, symbol, zones):
     """Generate a candlestick chart with dark gray background and demand lines colored by strength."""
@@ -791,7 +830,7 @@ def generate_zone_chart(df, symbol, zones):
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     print(f"[DEBUG] Chart data shape: {chart_data.shape}")
 
-    # Define a dark gray style (like the screenshot)
+    # Define dark style
     mc = mpf.make_marketcolors(
         up='#26a69a',      # teal for up
         down='#ef5350',    # red for down
@@ -859,7 +898,7 @@ def generate_zone_chart(df, symbol, zones):
             scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
         )
         if apds:
-            # Improved legend: larger font, brighter text, semi‑transparent background
+            # Improved legend
             axes[0].legend(
                 loc='upper left',
                 fontsize=10,
@@ -880,14 +919,13 @@ def generate_zone_chart(df, symbol, zones):
         axes[0].set_facecolor('#1e1e1e')
         axes[2].set_facecolor('#1e1e1e')
 
-        # Save to a temporary file and read back
+        # Save to temp file
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
             fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
-            # Read the file back into a BytesIO for discord
             with open(tmpfile.name, 'rb') as f:
                 img_data = f.read()
-        os.unlink(tmpfile.name)  # delete temp file
+        os.unlink(tmpfile.name)
         plt.close(fig)
         print(f"[DEBUG] Chart generated successfully, size: {len(img_data)} bytes")
         return io.BytesIO(img_data)
@@ -1202,9 +1240,6 @@ async def send_final_summary(ctx, signal_summary):
 # ====================
 # OPTIONS FLOW SCANNER (ENHANCED) – (unchanged, but all yfinance calls are synchronous – we should also thread them)
 # ====================
-# For brevity, I'll keep them as is – they use yfinance which is also blocking.
-# If you experience similar freezing with !flow or !scanflow, let me know and I'll thread them as well.
-
 async def get_stock_price(symbol):
     try:
         stock = yf.Ticker(symbol)
@@ -1217,7 +1252,6 @@ async def get_stock_price(symbol):
         return None
 
 def get_key_expirations(ticker):
-    """Return a list of (expiration_str, dte, label) for nearest weekly, next weekly, and 30-45 DTE."""
     try:
         stock = yf.Ticker(ticker)
         expirations = stock.options
@@ -1280,7 +1314,6 @@ def get_whale_emoji(premium):
         return "🐟"
 
 def analyze_expiration(opt_chain, current_price, min_volume=5):
-    """Return list of significant options with analysis."""
     if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
@@ -1326,7 +1359,6 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    """Enhanced options flow – scans multiple expirations, adds whale rating."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1354,7 +1386,7 @@ async def options_flow(ctx, ticker: str):
             opt_chain = stock.option_chain(exp_str)
             analyzed = analyze_expiration(opt_chain, current_price)
             analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]  # top 6 per expiration
+            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]
 
             if significant:
                 table = f"```\n{label} ({exp_str}, {dte} days)\n"
@@ -1368,7 +1400,6 @@ async def options_flow(ctx, ticker: str):
                 embed.add_field(name="", value=table, inline=False)
                 all_significant.extend(significant)
 
-        # Top lottery picks (short DTE, high vol/OI, reasonable premium)
         lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
         lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
         if lottery:
@@ -1400,7 +1431,6 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    """Scan watchlist for unusual options activity across key expirations, with whale ratings."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1425,7 +1455,6 @@ async def scan_options_flow(ctx):
                 stock = yf.Ticker(symbol)
                 key_exps = get_key_expirations(symbol)
                 for exp_str, dte, label in key_exps:
-                    # Only scan weekly and primary (ignore the middle one for scanflow to save time)
                     if "WEEKLY" in label or "PRIMARY" in label:
                         opt_chain = stock.option_chain(exp_str)
                         calls = opt_chain.calls
@@ -1443,7 +1472,7 @@ async def scan_options_flow(ctx):
                                     vol_oi_ratio = volume / oi
                                     if vol_oi_ratio >= 1.5 and volume >= 10:
                                         distance_pct = abs(strike - current_price) / current_price * 100
-                                        if distance_pct <= 20:  # near the money
+                                        if distance_pct <= 20:
                                             premium = volume * 100 * last
                                             all_unusual.append({
                                                 'symbol': symbol,
@@ -1461,12 +1490,11 @@ async def scan_options_flow(ctx):
                                             })
                             except:
                                 continue
-                await asyncio.sleep(2)  # be gentle to yfinance
+                await asyncio.sleep(2)
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
-        # Sort by premium (largest first)
         all_unusual.sort(key=lambda x: x['raw_premium'], reverse=True)
 
         if not all_unusual:
@@ -1483,14 +1511,13 @@ async def scan_options_flow(ctx):
         table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE\n"
         table += "------  ------  ---  ------  ---  ------  --------  -----\n"
         top_overall = []
-        for opt in all_unusual[:15]:  # show top 15
+        for opt in all_unusual[:15]:
             whale = get_whale_emoji(opt['raw_premium'])
             table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
             top_overall.append(opt)
         table += "```"
         embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
 
-        # Top 3 setups by premium
         if top_overall:
             picks = "**🏆 TOP 3 BY PREMIUM:**\n\n"
             for i, pick in enumerate(top_overall[:3]):
@@ -1513,10 +1540,6 @@ async def scan_options_flow(ctx):
 # ====================
 
 async def get_earnings_stats(symbol, earnings_date):
-    """
-    Calculate expected move from options (nearest expiration after earnings)
-    Returns (expected_move_str, historical_avg_str).
-    """
     try:
         stock = yf.Ticker(symbol)
         earn_dt = datetime.strptime(earnings_date, '%Y-%m-%d')
@@ -1526,7 +1549,6 @@ async def get_earnings_stats(symbol, earnings_date):
         if not expirations:
             return "N/A", "N/A"
 
-        # Find first expiration after earnings
         target_exp = None
         for exp in expirations:
             exp_dt = datetime.strptime(exp, '%Y-%m-%d')
@@ -1545,7 +1567,6 @@ async def get_earnings_stats(symbol, earnings_date):
         if calls.empty or puts.empty:
             return "N/A", "N/A"
 
-        # ATM straddle
         calls['diff'] = abs(calls['strike'] - current_price)
         puts['diff'] = abs(puts['strike'] - current_price)
         atm_call = calls.loc[calls['diff'].idxmin()]
@@ -1557,7 +1578,6 @@ async def get_earnings_stats(symbol, earnings_date):
 
         expected_pct = (straddle / current_price) * 100
 
-        # Historical average move – optional, we'll return N/A for now
         return f"{expected_pct:.1f}%", "N/A"
 
     except Exception as e:
@@ -1566,7 +1586,6 @@ async def get_earnings_stats(symbol, earnings_date):
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str = None):
-    """Show upcoming catalysts with expected move from options."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1578,7 +1597,6 @@ async def upcoming_events(ctx, ticker: str = None):
         last_command_time[ctx.author.id] = now
 
         if ticker is None:
-            # Scan all stocks in watchlist
             watchlist = await load_watchlist()
             stocks = watchlist['stocks']
             if not stocks:
@@ -1587,7 +1605,6 @@ async def upcoming_events(ctx, ticker: str = None):
 
             await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
 
-            # Economic events first
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
                 econ_embed = discord.Embed(
@@ -1599,10 +1616,7 @@ async def upcoming_events(ctx, ticker: str = None):
                     event = ev.get('event', 'N/A')
                     country = ev.get('country', '')
                     importance = ev.get('importance', '')
-                    if importance:
-                        star = "★" if importance == "high" else "☆" if importance == "medium" else "·"
-                    else:
-                        star = ""
+                    star = "★" if importance == "high" else "☆" if importance == "medium" else "·" if importance else ""
                     econ_embed.add_field(
                         name=f"{date} {country}",
                         value=f"{event} {star}",
@@ -1638,9 +1652,7 @@ async def upcoming_events(ctx, ticker: str = None):
                             date = e.get('date', 'N/A')
                             eps_est = e.get('epsEstimate', 'N/A')
                             time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
-
                             exp_move, hist_avg = await get_earnings_stats(sym, date)
-
                             lines.append(
                                 f"**{date}** {time_str} – EPS Est: {eps_est}\n"
                                 f"   • Expected Move: {exp_move}\n"
@@ -1696,7 +1708,6 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send("✅ Upcoming events scan complete.")
 
         else:
-            # Single ticker
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
             earnings = await fetch_earnings_upcoming(ticker.upper())
             dividends = await fetch_dividends_upcoming(ticker.upper())
@@ -1721,9 +1732,7 @@ async def upcoming_events(ctx, ticker: str = None):
                     date = e.get('date', 'N/A')
                     eps_est = e.get('epsEstimate', 'N/A')
                     time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
-
                     exp_move, hist_avg = await get_earnings_stats(ticker.upper(), date)
-
                     lines.append(
                         f"**{date}** {time_str} – EPS Est: {eps_est}\n"
                         f"   • Expected Move: {exp_move}\n"
@@ -1779,7 +1788,6 @@ async def upcoming_events(ctx, ticker: str = None):
 # ====================
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
-    """Backtest EMA crossover strategy."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1935,7 +1943,6 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
 # ====================
 @bot.command(name='signal')
 async def signal_single(ctx, ticker: str):
-    """Get multi-timeframe signal report for a single symbol."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1971,7 +1978,6 @@ async def signal_single(ctx, ticker: str):
 # ====================
 @bot.command(name='signals')
 async def signals(ctx):
-    """Scan your entire watchlist across all 6 timeframes and report symbols with signals."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2029,7 +2035,6 @@ async def signals(ctx):
 # ====================
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    """Scan symbols on a single timeframe."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2093,7 +2098,7 @@ async def scan(ctx, target='all', timeframe='daily'):
                 except Exception as e:
                     print(f"⚠️ Chart generation failed: {e}")
                     await ctx.send(embed=embed)
-            await asyncio.sleep(1)  # delay between messages
+            await asyncio.sleep(1)
 
         cancellation_flags[ctx.author.id] = False
         await ctx.send("Scan complete.")
@@ -2142,33 +2147,33 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
     """
     Identify demand zones based on unusually large candles.
-    Returns list of zones: each with 'level', 'date', 'strength' (number of touches).
+    Returns list of zones that have not been broken (no close below level after formation).
+    Each zone: {'level': price, 'date': index, 'strength': number of touches (lows within tolerance)}
     """
     if len(df) < 50:
         return []
     df = df.iloc[-lookback:].copy()
     df['range'] = df['high'] - df['low']
-    # Determine large candle threshold (e.g., 90th percentile of range)
     threshold = np.percentile(df['range'].dropna(), threshold_percentile)
     large_candles = df[df['range'] > threshold]
     zones = []
     for idx, row in large_candles.iterrows():
         level = row['low']
-        # Data after this candle (including the candle itself)
         after = df.loc[idx:]
         if len(after) < 2:
             continue
         # Check if price ever closed below this level (broken support)
         closes_below = after['close'] < level * (1 - touch_tolerance)
         if closes_below.any():
-            continue
+            continue   # zone broken, discard
         # Count touches (low within tolerance)
         touches = after['low'] <= level * (1 + touch_tolerance)
-        if touches.sum() >= 1:
+        strength = int(touches.sum())
+        if strength >= 1:
             zones.append({
                 'level': level,
                 'date': idx,
-                'strength': int(touches.sum())
+                'strength': strength
             })
     # Sort by level (ascending)
     zones.sort(key=lambda x: x['level'])
@@ -2176,7 +2181,6 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
 
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = '30min'):
-    """Show support/resistance zones and, for 30min, identify demand zones with option suggestions and chart."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2195,7 +2199,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
 
         symbol = normalize_symbol(ticker)
 
-        # Special handling for 30min: detect demand zones
         if timeframe == '30min':
             await ctx.send(f"🔍 Scanning 30‑minute chart for **{symbol}** to find demand zones...")
 
@@ -2240,14 +2243,12 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
 
             # If price is near any zone, suggest an ITM call option
             near_zones = [z for z in zones if abs((current_price - z['level']) / current_price) < 0.02]
-            if near_zones and '/' not in symbol:  # stocks only (crypto no options)
+            if near_zones and '/' not in symbol:
                 best_zone = min(near_zones, key=lambda z: abs(current_price - z['level']))
                 try:
-                    import yfinance as yf
                     stock = yf.Ticker(symbol)
                     expirations = stock.options
                     if expirations:
-                        # Find monthly expiration (30-45 DTE)
                         today = datetime.now().date()
                         primary_exp = None
                         for exp in expirations:
@@ -2257,12 +2258,10 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                                 primary_exp = exp
                                 break
                         if not primary_exp and expirations:
-                            primary_exp = expirations[0]  # fallback to nearest
+                            primary_exp = expirations[0]
 
                         if primary_exp:
                             opt_chain = stock.option_chain(primary_exp)
-
-                            # Determine strike offset based on price
                             price = current_price
                             if price > 100:
                                 offset = 5.0
@@ -2271,9 +2270,9 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                             elif price > 10:
                                 offset = 1.0
                             else:
-                                offset = max(0.5, price * 0.15)  # 15% for cheap stocks
+                                offset = max(0.5, price * 0.15)
 
-                            target_strike = price - offset  # ITM call
+                            target_strike = price - offset
                             calls = opt_chain.calls
                             if not calls.empty:
                                 calls['strike_diff'] = abs(calls['strike'] - target_strike)
@@ -2284,9 +2283,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                                 bid = best_call.get('bid', 'N/A')
                                 ask = best_call.get('ask', 'N/A')
                                 volume = best_call.get('volume', 'N/A')
-                                option_symbol = best_call.get('contractSymbol', 'N/A')
 
-                                # Estimate premium (use mid if available)
                                 if bid != 'N/A' and ask != 'N/A' and bid > 0 and ask > 0:
                                     premium = (bid + ask) / 2
                                 else:
@@ -2314,7 +2311,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            # Generate and attach the improved zone chart (dark gray background, color-coded lines)
+            # Generate and attach the zone chart
             try:
                 chart_buffer = generate_zone_chart(df, symbol, zones)
                 if chart_buffer:
@@ -2329,7 +2326,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 await ctx.send(f"❌ Error generating chart: {str(e)}")
             return
 
-        # --- Existing zone logic for other timeframes (unchanged) ---
+        # Other timeframes: use old zone logic
         await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
