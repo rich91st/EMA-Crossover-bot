@@ -173,8 +173,8 @@ def get_tradingview_web_link(symbol):
 async def fetch_twelvedata(symbol, timeframe):
     """Fallback: fetch single symbol from Twelve Data."""
     interval_map = {
-        '5min': '5min', '15min': '15min', '1h': '1h',
-        '4h': '4h', 'daily': '1day', 'weekly': '1week'
+        '5min': '5min', '15min': '15min', '30min': '30min',
+        '1h': '1h', '4h': '4h', 'daily': '1day', 'weekly': '1week'
     }
     interval = interval_map.get(timeframe)
     if not interval:
@@ -232,6 +232,7 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
     days_map = {
         '5min': 1,
         '15min': 2,
+        '30min': 2,
         '1h': 7,
         '4h': 7,
         'daily': 30,
@@ -261,6 +262,11 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
 
 async def fetch_coingecko_price(symbol):
     base = symbol.split('/')[0].lower()
+    coin_map = {
+        'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana',
+        'xrp': 'ripple', 'doge': 'dogecoin', 'pepe': 'pepecoin',
+        'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'
+    }
     coin_id = coin_map.get(base)
     if not coin_id:
         return None
@@ -317,6 +323,80 @@ async def fetch_ohlcv(symbol, timeframe):
     }
     alpaca_tf = alpaca_tf_map.get(timeframe)
 
+    # Special handling for 30min: try to get 15min from Alpaca and resample
+    if timeframe == '30min':
+        # Stocks
+        if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            try:
+                client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                request = StockBarsRequest(
+                    symbol_or_symbols=symbol,
+                    timeframe='15Min',
+                    start=now - timedelta(days=60),
+                    end=now
+                )
+                bars = client.get_stock_bars(request)
+                if bars.data:
+                    df_15 = bars.df
+                    df_15 = df_15.reset_index(level=0, drop=True)
+                    df_15.index = pd.to_datetime(df_15.index)
+                    # Resample to 30 minutes
+                    df_30 = df_15.resample('30T').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                    if not df_30.empty:
+                        df = df_30
+                        print(f"✅ Alpaca 15min resampled to 30min for {symbol}")
+            except Exception as e:
+                print(f"⚠️ Alpaca 15min fetch failed for {symbol}, falling back to Twelve Data... {e}")
+
+        # If stock still missing or crypto, fallback to Twelve Data (for stocks) or CoinGecko (crypto)
+        if df is None and '/' not in symbol:
+            df = await fetch_twelvedata(symbol, '30min')
+
+        if '/' in symbol:
+            # Try Alpaca crypto 15min resample
+            try:
+                client = CryptoHistoricalDataClient()
+                alpaca_symbol = symbol.replace('/', '')
+                request = CryptoBarsRequest(
+                    symbol_or_symbols=alpaca_symbol,
+                    timeframe='15Min',
+                    start=now - timedelta(days=60),
+                    end=now
+                )
+                bars = client.get_crypto_bars(request)
+                if bars.data:
+                    df_15 = bars.df
+                    df_15 = df_15.reset_index(level=0, drop=True)
+                    df_15.index = pd.to_datetime(df_15.index)
+                    df_30 = df_15.resample('30T').agg({
+                        'open': 'first',
+                        'high': 'max',
+                        'low': 'min',
+                        'close': 'last',
+                        'volume': 'sum'
+                    }).dropna()
+                    if not df_30.empty:
+                        df = df_30
+                        print(f"✅ Alpaca crypto 15min resampled to 30min for {symbol}")
+            except Exception as e:
+                print(f"⚠️ Alpaca crypto 15min fetch failed for {symbol}, no fallback for 30min crypto.")
+            # No fallback for crypto 30min other than CoinGecko (which may not have 30min)
+            if df is None:
+                df = await fetch_coingecko_ohlc(symbol, timeframe)
+            if df is None:
+                df = await fetch_coingecko_price(symbol)
+
+        if df is not None and not df.empty:
+            data_cache[cache_key] = (df, now + CACHE_DURATION)
+        return df
+
+    # For other timeframes, use standard logic
     # Try Alpaca for stocks
     if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY and alpaca_tf:
         try:
@@ -849,7 +929,7 @@ def format_zone_embed(symbol, signals, timeframe):
 
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     timeframe_priority = {
-        '5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6
+        '5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7
     }
 
     best_tf = None
@@ -888,7 +968,7 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
 
 async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
-    timeframe_order = {'5min': 1, '15min': 2, '1h': 3, '4h': 4, 'daily': 5, 'weekly': 6}
+    timeframe_order = {'5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7}
     sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x, 99))
 
     bullish_count = sum(1 for tf, data in symbol_signals.items() if data['signals']['net_score'] > 0)
@@ -1725,7 +1805,7 @@ async def signal_single(ctx, ticker: str):
         symbol = normalize_symbol(ticker)
         await ctx.send(f"🔍 Fetching multi-timeframe signals for **{symbol}**...")
 
-        all_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
+        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
         symbol_signals = {}
 
         for tf in all_timeframes:
@@ -1766,11 +1846,11 @@ async def signals(ctx):
 
         watchlist = await load_watchlist()
         symbols = watchlist['stocks'] + watchlist['crypto']
-        all_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
+        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
 
         await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
         await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(all_timeframes)} timeframes**")
-        await ctx.send(f"⏱️ Timeframes: 5min, 15min, 1h, 4h, daily, weekly")
+        await ctx.send(f"⏱️ Timeframes: 5min, 15min, 30min, 1h, 4h, daily, weekly")
         await ctx.send(f"📈 Using Alpaca (high limits) for stocks – this will be fast!")
         await ctx.send("⏳ Results will appear as they come...\n")
 
@@ -1823,9 +1903,9 @@ async def scan(ctx, target='all', timeframe='daily'):
         last_command_time[ctx.author.id] = now
 
         timeframe = timeframe.lower()
-        valid_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
+        valid_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
-            await ctx.send("Invalid timeframe. Use 5min, 15min, 1h, 4h, daily, or weekly.")
+            await ctx.send("Invalid timeframe. Use 5min, 15min, 30min, 1h, 4h, daily, or weekly.")
             return
 
         watchlist = await load_watchlist()
@@ -1919,10 +1999,46 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ZONE COMMAND (unchanged)
+# ZONE COMMAND (UPDATED with 30min default)
 # ====================
+def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
+    """
+    Identify demand zones based on unusually large candles.
+    Returns list of zones: each with 'level', 'date', 'strength' (number of touches).
+    """
+    if len(df) < 50:
+        return []
+    df = df.iloc[-lookback:].copy()
+    df['range'] = df['high'] - df['low']
+    # Determine large candle threshold (e.g., 90th percentile of range)
+    threshold = np.percentile(df['range'].dropna(), threshold_percentile)
+    large_candles = df[df['range'] > threshold]
+    zones = []
+    for idx, row in large_candles.iterrows():
+        level = row['low']
+        # Data after this candle (including the candle itself)
+        after = df.loc[idx:]
+        if len(after) < 2:
+            continue
+        # Check if price ever closed below this level (broken support)
+        closes_below = after['close'] < level * (1 - touch_tolerance)
+        if closes_below.any():
+            continue
+        # Count touches (low within tolerance)
+        touches = after['low'] <= level * (1 + touch_tolerance)
+        if touches.sum() >= 1:
+            zones.append({
+                'level': level,
+                'date': idx,
+                'strength': int(touches.sum())
+            })
+    # Sort by level (ascending)
+    zones.sort(key=lambda x: x['level'])
+    return zones
+
 @bot.command(name='zone')
-async def zone(ctx, ticker: str, timeframe: str = 'daily'):
+async def zone(ctx, ticker: str, timeframe: str = '30min'):
+    """Show support/resistance zones and, for 30min, identify demand zones with option suggestions."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1932,12 +2048,128 @@ async def zone(ctx, ticker: str, timeframe: str = 'daily'):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
+
         timeframe = timeframe.lower()
-        valid_timeframes = ['5min', '15min', '1h', '4h', 'daily', 'weekly']
+        valid_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
-            await ctx.send("Invalid timeframe. Use 5min, 15min, 1h, 4h, daily, or weekly.")
+            await ctx.send("Invalid timeframe. Use 5min, 15min, 30min, 1h, 4h, daily, or weekly.")
             return
+
         symbol = normalize_symbol(ticker)
+
+        # Special handling for 30min: detect demand zones
+        if timeframe == '30min':
+            await ctx.send(f"🔍 Scanning 30‑minute chart for **{symbol}** to find demand zones...")
+            df = await fetch_ohlcv(symbol, '30min')
+            if df is None or df.empty:
+                await ctx.send(f"Could not fetch 30min data for {symbol}.")
+                return
+
+            current_price = df['close'].iloc[-1]
+            zones = find_demand_zones(df)
+
+            if not zones:
+                await ctx.send(f"No clear demand zones found for {symbol} on 30min.")
+                return
+
+            embed = discord.Embed(
+                title=f"📉 Demand Zones for {symbol} (30min)",
+                description=f"Current Price: **${current_price:.2f}**",
+                color=0x00ff00
+            )
+
+            # Show all demand zones
+            for z in zones:
+                distance = (current_price - z['level']) / current_price * 100
+                status = "🔵 **NEAR**" if abs(distance) < 2 else ""
+                date_str = z['date'].strftime('%m/%d') if hasattr(z['date'], 'strftime') else ''
+                embed.add_field(
+                    name=f"Support at ${z['level']:.2f} ({date_str})",
+                    value=f"Distance: {distance:.1f}% {status}\nTouches: {z['strength']}",
+                    inline=False
+                )
+
+            # If price is near any zone, suggest an ITM call option
+            near_zones = [z for z in zones if abs((current_price - z['level']) / current_price) < 0.02]
+            if near_zones and '/' not in symbol:  # stocks only (crypto no options)
+                best_zone = min(near_zones, key=lambda z: abs(current_price - z['level']))
+                try:
+                    import yfinance as yf
+                    stock = yf.Ticker(symbol)
+                    expirations = stock.options
+                    if expirations:
+                        # Find monthly expiration (30-45 DTE)
+                        today = datetime.now().date()
+                        primary_exp = None
+                        for exp in expirations:
+                            exp_date = datetime.strptime(exp, '%Y-%m-%d').date()
+                            dte = (exp_date - today).days
+                            if 30 <= dte <= 45:
+                                primary_exp = exp
+                                break
+                        if not primary_exp and expirations:
+                            primary_exp = expirations[0]  # fallback to nearest
+
+                        if primary_exp:
+                            opt_chain = stock.option_chain(primary_exp)
+
+                            # Determine strike offset based on price
+                            price = current_price
+                            if price > 100:
+                                offset = 5.0
+                            elif price > 50:
+                                offset = 2.0
+                            elif price > 10:
+                                offset = 1.0
+                            else:
+                                offset = max(0.5, price * 0.15)  # 15% for cheap stocks
+
+                            target_strike = price - offset  # ITM call
+                            calls = opt_chain.calls
+                            if not calls.empty:
+                                calls['strike_diff'] = abs(calls['strike'] - target_strike)
+                                best_call = calls.loc[calls['strike_diff'].idxmin()]
+
+                                strike = best_call['strike']
+                                last = best_call.get('lastPrice', 'N/A')
+                                bid = best_call.get('bid', 'N/A')
+                                ask = best_call.get('ask', 'N/A')
+                                volume = best_call.get('volume', 'N/A')
+                                option_symbol = best_call.get('contractSymbol', 'N/A')
+
+                                # Estimate premium (use mid if available)
+                                if bid != 'N/A' and ask != 'N/A' and bid > 0 and ask > 0:
+                                    premium = (bid + ask) / 2
+                                else:
+                                    premium = last if last != 'N/A' else None
+
+                                if premium:
+                                    breakeven = strike + premium
+                                else:
+                                    breakeven = 'N/A'
+
+                                option_text = (
+                                    f"**Strike:** ${strike:.2f}\n"
+                                    f"**Expiration:** {primary_exp}\n"
+                                    f"**Last:** {last}\n"
+                                    f"**Bid/Ask:** {bid}/{ask}\n"
+                                    f"**Volume:** {volume}\n"
+                                    f"**Est. Premium:** ${premium:.2f}\n"
+                                    f"**Breakeven:** ${breakeven:.2f}" if breakeven != 'N/A' else "Breakeven N/A"
+                                )
+                                embed.add_field(
+                                    name="💡 Suggested Call Option (ITM)",
+                                    value=option_text,
+                                    inline=False
+                                )
+                except Exception as e:
+                    embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
+
+            embed.set_footer(text="⚠️ Options are risky. This is not financial advice.")
+            await ctx.send(embed=embed)
+            return
+
+        # --- Existing zone logic for other timeframes (unchanged) ---
         await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
@@ -1947,6 +2179,7 @@ async def zone(ctx, ticker: str, timeframe: str = 'daily'):
         signals = get_signals(df)
         embed = format_zone_embed(symbol, signals, timeframe)
         await ctx.send(embed=embed)
+
     finally:
         user_busy[ctx.author.id] = False
 
@@ -2021,7 +2254,7 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND
+# HELP COMMAND (updated with 30min info)
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
@@ -2033,22 +2266,24 @@ async def help_command(ctx):
 **5-13-50 Trading Bot Commands**
 
 📊 **SCAN COMMANDS**
-`!scan all [5min|15min|1h|4h|daily|weekly]` – Scan all watchlist symbols on a single timeframe
+`!scan all [5min|15min|30min|1h|4h|daily|weekly]` – Scan all watchlist symbols on a single timeframe
 `!scan SYMBOL [timeframe]` – Scan a single symbol on a specific timeframe
 
 🚀 **SIGNAL COMMANDS**
-`!signals` – Scan your ENTIRE watchlist across ALL 6 timeframes (5min, 15min, 1h, 4h, daily, weekly)
+`!signals` – Scan your ENTIRE watchlist across ALL 7 timeframes (5min, 15min, 30min, 1h, 4h, daily, weekly)
    • Shows ONE combined report per symbol with best timeframe chart + clean summary
    • Uses Alpaca for stocks (fast) – no 60‑second waits!
 
-`!signal SYMBOL` – Get a multi‑timeframe report for a single symbol (all 6 timeframes)
+`!signal SYMBOL` – Get a multi‑timeframe report for a single symbol (all 7 timeframes)
 
 📰 **NEWS & EVENTS**
 `!news TICKER [limit]` – Fetch latest news headlines
 `!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)
 
 🎯 **ZONES**
-`!zone SYMBOL [timeframe]` – Show buy/sell zones based on support/resistance and EMAs
+`!zone SYMBOL [timeframe]` – Show buy/sell zones based on support/resistance and EMAs.
+   • **Default is now 30min** (demand zones + option suggestions if near a zone).
+   • Example: `!zone AAPL` (30min), `!zone AAPL daily` (daily zones).
 
 🔥 **OPTIONS FLOW**
 `!flow TICKER` – Check unusual options activity for a specific stock (scans weekly, monthly, primary expirations; includes whale ratings)
@@ -2069,9 +2304,10 @@ async def help_command(ctx):
 `!stopscan` – Stop ongoing scan
 `!help` – This message
 
-⏱️ **TIMEFRAMES (for !scan and !zone):**
+⏱️ **TIMEFRAMES (for !scan, !zone, !signal):**
 • `5min` – 5‑minute candles
 • `15min` – 15‑minute candles
+• `30min` – 30‑minute candles (default for !zone)
 • `1h` – 1‑hour candles
 • `4h` – 4‑hour candles
 • `daily` – daily candles
@@ -2080,6 +2316,7 @@ async def help_command(ctx):
 💡 **PRO TIPS:**
 • Use `!signals` to scan your whole watchlist for opportunities – now super fast with Alpaca!
 • Use `!signal AAPL` to drill down on a specific symbol.
+• Use `!zone AAPL` (default 30min) to see demand zones and get ITM call suggestions.
 • Use `!scanflow` to find explosive options setups before they run (watch for 🐋🐋 whales).
 • Use `!upcoming` to see expected moves on earnings dates.
 • Use `!backtest` to validate your strategy before risking real money.
