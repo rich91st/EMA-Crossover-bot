@@ -22,6 +22,7 @@ from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import mplfinance as mpf
 import io
 
@@ -760,10 +761,10 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# IMPROVED ZONE CHART GENERATION (with demand zones)
+# IMPROVED ZONE CHART GENERATION (dark background, color-coded demand lines)
 # ====================
 def generate_zone_chart(df, symbol, zones):
-    """Generate a clean candlestick chart with solid demand zone lines and volume."""
+    """Generate a dark-themed candlestick chart with demand lines colored by strength (green = most respected, red = least)."""
     if len(df) < 20:
         return None
 
@@ -771,35 +772,59 @@ def generate_zone_chart(df, symbol, zones):
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(100).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    # Define a clean style
+    # --- Define a dark theme style ---
     mc = mpf.make_marketcolors(
-        up='#26a69a',    # teal for up
-        down='#ef5350',  # red for down
-        edge='inherit',
-        wick='inherit',
-        volume='in'
+        up='#4caf50',      # green for up
+        down='#f44336',    # red for down
+        edge='white',
+        wick='white',
+        volume='in',
+        inherit=True
     )
     s = mpf.make_mpf_style(
         marketcolors=mc,
         gridstyle='--',
         y_on_right=False,
-        facecolor='#f0f0f0',  # light background
-        figcolor='white'
+        facecolor='#0e1111',      # dark background (like the screenshot)
+        figcolor='#0e1111',
+        gridcolor='#555555'
     )
 
-    # Create additional plots for each zone (solid lines)
+    # --- Color-code demand lines by strength ---
+    # Strength values from zones (higher = more respected)
+    strengths = [z['strength'] for z in zones]
+    if strengths:
+        # Normalize strengths to [0,1] for colormap
+        min_s = min(strengths)
+        max_s = max(strengths)
+        if max_s > min_s:
+            norm_strengths = [(s - min_s) / (max_s - min_s) for s in strengths]
+        else:
+            norm_strengths = [0.5] * len(strengths)  # all same -> middle color
+    else:
+        norm_strengths = []
+
+    # Use RdYlGn colormap (reversed so that high strength = green, low = red)
+    colormap = cm.get_cmap('RdYlGn_r')  # _r reverses: now high strength = green
+    line_colors = [colormap(norm) for norm in norm_strengths]  # returns RGBA
+
+    # Create addplots for each zone
     apds = []
-    colors = ['#2962ff', '#ff6d00', '#aa00ff', '#2e7d32']  # distinct solid colors
     for i, zone in enumerate(zones):
         level = zone['level']
-        color = colors[i % len(colors)]
-        # Add a horizontal line using a constant array
+        color = line_colors[i] if line_colors else '#ffffff'
+        # Convert RGBA to hex for mpf (mpf accepts many formats, but to be safe)
+        if isinstance(color, tuple):
+            hex_color = matplotlib.colors.to_hex(color)
+        else:
+            hex_color = color
+        label = f"Demand ${level:.2f} (touches: {zone['strength']})"
         apds.append(mpf.make_addplot(
             [level] * len(chart_data),
-            color=color,
+            color=hex_color,
             width=2.0,
-            linestyle='-',          # solid line
-            label=f"Demand ${level:.2f}"
+            linestyle='-',
+            label=label
         ))
 
     try:
@@ -817,11 +842,13 @@ def generate_zone_chart(df, symbol, zones):
             scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
         )
         if apds:
-            axes[0].legend(loc='upper left', fontsize='small')
-        # Adjust volume panel to match
-        axes[2].set_ylabel('Volume')
+            axes[0].legend(loc='upper left', fontsize='small', facecolor='#222222', edgecolor='white')
+        # Adjust volume panel to match dark theme
+        axes[2].set_ylabel('Volume', color='white')
+        axes[2].tick_params(colors='white')
+        axes[2].yaxis.label.set_color('white')
         buf = io.BytesIO()
-        fig.savefig(buf, format='PNG', dpi=150, bbox_inches='tight')  # higher DPI for sharpness
+        fig.savefig(buf, format='PNG', dpi=150, bbox_inches='tight', facecolor=s.facecolor)
         buf.seek(0)
         plt.close(fig)
         return buf
@@ -2235,7 +2262,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            # Generate and attach the improved zone chart
+            # Generate and attach the improved zone chart (dark background, color-coded lines)
             chart_buffer = generate_zone_chart(df, symbol, zones)
             if chart_buffer:
                 file = discord.File(chart_buffer, filename='zone_chart.png')
