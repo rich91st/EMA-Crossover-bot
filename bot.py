@@ -22,6 +22,7 @@ from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import matplotlib.cm as cm
 import mplfinance as mpf
 import io
@@ -761,21 +762,21 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# IMPROVED ZONE CHART GENERATION (dark background, color-coded demand lines)
+# ZONE CHART GENERATION – Dark background, candlesticks, color‑coded demand lines
 # ====================
 def generate_zone_chart(df, symbol, zones):
-    """Generate a dark-themed candlestick chart with demand lines colored by strength (green = most respected, red = least)."""
+    """Generate a candlestick chart with black background and demand lines colored by strength."""
     if len(df) < 20:
         return None
 
-    # Use last 100 candles for good visibility
+    # Use last 100 candles for clarity
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(100).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    # --- Define a dark theme style ---
+    # Define a dark style with black background
     mc = mpf.make_marketcolors(
-        up='#4caf50',      # green for up
-        down='#f44336',    # red for down
+        up='#26a69a',      # teal for up
+        down='#ef5350',    # red for down
         edge='white',
         wick='white',
         volume='in',
@@ -785,43 +786,39 @@ def generate_zone_chart(df, symbol, zones):
         marketcolors=mc,
         gridstyle='--',
         y_on_right=False,
-        facecolor='#0e1111',      # dark background (like the screenshot)
-        figcolor='#0e1111',
-        gridcolor='#555555'
+        facecolor='#000000',      # pure black background
+        figcolor='#000000',
+        gridcolor='#333333'
     )
 
-    # --- Color-code demand lines by strength ---
-    # Strength values from zones (higher = more respected)
-    strengths = [z['strength'] for z in zones]
-    if strengths:
-        # Normalize strengths to [0,1] for colormap
+    # Color-code demand lines by strength (green = most respected, red = least)
+    if zones:
+        strengths = [z['strength'] for z in zones]
         min_s = min(strengths)
         max_s = max(strengths)
         if max_s > min_s:
             norm_strengths = [(s - min_s) / (max_s - min_s) for s in strengths]
         else:
             norm_strengths = [0.5] * len(strengths)  # all same -> middle color
-    else:
-        norm_strengths = []
 
-    # Use RdYlGn colormap (reversed so that high strength = green, low = red)
-    colormap = cm.get_cmap('RdYlGn_r')  # _r reverses: now high strength = green
-    line_colors = [colormap(norm) for norm in norm_strengths]  # returns RGBA
+        # Use RdYlGn colormap (reversed so that high strength = green, low = red)
+        colormap = cm.get_cmap('RdYlGn_r')
+        line_colors = [colormap(norm) for norm in norm_strengths]
+    else:
+        line_colors = []
 
     # Create addplots for each zone
     apds = []
     for i, zone in enumerate(zones):
         level = zone['level']
-        color = line_colors[i] if line_colors else '#ffffff'
-        # Convert RGBA to hex for mpf (mpf accepts many formats, but to be safe)
-        if isinstance(color, tuple):
-            hex_color = matplotlib.colors.to_hex(color)
+        if line_colors:
+            color = mcolors.to_hex(line_colors[i])
         else:
-            hex_color = color
+            color = '#ffffff'  # fallback white
         label = f"Demand ${level:.2f} (touches: {zone['strength']})"
         apds.append(mpf.make_addplot(
             [level] * len(chart_data),
-            color=hex_color,
+            color=color,
             width=2.0,
             linestyle='-',
             label=label
@@ -842,11 +839,19 @@ def generate_zone_chart(df, symbol, zones):
             scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
         )
         if apds:
-            axes[0].legend(loc='upper left', fontsize='small', facecolor='#222222', edgecolor='white')
-        # Adjust volume panel to match dark theme
+            axes[0].legend(loc='upper left', fontsize='small', facecolor='#222222', edgecolor='white', labelcolor='white')
+        # Style volume subplot
         axes[2].set_ylabel('Volume', color='white')
         axes[2].tick_params(colors='white')
         axes[2].yaxis.label.set_color('white')
+        # Style main axis
+        axes[0].tick_params(colors='white')
+        axes[0].yaxis.label.set_color('white')
+        axes[0].xaxis.label.set_color('white')
+        # Set facecolor of axes explicitly
+        axes[0].set_facecolor('#000000')
+        axes[2].set_facecolor('#000000')
+        # Save
         buf = io.BytesIO()
         fig.savefig(buf, format='PNG', dpi=150, bbox_inches='tight', facecolor=s.facecolor)
         buf.seek(0)
