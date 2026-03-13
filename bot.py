@@ -777,10 +777,10 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# ZONE CHART GENERATION – Dark background, candlesticks, color‑coded demand lines
+# ZONE CHART GENERATION – Dark gray background, improved legend
 # ====================
 def generate_zone_chart(df, symbol, zones):
-    """Generate a candlestick chart with black background and demand lines colored by strength."""
+    """Generate a candlestick chart with dark gray background and demand lines colored by strength."""
     print(f"[DEBUG] Generating zone chart for {symbol} with {len(zones)} zones")
     if len(df) < 20:
         print(f"[DEBUG] Insufficient data: {len(df)} rows")
@@ -791,7 +791,7 @@ def generate_zone_chart(df, symbol, zones):
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     print(f"[DEBUG] Chart data shape: {chart_data.shape}")
 
-    # Define a dark style with black background
+    # Define a dark gray style (like the screenshot)
     mc = mpf.make_marketcolors(
         up='#26a69a',      # teal for up
         down='#ef5350',    # red for down
@@ -804,9 +804,9 @@ def generate_zone_chart(df, symbol, zones):
         marketcolors=mc,
         gridstyle='--',
         y_on_right=False,
-        facecolor='#000000',      # pure black background
-        figcolor='#000000',
-        gridcolor='#333333'
+        facecolor='#1e1e1e',      # dark gray background
+        figcolor='#1e1e1e',
+        gridcolor='#444444'
     )
 
     # Color-code demand lines by strength (green = most respected, red = least)
@@ -820,7 +820,6 @@ def generate_zone_chart(df, symbol, zones):
             norm_strengths = [0.5] * len(strengths)  # all same -> middle color
 
         # Use RdYlGn colormap (reversed so that high strength = green, low = red)
-        # Modern syntax to avoid deprecation warning
         colormap = matplotlib.colormaps['RdYlGn_r']
         line_colors = [colormap(norm) for norm in norm_strengths]
         print(f"[DEBUG] Strengths: {strengths}, normalized: {norm_strengths}")
@@ -860,7 +859,15 @@ def generate_zone_chart(df, symbol, zones):
             scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
         )
         if apds:
-            axes[0].legend(loc='upper left', fontsize='small', facecolor='#222222', edgecolor='white', labelcolor='white')
+            # Improved legend: larger font, brighter text, semi‑transparent background
+            axes[0].legend(
+                loc='upper left',
+                fontsize=10,
+                facecolor='#333333',
+                edgecolor='white',
+                labelcolor='white',
+                framealpha=0.8
+            )
         # Style volume subplot
         axes[2].set_ylabel('Volume', color='white')
         axes[2].tick_params(colors='white')
@@ -870,12 +877,11 @@ def generate_zone_chart(df, symbol, zones):
         axes[0].yaxis.label.set_color('white')
         axes[0].xaxis.label.set_color('white')
         # Set facecolor of axes explicitly
-        axes[0].set_facecolor('#000000')
-        axes[2].set_facecolor('#000000')
+        axes[0].set_facecolor('#1e1e1e')
+        axes[2].set_facecolor('#1e1e1e')
 
         # Save to a temporary file and read back
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-            # FIX: s is a dict, so use s['facecolor']
             fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
             # Read the file back into a BytesIO for discord
@@ -2308,7 +2314,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            # Generate and attach the improved zone chart (dark background, color-coded lines)
+            # Generate and attach the improved zone chart (dark gray background, color-coded lines)
             try:
                 chart_buffer = generate_zone_chart(df, symbol, zones)
                 if chart_buffer:
