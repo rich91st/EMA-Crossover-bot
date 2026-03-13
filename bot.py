@@ -694,7 +694,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION
+# CHART GENERATION (standard)
 # ====================
 
 def generate_chart_image(df, symbol, timeframe):
@@ -757,6 +757,72 @@ def generate_chart_image(df, symbol, timeframe):
         return buf
     except Exception as e:
         print(f"⚠️ Chart generation failed for {symbol}: {e}")
+        return None
+
+# ====================
+# NEW: ZONE CHART GENERATION (with demand zones)
+# ====================
+def generate_zone_chart(df, symbol, zones):
+    """Generate a candlestick chart with horizontal lines at demand zone levels."""
+    if len(df) < 20:
+        return None
+
+    # Use last 100 candles for visibility
+    chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(100).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
+
+    volume_all_nan = chart_data['Volume'].isna().all()
+
+    # Create additional plots for each zone (horizontal lines)
+    apds = []
+    colors = ['#00ff00', '#ffff00', '#ff8800', '#ff00ff']  # distinct colors
+    for i, zone in enumerate(zones):
+        level = zone['level']
+        color = colors[i % len(colors)]
+        # Add a horizontal line using a constant array
+        apds.append(mpf.make_addplot([level] * len(chart_data), 
+                                     color=color, 
+                                     width=1.5, 
+                                     linestyle='--',
+                                     label=f"Demand ${level:.2f}"))
+
+    mc = mpf.make_marketcolors(up='#00ff88', down='#ff4d4d', wick='inherit', volume='in')
+    s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False)
+
+    try:
+        if volume_all_nan:
+            fig, axes = mpf.plot(
+                chart_data,
+                type='candle',
+                style=s,
+                addplot=apds,
+                volume=False,
+                figsize=(10,6),
+                returnfig=True,
+                title=f'{symbol} Demand Zones (30min)',
+                tight_layout=True
+            )
+        else:
+            fig, axes = mpf.plot(
+                chart_data,
+                type='candle',
+                style=s,
+                addplot=apds,
+                volume=True,
+                figsize=(10,6),
+                returnfig=True,
+                title=f'{symbol} Demand Zones (30min)',
+                tight_layout=True
+            )
+        if apds:
+            axes[0].legend(loc='upper left')
+        buf = io.BytesIO()
+        fig.savefig(buf, format='PNG', dpi=120, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+        return buf
+    except Exception as e:
+        print(f"⚠️ Zone chart generation failed for {symbol}: {e}")
         return None
 
 # ====================
@@ -1999,7 +2065,7 @@ async def stock_news(ctx, ticker: str, limit: int = 5):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ZONE COMMAND (UPDATED with 30min default)
+# ZONE COMMAND (UPDATED with 30min default and chart)
 # ====================
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
     """
@@ -2038,7 +2104,7 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
 
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = '30min'):
-    """Show support/resistance zones and, for 30min, identify demand zones with option suggestions."""
+    """Show support/resistance zones and, for 30min, identify demand zones with option suggestions and chart."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2165,8 +2231,16 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            embed.set_footer(text="⚠️ Options are risky. This is not financial advice.")
-            await ctx.send(embed=embed)
+            # Generate and attach the zone chart
+            chart_buffer = generate_zone_chart(df, symbol, zones)
+            if chart_buffer:
+                file = discord.File(chart_buffer, filename='zone_chart.png')
+                embed.set_image(url='attachment://zone_chart.png')
+                embed.set_footer(text="⚠️ Options are risky. This is not financial advice.")
+                await ctx.send(embed=embed, file=file)
+            else:
+                embed.set_footer(text="⚠️ Options are risky. This is not financial advice.")
+                await ctx.send(embed=embed)
             return
 
         # --- Existing zone logic for other timeframes (unchanged) ---
@@ -2282,8 +2356,8 @@ async def help_command(ctx):
 
 🎯 **ZONES**
 `!zone SYMBOL [timeframe]` – Show buy/sell zones based on support/resistance and EMAs.
-   • **Default is now 30min** (demand zones + option suggestions if near a zone).
-   • Example: `!zone AAPL` (30min), `!zone AAPL daily` (daily zones).
+   • **Default is now 30min** (demand zones + option suggestions if near a zone, with annotated chart).
+   • Example: `!zone AAPL` (30min with chart), `!zone AAPL daily` (daily zones).
 
 🔥 **OPTIONS FLOW**
 `!flow TICKER` – Check unusual options activity for a specific stock (scans weekly, monthly, primary expirations; includes whale ratings)
@@ -2316,7 +2390,7 @@ async def help_command(ctx):
 💡 **PRO TIPS:**
 • Use `!signals` to scan your whole watchlist for opportunities – now super fast with Alpaca!
 • Use `!signal AAPL` to drill down on a specific symbol.
-• Use `!zone AAPL` (default 30min) to see demand zones and get ITM call suggestions.
+• Use `!zone AAPL` (default 30min) to see demand zones and get ITM call suggestions with a chart.
 • Use `!scanflow` to find explosive options setups before they run (watch for 🐋🐋 whales).
 • Use `!upcoming` to see expected moves on earnings dates.
 • Use `!backtest` to validate your strategy before risking real money.
