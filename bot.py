@@ -37,7 +37,7 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
-NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')          # <-- new
+NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
 
 # Alpaca keys
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
@@ -520,7 +520,7 @@ async def fetch_newsapi_top_headlines():
     params = {
         'apiKey': NEWSAPI_KEY,
         'language': 'en',
-        'country': 'us',           # or leave out for international? We'll use 'us' for broad coverage
+        'country': 'us',
         'pageSize': 10
     }
     timeout = aiohttp.ClientTimeout(total=10)
@@ -540,11 +540,7 @@ async def fetch_newsapi_top_headlines():
 
 async def fetch_analyst_ratings_enhanced(symbol):
     """Fetch analyst ratings with more detail."""
-    # This is a simulated enhanced version - in production you'd use a proper API
-    # For now, we'll return structured data based on recent news
-    # In a real implementation, you'd call a service like TipRanks, MarketBeat, etc.
-    
-    # This is mock data for demonstration - in production, replace with actual API call
+    # Mock data for demonstration
     mock_ratings = {
         'NIO': {
             'ratings': [
@@ -561,18 +557,12 @@ async def fetch_analyst_ratings_enhanced(symbol):
             }
         }
     }
-    
-    # For other symbols, return generic data or fetch from a real source
     if symbol == 'NIO':
         return mock_ratings[symbol]
     return None
 
 async def fetch_company_news_enhanced(symbol):
     """Fetch comprehensive company news from multiple sources."""
-    # This simulates combining multiple news sources
-    # In production, you'd integrate with multiple APIs
-    
-    # Mock data for NIO based on actual recent news
     mock_news = {
         'NIO': [
             {
@@ -617,8 +607,6 @@ async def fetch_company_news_enhanced(symbol):
             }
         ]
     }
-    
-    # Generic fallback for other symbols
     if symbol in mock_news:
         return mock_news[symbol]
     return None
@@ -1152,62 +1140,78 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     return embed
 
 # ====================
-# WORLD NEWS COMMAND (NEW)
+# WORLD NEWS COMMAND (with sentiment analysis)
 # ====================
-# Keyword mapping for impact analysis
+# Enhanced keyword mapping with sentiment (Bullish/Bearish/Neutral)
 IMPACT_KEYWORDS = {
-    'interest rate': ('Financials', 'Banks may see profit changes with rate moves.', ['JPM', 'BAC', 'GS', 'WFC']),
-    'fed': ('Financials', 'Federal Reserve policy affects all interest‑sensitive sectors.', ['JPM', 'BAC', 'GS', 'SPY']),
-    'inflation': ('Economy', 'High inflation can lead to tighter monetary policy.', ['SPY', 'QQQ', 'TLT']),
-    'oil': ('Energy', 'Oil price changes impact drilling and transportation.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'crude': ('Energy', 'Oil price changes impact drilling and transportation.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'opec': ('Energy', 'OPEC decisions affect global oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'gas': ('Energy', 'Natural gas prices affect utility and energy companies.', ['UNG', 'XOM', 'CVX']),
-    'semiconductor': ('Technology', 'Chip demand drives tech sector earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
-    'chip': ('Technology', 'Chip demand drives tech sector earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
-    'nvidia': ('Technology', 'AI and chip demand drives Nvidia and peers.', ['NVDA', 'AMD', 'SMH']),
-    'ai': ('Technology', 'AI investment boosts tech and semiconductor stocks.', ['NVDA', 'MSFT', 'GOOGL', 'AI']),
-    'china': ('China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
-    'beijing': ('China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
-    'tariff': ('Trade', 'Tariffs impact international trade and specific sectors.', ['CAT', 'DE', 'BA']),
-    'trade war': ('Trade', 'Trade tensions affect global markets.', ['SPY', 'EEM', 'BABA']),
-    'retail': ('Consumer', 'Retail sales reflect consumer spending.', ['AMZN', 'WMT', 'TGT', 'XRT']),
-    'consumer': ('Consumer', 'Consumer confidence drives spending.', ['AMZN', 'WMT', 'PG', 'KO']),
-    'jobs': ('Economy', 'Jobs data influence Fed policy and spending.', ['SPY', 'DIA', 'IWM']),
-    'unemployment': ('Economy', 'Jobs data influence Fed policy and spending.', ['SPY', 'DIA', 'IWM']),
-    'housing': ('Housing', 'Housing data affect construction and banks.', ['LEN', 'DHI', 'KBH', 'XHB']),
-    'real estate': ('Real Estate', 'Real estate investment trusts and builders.', ['SPG', 'PLD', 'AMT', 'XLRE']),
-    'bank': ('Financials', 'Bank earnings and health reflect the economy.', ['JPM', 'BAC', 'WFC', 'XLF']),
-    'tech': ('Technology', 'Tech sector sentiment drives growth stocks.', ['QQQ', 'AAPL', 'MSFT', 'GOOGL']),
-    'pharma': ('Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
-    'drug': ('Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
-    'covid': ('Healthcare', 'Pandemic developments affect vaccines and travel.', ['MRNA', 'PFE', 'JNJ', 'CCL']),
-    'travel': ('Travel', 'Travel demand affects airlines, cruises, hotels.', ['AAL', 'DAL', 'CCL', 'MAR']),
-    'airline': ('Travel', 'Airline stocks react to travel demand and fuel costs.', ['AAL', 'DAL', 'UAL', 'LUV']),
-    'auto': ('Automotive', 'Auto sales and EV trends affect carmakers.', ['TSLA', 'F', 'GM', 'NIO']),
-    'ev': ('Electric Vehicles', 'EV adoption drives Tesla and emerging players.', ['TSLA', 'NIO', 'LI', 'XPEV']),
+    # Bullish patterns
+    'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
+    'cuts rates': ('🟢 Bullish', 'Financials', 'Rate cuts stimulate economic growth.', ['SPY', 'QQQ', 'XLF']),
+    'stimulus': ('🟢 Bullish', 'Economy', 'Government stimulus boosts spending and growth.', ['SPY', 'IWM', 'XLY']),
+    'beat earnings': ('🟢 Bullish', 'Earnings', 'Strong earnings indicate company health.', ['SPY', 'QQQ']),
+    'exceeds expectations': ('🟢 Bullish', 'Sentiment', 'Positive surprises drive stock prices higher.', ['SPY', 'QQQ']),
+    'upgrade': ('🟢 Bullish', 'Analysts', 'Analyst upgrades signal confidence.', ['SPY']),
+    'buy rating': ('🟢 Bullish', 'Analysts', 'Buy ratings encourage institutional buying.', ['SPY']),
+    'profit surge': ('🟢 Bullish', 'Financials', 'Rising profits attract investors.', ['SPY']),
+    'record high': ('🟢 Bullish', 'Sentiment', 'All-time highs can lead to momentum buying.', ['SPY']),
+    'job growth': ('🟢 Bullish', 'Economy', 'Strong job market supports consumer spending.', ['XLY', 'SPY']),
+    'unemployment falls': ('🟢 Bullish', 'Economy', 'Lower unemployment signals economic strength.', ['SPY', 'IWM']),
+
+    # Bearish patterns
+    'rate hike': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
+    'hikes rates': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
+    'inflation rises': ('🔴 Bearish', 'Economy', 'High inflation may lead to tighter monetary policy.', ['SPY', 'TLT']),
+    'miss earnings': ('🔴 Bearish', 'Earnings', 'Earnings misses disappoint investors.', ['SPY', 'QQQ']),
+    'downgrade': ('🔴 Bearish', 'Analysts', 'Downgrades can trigger selling.', ['SPY']),
+    'sell rating': ('🔴 Bearish', 'Analysts', 'Sell ratings indicate negative outlook.', ['SPY']),
+    'profit warning': ('🔴 Bearish', 'Financials', 'Profit warnings signal trouble ahead.', ['SPY']),
+    'layoffs': ('🔴 Bearish', 'Economy', 'Layoffs indicate corporate stress.', ['SPY', 'IWM']),
+    'recession': ('🔴 Bearish', 'Economy', 'Recession fears hurt all risk assets.', ['SPY', 'QQQ']),
+    'trade war': ('🔴 Bearish', 'Trade', 'Trade tensions disrupt global supply chains.', ['SPY', 'EEM']),
+    'tariff': ('🔴 Bearish', 'Trade', 'Tariffs increase costs and reduce profits.', ['CAT', 'DE', 'BA']),
+
+    # Sector-specific (can be bullish or bearish depending on context; we'll assign neutral with impact)
+    'oil': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'crude': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'opec': ('⚪ Neutral', 'Energy', 'OPEC decisions impact oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'semiconductor': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
+    'chip': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
+    'nvidia': ('⚪ Neutral', 'Technology', 'Nvidia leads AI and chip sector.', ['NVDA', 'AMD', 'SMH']),
+    'ai': ('⚪ Neutral', 'Technology', 'AI investment boosts tech.', ['NVDA', 'MSFT', 'GOOGL']),
+    'china': ('⚪ Neutral', 'China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
+    'retail': ('⚪ Neutral', 'Consumer', 'Retail sales reflect consumer confidence.', ['AMZN', 'WMT', 'TGT', 'XRT']),
+    'consumer': ('⚪ Neutral', 'Consumer', 'Consumer spending drives economy.', ['AMZN', 'WMT', 'PG', 'KO']),
+    'housing': ('⚪ Neutral', 'Housing', 'Housing data affect builders and banks.', ['LEN', 'DHI', 'KBH', 'XHB']),
+    'real estate': ('⚪ Neutral', 'Real Estate', 'Real estate investment trusts.', ['SPG', 'PLD', 'AMT', 'XLRE']),
+    'bank': ('⚪ Neutral', 'Financials', 'Bank health reflects economic conditions.', ['JPM', 'BAC', 'WFC', 'XLF']),
+    'tech': ('⚪ Neutral', 'Technology', 'Tech sentiment drives growth.', ['QQQ', 'AAPL', 'MSFT', 'GOOGL']),
+    'pharma': ('⚪ Neutral', 'Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
+    'drug': ('⚪ Neutral', 'Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
+    'covid': ('⚪ Neutral', 'Healthcare', 'Pandemic developments affect vaccines and travel.', ['MRNA', 'PFE', 'JNJ', 'CCL']),
+    'travel': ('⚪ Neutral', 'Travel', 'Travel demand affects airlines, cruises, hotels.', ['AAL', 'DAL', 'CCL', 'MAR']),
+    'airline': ('⚪ Neutral', 'Travel', 'Airlines react to travel demand and fuel costs.', ['AAL', 'DAL', 'UAL', 'LUV']),
+    'auto': ('⚪ Neutral', 'Automotive', 'Auto sales and EV trends.', ['TSLA', 'F', 'GM', 'NIO']),
+    'ev': ('⚪ Neutral', 'Electric Vehicles', 'EV adoption drives Tesla and emerging players.', ['TSLA', 'NIO', 'LI', 'XPEV']),
 }
 
 def analyze_news_impact(title, description):
-    """Return impact text and suggested tickers based on keywords."""
+    """Return (sentiment_emoji, impact_text, ticker_list) based on keywords."""
     combined = (title + " " + (description or "")).lower()
-    matched_sectors = set()
-    matched_tickers = set()
-    for keyword, (sector, impact, tickers) in IMPACT_KEYWORDS.items():
+    matched = []
+    for keyword, (sentiment, sector, impact, tickers) in IMPACT_KEYWORDS.items():
         if keyword in combined:
-            matched_sectors.add((sector, impact))
-            matched_tickers.update(tickers)
-    if matched_sectors:
-        # Pick the first matched sector for simplicity
-        sector, impact = next(iter(matched_sectors))
-        ticker_list = ", ".join([f"${t}" for t in list(matched_tickers)[:3]])
-        return f"🔍 **Impact:** {impact}\n📊 **Stocks:** {ticker_list}"
+            matched.append((sentiment, sector, impact, tickers))
+    if matched:
+        # Pick the first matched for simplicity; you could combine if multiple, but keep it simple.
+        sentiment, sector, impact, tickers = matched[0]
+        ticker_str = ", ".join([f"${t}" for t in tickers[:3]])
+        return f"{sentiment} **{sector}:** {impact}\n📊 **Stocks:** {ticker_str}"
     else:
-        return "🔍 May affect broad market sentiment. Check related sectors."
+        return "⚪ **General:** May affect broad market sentiment. Check related sectors.\n📊 **Stocks:** $SPY, $QQQ, $DIA"
 
 @bot.command(name='worldnews')
 async def world_news(ctx):
-    """Get the latest world news with market impact analysis."""
+    """Get the latest world news with market impact analysis and sentiment."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1298,7 +1302,7 @@ async def world_news(ctx):
             await ctx.send("No relevant news found.")
             return
         
-        embed.set_footer(text="This is educational – not financial advice.")
+        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • Not financial advice")
         await ctx.send(embed=embed)
         
     except Exception as e:
