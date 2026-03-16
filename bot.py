@@ -37,6 +37,7 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
+NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')          # <-- new
 
 # Alpaca keys
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
@@ -61,6 +62,9 @@ cancellation_flags = {}
 # ====================
 data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
 CACHE_DURATION = timedelta(minutes=5)
+
+# Add cache for world news
+world_news_cache = {"data": None, "expiry": datetime.min}
 
 # ====================
 # RATE LIMITER (for Twelve Data)
@@ -492,6 +496,48 @@ async def fetch_finnhub_news(symbol):
         print(f"Error fetching Finnhub news for {symbol}: {e}")
         return None
 
+async def fetch_finnhub_general_news():
+    """Fetch general market news from Finnhub (fallback for worldnews)."""
+    url = "https://finnhub.io/api/v1/news"
+    params = {'category': 'general', 'token': FINNHUB_API_KEY}
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception as e:
+        print(f"Error fetching Finnhub general news: {e}")
+        return None
+
+async def fetch_newsapi_top_headlines():
+    """Fetch top headlines from NewsAPI (primary source for worldnews)."""
+    if not NEWSAPI_KEY:
+        return None
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {
+        'apiKey': NEWSAPI_KEY,
+        'language': 'en',
+        'country': 'us',           # or leave out for international? We'll use 'us' for broad coverage
+        'pageSize': 10
+    }
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"NewsAPI error: {resp.status}")
+                    return None
+                data = await resp.json()
+                if data.get('status') != 'ok':
+                    return None
+                return data.get('articles', [])
+    except Exception as e:
+        print(f"Error fetching NewsAPI: {e}")
+        return None
+
 async def fetch_analyst_ratings_enhanced(symbol):
     """Fetch analyst ratings with more detail."""
     # This is a simulated enhanced version - in production you'd use a proper API
@@ -660,6 +706,27 @@ async def fetch_splits_upcoming(symbol, days=14):
                 return data if isinstance(data, list) else []
     except Exception as e:
         print(f"Error fetching splits for {symbol}: {e}")
+        return []
+
+async def fetch_economic_events(days=14):
+    url = "https://finnhub.io/api/v1/calendar/economic"
+    start = datetime.now().strftime('%Y-%m-%d')
+    end = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    params = {
+        'from': start,
+        'to': end,
+        'token': FINNHUB_API_KEY
+    }
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get('economicCalendar', [])
+    except Exception as e:
+        print(f"Error fetching economic calendar: {e}")
         return []
 
 # ====================
@@ -1083,6 +1150,161 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     
     embed.set_footer(text="Data aggregated from multiple sources • Not financial advice")
     return embed
+
+# ====================
+# WORLD NEWS COMMAND (NEW)
+# ====================
+# Keyword mapping for impact analysis
+IMPACT_KEYWORDS = {
+    'interest rate': ('Financials', 'Banks may see profit changes with rate moves.', ['JPM', 'BAC', 'GS', 'WFC']),
+    'fed': ('Financials', 'Federal Reserve policy affects all interest‑sensitive sectors.', ['JPM', 'BAC', 'GS', 'SPY']),
+    'inflation': ('Economy', 'High inflation can lead to tighter monetary policy.', ['SPY', 'QQQ', 'TLT']),
+    'oil': ('Energy', 'Oil price changes impact drilling and transportation.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'crude': ('Energy', 'Oil price changes impact drilling and transportation.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'opec': ('Energy', 'OPEC decisions affect global oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'gas': ('Energy', 'Natural gas prices affect utility and energy companies.', ['UNG', 'XOM', 'CVX']),
+    'semiconductor': ('Technology', 'Chip demand drives tech sector earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
+    'chip': ('Technology', 'Chip demand drives tech sector earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
+    'nvidia': ('Technology', 'AI and chip demand drives Nvidia and peers.', ['NVDA', 'AMD', 'SMH']),
+    'ai': ('Technology', 'AI investment boosts tech and semiconductor stocks.', ['NVDA', 'MSFT', 'GOOGL', 'AI']),
+    'china': ('China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
+    'beijing': ('China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
+    'tariff': ('Trade', 'Tariffs impact international trade and specific sectors.', ['CAT', 'DE', 'BA']),
+    'trade war': ('Trade', 'Trade tensions affect global markets.', ['SPY', 'EEM', 'BABA']),
+    'retail': ('Consumer', 'Retail sales reflect consumer spending.', ['AMZN', 'WMT', 'TGT', 'XRT']),
+    'consumer': ('Consumer', 'Consumer confidence drives spending.', ['AMZN', 'WMT', 'PG', 'KO']),
+    'jobs': ('Economy', 'Jobs data influence Fed policy and spending.', ['SPY', 'DIA', 'IWM']),
+    'unemployment': ('Economy', 'Jobs data influence Fed policy and spending.', ['SPY', 'DIA', 'IWM']),
+    'housing': ('Housing', 'Housing data affect construction and banks.', ['LEN', 'DHI', 'KBH', 'XHB']),
+    'real estate': ('Real Estate', 'Real estate investment trusts and builders.', ['SPG', 'PLD', 'AMT', 'XLRE']),
+    'bank': ('Financials', 'Bank earnings and health reflect the economy.', ['JPM', 'BAC', 'WFC', 'XLF']),
+    'tech': ('Technology', 'Tech sector sentiment drives growth stocks.', ['QQQ', 'AAPL', 'MSFT', 'GOOGL']),
+    'pharma': ('Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
+    'drug': ('Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
+    'covid': ('Healthcare', 'Pandemic developments affect vaccines and travel.', ['MRNA', 'PFE', 'JNJ', 'CCL']),
+    'travel': ('Travel', 'Travel demand affects airlines, cruises, hotels.', ['AAL', 'DAL', 'CCL', 'MAR']),
+    'airline': ('Travel', 'Airline stocks react to travel demand and fuel costs.', ['AAL', 'DAL', 'UAL', 'LUV']),
+    'auto': ('Automotive', 'Auto sales and EV trends affect carmakers.', ['TSLA', 'F', 'GM', 'NIO']),
+    'ev': ('Electric Vehicles', 'EV adoption drives Tesla and emerging players.', ['TSLA', 'NIO', 'LI', 'XPEV']),
+}
+
+def analyze_news_impact(title, description):
+    """Return impact text and suggested tickers based on keywords."""
+    combined = (title + " " + (description or "")).lower()
+    matched_sectors = set()
+    matched_tickers = set()
+    for keyword, (sector, impact, tickers) in IMPACT_KEYWORDS.items():
+        if keyword in combined:
+            matched_sectors.add((sector, impact))
+            matched_tickers.update(tickers)
+    if matched_sectors:
+        # Pick the first matched sector for simplicity
+        sector, impact = next(iter(matched_sectors))
+        ticker_list = ", ".join([f"${t}" for t in list(matched_tickers)[:3]])
+        return f"🔍 **Impact:** {impact}\n📊 **Stocks:** {ticker_list}"
+    else:
+        return "🔍 May affect broad market sentiment. Check related sectors."
+
+@bot.command(name='worldnews')
+async def world_news(ctx):
+    """Get the latest world news with market impact analysis."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send("🌍 Fetching latest world news...")
+        
+        # Check cache
+        now = datetime.now()
+        if world_news_cache["data"] and world_news_cache["expiry"] > now:
+            articles = world_news_cache["data"]
+            source = "cached"
+        else:
+            # Try NewsAPI first
+            articles = await fetch_newsapi_top_headlines()
+            source = "NewsAPI"
+            if not articles:
+                # Fallback to Finnhub general news
+                finnhub_news = await fetch_finnhub_general_news()
+                if finnhub_news:
+                    # Convert to a consistent format
+                    articles = []
+                    for item in finnhub_news[:10]:
+                        articles.append({
+                            'title': item.get('headline', ''),
+                            'description': item.get('summary', ''),
+                            'source': {'name': item.get('source', 'Finnhub')},
+                            'publishedAt': datetime.fromtimestamp(item.get('datetime', 0)).isoformat() if item.get('datetime') else None,
+                            'url': item.get('url', '')
+                        })
+                    source = "Finnhub"
+            if articles:
+                world_news_cache["data"] = articles
+                world_news_cache["expiry"] = now + timedelta(minutes=30)
+        
+        if not articles:
+            await ctx.send("❌ Could not fetch world news at this time.")
+            return
+        
+        embed = discord.Embed(
+            title="🌍 World News – Market Impact",
+            description=f"Top headlines from {source} (updated every 30 min)",
+            color=0x3498db,
+            timestamp=now
+        )
+        
+        count = 0
+        for article in articles[:5]:  # Limit to 5 articles
+            title = article.get('title', 'No title')
+            if '[Removed]' in title:
+                continue
+            description = article.get('description', '') or article.get('summary', '')
+            source_name = article.get('source', {}).get('name', 'Unknown') if isinstance(article.get('source'), dict) else article.get('source', 'Unknown')
+            published = article.get('publishedAt', '')
+            url = article.get('url', '')
+            
+            # Parse time
+            time_ago = "recently"
+            if published:
+                try:
+                    pub_time = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                    delta = now - pub_time
+                    if delta.total_seconds() < 3600:
+                        mins = int(delta.total_seconds() / 60)
+                        time_ago = f"{mins} min ago" if mins > 0 else "just now"
+                    elif delta.total_seconds() < 86400:
+                        hours = int(delta.total_seconds() / 3600)
+                        time_ago = f"{hours} hour ago" if hours == 1 else f"{hours} hours ago"
+                    else:
+                        days = delta.days
+                        time_ago = f"{days} day ago" if days == 1 else f"{days} days ago"
+                except:
+                    pass
+            
+            impact_text = analyze_news_impact(title, description)
+            
+            field_value = f"**Source:** {source_name} | {time_ago}\n{impact_text}"
+            if url:
+                field_value += f"\n[Read more]({url})"
+            
+            embed.add_field(
+                name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}",
+                value=field_value,
+                inline=False
+            )
+            count += 1
+        
+        if count == 0:
+            await ctx.send("No relevant news found.")
+            return
+        
+        embed.set_footer(text="This is educational – not financial advice.")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error fetching world news: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
 # ENHANCED NEWS COMMAND
@@ -2602,77 +2824,152 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND (updated)
+# HELP COMMAND (FIXED – always works, uses embed)
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
+    # Help command bypasses user_busy so it always responds
     try:
-        help_text = """
-**5-13-50 Trading Bot Commands**
-
-📊 **SCAN COMMANDS**
-`!scan all [5min|15min|30min|1h|4h|daily|weekly]` – Scan all watchlist symbols on a single timeframe
-`!scan SYMBOL [timeframe]` – Scan a single symbol on a specific timeframe
-
-🚀 **SIGNAL COMMANDS**
-`!signals` – Scan your ENTIRE watchlist across ALL 7 timeframes (5min, 15min, 30min, 1h, 4h, daily, weekly)
-   • Shows ONE combined report per symbol with best timeframe chart + clean summary
-   • Uses Alpaca for stocks (fast) – no 60‑second waits!
-
-`!signal SYMBOL` – Get a multi‑timeframe report for a single symbol (all 7 timeframes)
-
-📰 **NEWS & EVENTS (ENHANCED)**
-`!news TICKER` – Get comprehensive, actionable news including analyst ratings, product catalysts, institutional activity, and key developments
-`!upcoming [TICKER]` – Show upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)
-
-🎯 **ZONES**
-`!zone SYMBOL [timeframe]` – Show buy/sell zones based on support/resistance and EMAs.
-   • **Default is now 30min** (demand zones + option suggestions if near a zone, with annotated chart).
-   • Example: `!zone AAPL` (30min with chart), `!zone AAPL daily` (daily zones).
-
-🔥 **OPTIONS FLOW**
-`!flow TICKER` – Check unusual options activity for a specific stock (scans weekly, monthly, primary expirations; includes whale ratings)
-`!scanflow` – Scan entire watchlist for unusual options setups (sorts by premium, adds whale ratings)
-
-📈 **BACKTESTING**
-`!backtest SYMBOL [days=365]` – Backtest EMA crossover strategy on historical data
-   • Enters at next day's open, compounds returns, includes transaction costs
-   • Returns win rate, profit factor, max drawdown, and equity curve chart
-
-📋 **WATCHLIST**
-`!add SYMBOL` – Add to watchlist (use `BTC/USD` for crypto)
-`!remove SYMBOL` – Remove from watchlist
-`!list` – Show watchlist
-
-⚙️ **UTILITY**
-`!ping` – Test bot
-`!stopscan` – Stop ongoing scan
-`!help` – This message
-
-⏱️ **TIMEFRAMES (for !scan, !zone, !signal):**
-• `5min` – 5‑minute candles
-• `15min` – 15‑minute candles
-• `30min` – 30‑minute candles (default for !zone)
-• `1h` – 1‑hour candles
-• `4h` – 4‑hour candles
-• `daily` – daily candles
-• `weekly` – weekly candles
-
-💡 **PRO TIPS:**
-• Use `!signals` to scan your whole watchlist for opportunities – now super fast with Alpaca!
-• Use `!signal AAPL` to drill down on a specific symbol.
-• Use `!zone AAPL` (default 30min) to see demand zones and get ITM call suggestions with a chart.
-• Use `!news NIO` to get actionable intelligence including analyst upgrades, product launches, and institutional moves.
-• Use `!scanflow` to find explosive options setups before they run (watch for 🐋🐋 whales).
-• Use `!upcoming` to see expected moves on earnings dates.
-• Use `!backtest` to validate your strategy before risking real money.
-        """
-        await ctx.send(help_text)
-    finally:
-        user_busy[ctx.author.id] = False
+        embed = discord.Embed(
+            title="📚 5-13-50 Trading Bot Commands",
+            description="All commands use the prefix `!`\n\n**🟢 SCAN & SIGNALS**",
+            color=0x3498db
+        )
+        
+        embed.add_field(
+            name="`!scan all [timeframe]`",
+            value="Scan all watchlist symbols on a single timeframe (5min,15min,30min,1h,4h,daily,weekly)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!scan SYMBOL [timeframe]`",
+            value="Scan a single symbol on a specific timeframe",
+            inline=False
+        )
+        embed.add_field(
+            name="`!signals`",
+            value="Scan your ENTIRE watchlist across ALL 7 timeframes (fast, uses Alpaca)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!signal SYMBOL`",
+            value="Multi‑timeframe report for a single symbol",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n📰 NEWS & EVENTS",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!news TICKER`",
+            value="Comprehensive, actionable news (analyst actions, product launches, institutional moves)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!worldnews`",
+            value="Global headlines with market impact analysis and suggested stocks (NEW)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!upcoming [TICKER]`",
+            value="Upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n🎯 ZONES",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!zone SYMBOL [timeframe]`",
+            value="Default 30min – shows demand zones with strength‑colored lines and ITM option suggestions",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n🔥 OPTIONS FLOW",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!flow TICKER`",
+            value="Unusual options activity with whale ratings (🐋🐋 = massive)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!scanflow`",
+            value="Scan watchlist for unusual options setups, sorted by premium",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n📈 BACKTESTING",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!backtest SYMBOL [days=365]`",
+            value="Backtest EMA crossover strategy, returns win rate, profit factor, max drawdown",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n📋 WATCHLIST",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!add SYMBOL`",
+            value="Add stock or crypto (use BTC/USD for crypto)",
+            inline=False
+        )
+        embed.add_field(
+            name="`!remove SYMBOL`",
+            value="Remove from watchlist",
+            inline=False
+        )
+        embed.add_field(
+            name="`!list`",
+            value="Show watchlist",
+            inline=False
+        )
+        
+        embed.add_field(
+            name="\n⚙️ UTILITY",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!ping`",
+            value="Test bot",
+            inline=True
+        )
+        embed.add_field(
+            name="`!stopscan`",
+            value="Stop ongoing scan",
+            inline=True
+        )
+        embed.add_field(
+            name="`!help`",
+            value="This message",
+            inline=True
+        )
+        
+        embed.add_field(
+            name="\n⏱️ TIMEFRAMES",
+            value="5min, 15min, 30min, 1h, 4h, daily, weekly",
+            inline=False
+        )
+        
+        embed.set_footer(text="💡 Pro tip: Use !worldnews to see how global events move markets")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        # Fallback in case embed fails
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan")
+        print(f"Help command error: {e}")
 
 # ====================
 # EVENT HANDLERS
