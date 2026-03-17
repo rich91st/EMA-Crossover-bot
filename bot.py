@@ -61,13 +61,13 @@ cancellation_flags = {}
 # CACHE SETUP
 # ====================
 data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
-CACHE_DURATION = timedelta(minutes=5)
+CACHE_DURATION = timedelta(minutes=10)   # Increased to 10 minutes
 
 # Add cache for world news
 world_news_cache = {"data": None, "expiry": datetime.min}
 
 # ====================
-# RATE LIMITER (for Twelve Data)
+# RATE LIMITERS
 # ====================
 class RateLimiter:
     def __init__(self, max_calls, period):
@@ -87,7 +87,14 @@ class RateLimiter:
                     await asyncio.sleep(sleep_time)
             self.calls.append(now)
 
+# Existing Twelve Data limiter: 8 calls per 60 seconds
 twelvedata_limiter = RateLimiter(max_calls=8, period=60)
+
+# New Finnhub limiter: 60 calls per 60 seconds
+finnhub_limiter = RateLimiter(max_calls=60, period=60)
+
+# New CoinGecko limiter: 30 calls per 60 seconds (conservative)
+coingecko_limiter = RateLimiter(max_calls=30, period=60)
 
 # ====================
 # WEB SERVER
@@ -175,8 +182,61 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING – Alpaca (threaded), then Twelve Data / CoinGecko
+# DATA FETCHING – New multi‑source strategy
 # ====================
+
+async def fetch_finnhub(symbol, timeframe):
+    """Fetch OHLCV from Finnhub (stock primary fallback)."""
+    resolution_map = {
+        '5min': '5',
+        '15min': '15',
+        '30min': '30',
+        '1h': '60',
+        '4h': '240',
+        'daily': 'D',
+        'weekly': 'W'
+    }
+    resolution = resolution_map.get(timeframe)
+    if not resolution:
+        return None
+
+    url = "https://finnhub.io/api/v1/stock/candle"
+    params = {
+        'symbol': symbol,
+        'resolution': resolution,
+        'from': int((datetime.now() - timedelta(days=60)).timestamp()),
+        'to': int(datetime.now().timestamp()),
+        'token': FINNHUB_API_KEY
+    }
+
+    await finnhub_limiter.wait_if_needed()
+
+    timeout = aiohttp.ClientTimeout(total=15)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    print(f"Finnhub error for {symbol}: {resp.status}")
+                    return None
+                data = await resp.json()
+                if data.get('s') != 'ok':
+                    print(f"Finnhub data error for {symbol}: {data}")
+                    return None
+                df = pd.DataFrame({
+                    'timestamp': pd.to_datetime(data['t'], unit='s'),
+                    'open': data['o'],
+                    'high': data['h'],
+                    'low': data['l'],
+                    'close': data['c'],
+                    'volume': data['v']
+                }).set_index('timestamp')
+                return df
+    except asyncio.TimeoutError:
+        print(f"Finnhub timeout for {symbol}")
+        return None
+    except Exception as e:
+        print(f"Finnhub exception for {symbol}: {e}")
+        return None
 
 async def fetch_twelvedata(symbol, timeframe):
     """Fallback: fetch single symbol from Twelve Data."""
@@ -256,6 +316,9 @@ async def fetch_coingecko_ohlc(symbol, timeframe):
 
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {'vs_currency': 'usd', 'days': days}
+
+    await coingecko_limiter.wait_if_needed()
+
     timeout = aiohttp.ClientTimeout(total=15)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -289,9 +352,9 @@ async def fetch_coingecko_price(symbol):
 
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {'ids': coin_id, 'vs_currencies': 'usd'}
-    timeout = aiohttp.ClientTimeout(total=15)
+    await coingecko_limiter.wait_if_needed()
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
                     return None
@@ -322,6 +385,7 @@ async def fetch_coingecko_price(symbol):
         print(f"CoinGecko price exception for {symbol}: {e}")
         return None
 
+# The main fetch function with new fallback order
 async def fetch_ohlcv(symbol, timeframe):
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
@@ -329,21 +393,12 @@ async def fetch_ohlcv(symbol, timeframe):
         return data_cache[cache_key][0]
 
     df = None
-
-    alpaca_tf_map = {
-        '5min': '5Min',
-        '15min': '15Min',
-        '1h': '1H',
-        '4h': '4H',
-        'daily': '1D',
-        'weekly': '1W',
-    }
-    alpaca_tf = alpaca_tf_map.get(timeframe)
+    is_crypto = '/' in symbol
 
     # Special handling for 30min: try to get 15min from Alpaca and resample
-    if timeframe == '30min':
-        # Stocks
-        if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+    if timeframe == '30min' and not is_crypto:
+        # Stocks: try Alpaca 15min resample
+        if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             try:
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
                 request = StockBarsRequest(
@@ -352,13 +407,11 @@ async def fetch_ohlcv(symbol, timeframe):
                     start=now - timedelta(days=60),
                     end=now
                 )
-                # Run synchronous call in thread
                 bars = await asyncio.to_thread(client.get_stock_bars, request)
                 if bars.data:
                     df_15 = bars.df
                     df_15 = df_15.reset_index(level=0, drop=True)
                     df_15.index = pd.to_datetime(df_15.index)
-                    # Resample to 30 minutes
                     df_30 = df_15.resample('30T').agg({
                         'open': 'first',
                         'high': 'max',
@@ -370,53 +423,29 @@ async def fetch_ohlcv(symbol, timeframe):
                         df = df_30
                         print(f"✅ Alpaca 15min resampled to 30min for {symbol}")
             except Exception as e:
-                print(f"⚠️ Alpaca 15min fetch failed for {symbol}, falling back to Twelve Data... {e}")
+                print(f"⚠️ Alpaca 15min fetch failed for {symbol}, trying Finnhub... {e}")
 
-        # If stock still missing or crypto, fallback to Twelve Data (for stocks) or CoinGecko (crypto)
-        if df is None and '/' not in symbol:
-            df = await fetch_twelvedata(symbol, '30min')
+        if df is None:
+            df = await fetch_finnhub(symbol, timeframe)
+        if df is None:
+            df = await fetch_twelvedata(symbol, timeframe)
 
-        if '/' in symbol:
-            # Try Alpaca crypto 15min resample
-            try:
-                client = CryptoHistoricalDataClient()
-                alpaca_symbol = symbol.replace('/', '')
-                request = CryptoBarsRequest(
-                    symbol_or_symbols=alpaca_symbol,
-                    timeframe='15Min',
-                    start=now - timedelta(days=60),
-                    end=now
-                )
-                bars = await asyncio.to_thread(client.get_crypto_bars, request)
-                if bars.data:
-                    df_15 = bars.df
-                    df_15 = df_15.reset_index(level=0, drop=True)
-                    df_15.index = pd.to_datetime(df_15.index)
-                    df_30 = df_15.resample('30T').agg({
-                        'open': 'first',
-                        'high': 'max',
-                        'low': 'min',
-                        'close': 'last',
-                        'volume': 'sum'
-                    }).dropna()
-                    if not df_30.empty:
-                        df = df_30
-                        print(f"✅ Alpaca crypto 15min resampled to 30min for {symbol}")
-            except Exception as e:
-                print(f"⚠️ Alpaca crypto 15min fetch failed for {symbol}, no fallback for 30min crypto.")
-            # No fallback for crypto 30min other than CoinGecko (which may not have 30min)
-            if df is None:
-                df = await fetch_coingecko_ohlc(symbol, timeframe)
-            if df is None:
-                df = await fetch_coingecko_price(symbol)
-
-        if df is not None and not df.empty:
+        if df is not None:
             data_cache[cache_key] = (df, now + CACHE_DURATION)
         return df
 
-    # For other timeframes, use standard logic
-    # Try Alpaca for stocks
-    if '/' not in symbol and ALPACA_API_KEY and ALPACA_SECRET_KEY and alpaca_tf:
+    # For other timeframes, try Alpaca first (stocks)
+    alpaca_tf_map = {
+        '5min': '5Min',
+        '15min': '15Min',
+        '1h': '1H',
+        '4h': '4H',
+        'daily': '1D',
+        'weekly': '1W',
+    }
+    alpaca_tf = alpaca_tf_map.get(timeframe)
+
+    if not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY and alpaca_tf:
         try:
             client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
             request = StockBarsRequest(
@@ -432,15 +461,17 @@ async def fetch_ohlcv(symbol, timeframe):
                 df = df[['open', 'high', 'low', 'close', 'volume']]
                 print(f"✅ Alpaca stock data for {symbol} ({timeframe})")
         except Exception as e:
-            print(f"⚠️ Alpaca stock fetch failed for {symbol}, falling back... {e}")
+            print(f"⚠️ Alpaca stock fetch failed for {symbol}, trying Finnhub... {e}")
             df = None
 
-    # If stock failed, try Twelve Data
-    if df is None and '/' not in symbol:
+    if df is None and not is_crypto:
+        df = await fetch_finnhub(symbol, timeframe)
+
+    if df is None and not is_crypto:
         df = await fetch_twelvedata(symbol, timeframe)
 
-    # For crypto
-    if '/' in symbol:
+    # Crypto handling
+    if is_crypto:
         try:
             if alpaca_tf:
                 client = CryptoHistoricalDataClient()
@@ -458,7 +489,7 @@ async def fetch_ohlcv(symbol, timeframe):
                     df = df[['open', 'high', 'low', 'close', 'volume']]
                     print(f"✅ Alpaca crypto data for {symbol} ({timeframe})")
         except Exception as e:
-            print(f"⚠️ Alpaca crypto fetch failed for {symbol}, falling back to CoinGecko... {e}")
+            print(f"⚠️ Alpaca crypto fetch failed for {symbol}, trying CoinGecko... {e}")
             df = None
 
         if df is None:
@@ -472,11 +503,9 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# ENHANCED NEWS FETCHING – Multiple sources
+# ENHANCED NEWS FETCHING – Multiple sources (unchanged)
 # ====================
-
 async def fetch_finnhub_news(symbol):
-    """Original Finnhub news - kept as fallback."""
     url = "https://finnhub.io/api/v1/company-news"
     params = {
         'symbol': symbol,
@@ -497,7 +526,6 @@ async def fetch_finnhub_news(symbol):
         return None
 
 async def fetch_finnhub_general_news():
-    """Fetch general market news from Finnhub (fallback for worldnews)."""
     url = "https://finnhub.io/api/v1/news"
     params = {'category': 'general', 'token': FINNHUB_API_KEY}
     timeout = aiohttp.ClientTimeout(total=10)
@@ -513,7 +541,6 @@ async def fetch_finnhub_general_news():
         return None
 
 async def fetch_newsapi_top_headlines():
-    """Fetch top headlines from NewsAPI (primary source for worldnews)."""
     if not NEWSAPI_KEY:
         return None
     url = "https://newsapi.org/v2/top-headlines"
@@ -539,8 +566,6 @@ async def fetch_newsapi_top_headlines():
         return None
 
 async def fetch_analyst_ratings_enhanced(symbol):
-    """Fetch analyst ratings with more detail."""
-    # Mock data for demonstration
     mock_ratings = {
         'NIO': {
             'ratings': [
@@ -562,7 +587,6 @@ async def fetch_analyst_ratings_enhanced(symbol):
     return None
 
 async def fetch_company_news_enhanced(symbol):
-    """Fetch comprehensive company news from multiple sources."""
     mock_news = {
         'NIO': [
             {
@@ -612,7 +636,6 @@ async def fetch_company_news_enhanced(symbol):
     return None
 
 async def fetch_stock_price_quick(symbol):
-    """Quick price fetch for news display."""
     try:
         stock = yf.Ticker(symbol)
         data = stock.history(period="1d")
@@ -718,7 +741,7 @@ async def fetch_economic_events(days=14):
         return []
 
 # ====================
-# INDICATOR CALCULATIONS
+# INDICATOR CALCULATIONS (unchanged)
 # ====================
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
@@ -1056,45 +1079,38 @@ def generate_zone_chart(df, symbol, zones):
 # ENHANCED NEWS FORMATTING
 # ====================
 def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, prev_close):
-    """Create a comprehensive news embed with categorized, actionable information."""
-    
     embed = discord.Embed(
         title=f"📰 {symbol} – Market Intelligence",
         description=f"Current: **${current_price:.2f}** | Previous Close: **${prev_close:.2f}**" if current_price and prev_close else f"Current: **${current_price:.2f}**" if current_price else "",
         color=0x3498db,
         timestamp=datetime.now()
     )
-    
-    # Price change indicator
+
     if current_price and prev_close:
         change = current_price - prev_close
         change_pct = (change / prev_close) * 100
         arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
         embed.description += f" | {arrow} {change:+.2f} ({change_pct:+.2f}%)"
-    
-    # Analyst ratings section (most important for trading)
+
     if ratings_data and 'ratings' in ratings_data:
-        recent = ratings_data['ratings'][:3]  # Last 3 ratings
+        recent = ratings_data['ratings'][:3]
         ratings_text = ""
         for r in recent:
             action_symbol = "🟢" if r['action'] == 'Upgrade' or r['rating'] == 'Buy' else "🔴" if r['action'] == 'Downgrade' or r['rating'] == 'Sell' else "⚪"
             pt_text = f" → ${r['pt']}" if 'pt' in r else ""
             ratings_text += f"{action_symbol} **{r['firm']}**: {r['action']} to {r.get('to', r.get('rating', '?'))}{pt_text} ({r['date']})\n"
-        
         if ratings_text:
             embed.add_field(name="📊 Recent Analyst Actions", value=ratings_text, inline=False)
-    
-    # Key developments section
+
     if news_items:
-        # Categorize news
         catalysts = []
         earnings_news = []
         product_news = []
         institutional_news = []
-        
-        for item in news_items[:8]:  # Limit to 8 items
+
+        for item in news_items[:8]:
             if item['type'] == 'analyst':
-                continue  # Already covered in analyst section
+                continue
             elif item['type'] == 'earnings':
                 earnings_news.append(item)
             elif item['type'] == 'product':
@@ -1103,46 +1119,39 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
                 institutional_news.append(item)
             else:
                 catalysts.append(item)
-        
-        # Product catalysts (most actionable)
+
         if product_news:
             product_text = ""
             for item in product_news[:3]:
                 product_text += f"• **{item['title']}**\n  {item['summary'][:150]}...\n"
             embed.add_field(name="🚗 Product Catalysts", value=product_text, inline=False)
-        
-        # Earnings/financial news
+
         if earnings_news:
             earnings_text = ""
             for item in earnings_news[:2]:
                 earnings_text += f"• **{item['title']}**\n  {item['summary'][:150]}...\n"
             embed.add_field(name="💰 Financial Developments", value=earnings_text, inline=False)
-        
-        # Institutional activity
+
         if institutional_news:
             inst_text = ""
             for item in institutional_news[:2]:
                 inst_text += f"• **{item['title']}**\n  {item['summary'][:150]}...\n"
             embed.add_field(name="🏦 Institutional Activity", value=inst_text, inline=False)
-        
-        # Other catalysts
+
         if catalysts:
             other_text = ""
             for item in catalysts[:2]:
                 other_text += f"• **{item['title']}**\n  {item['summary'][:150]}...\n"
             embed.add_field(name="📌 Other Developments", value=other_text, inline=False)
-    
-    # Add TradingView link
+
     web_url = get_tradingview_web_link(symbol)
     embed.add_field(name="📊 TradingView", value=f"[Click here for charts]({web_url})", inline=False)
-    
     embed.set_footer(text="Data aggregated from multiple sources • Not financial advice")
     return embed
 
 # ====================
 # WORLD NEWS COMMAND (with sentiment analysis)
 # ====================
-# Enhanced keyword mapping with sentiment (Bullish/Bearish/Neutral)
 IMPACT_KEYWORDS = {
     # Bullish patterns
     'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
@@ -1170,7 +1179,7 @@ IMPACT_KEYWORDS = {
     'trade war': ('🔴 Bearish', 'Trade', 'Trade tensions disrupt global supply chains.', ['SPY', 'EEM']),
     'tariff': ('🔴 Bearish', 'Trade', 'Tariffs increase costs and reduce profits.', ['CAT', 'DE', 'BA']),
 
-    # Sector-specific (can be bullish or bearish depending on context; we'll assign neutral with impact)
+    # Sector-specific (neutral)
     'oil': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'crude': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'opec': ('⚪ Neutral', 'Energy', 'OPEC decisions impact oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
@@ -1195,14 +1204,12 @@ IMPACT_KEYWORDS = {
 }
 
 def analyze_news_impact(title, description):
-    """Return (sentiment_emoji, impact_text, ticker_list) based on keywords."""
     combined = (title + " " + (description or "")).lower()
     matched = []
     for keyword, (sentiment, sector, impact, tickers) in IMPACT_KEYWORDS.items():
         if keyword in combined:
             matched.append((sentiment, sector, impact, tickers))
     if matched:
-        # Pick the first matched for simplicity; you could combine if multiple, but keep it simple.
         sentiment, sector, impact, tickers = matched[0]
         ticker_str = ", ".join([f"${t}" for t in tickers[:3]])
         return f"{sentiment} **{sector}:** {impact}\n📊 **Stocks:** {ticker_str}"
@@ -1211,27 +1218,22 @@ def analyze_news_impact(title, description):
 
 @bot.command(name='worldnews')
 async def world_news(ctx):
-    """Get the latest world news with market impact analysis and sentiment."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
     try:
         await ctx.send("🌍 Fetching latest world news...")
-        
-        # Check cache
+
         now = datetime.now()
         if world_news_cache["data"] and world_news_cache["expiry"] > now:
             articles = world_news_cache["data"]
             source = "cached"
         else:
-            # Try NewsAPI first
             articles = await fetch_newsapi_top_headlines()
             source = "NewsAPI"
             if not articles:
-                # Fallback to Finnhub general news
                 finnhub_news = await fetch_finnhub_general_news()
                 if finnhub_news:
-                    # Convert to a consistent format
                     articles = []
                     for item in finnhub_news[:10]:
                         articles.append({
@@ -1245,20 +1247,20 @@ async def world_news(ctx):
             if articles:
                 world_news_cache["data"] = articles
                 world_news_cache["expiry"] = now + timedelta(minutes=30)
-        
+
         if not articles:
             await ctx.send("❌ Could not fetch world news at this time.")
             return
-        
+
         embed = discord.Embed(
             title="🌍 World News – Market Impact",
             description=f"Top headlines from {source} (updated every 30 min)",
             color=0x3498db,
             timestamp=now
         )
-        
+
         count = 0
-        for article in articles[:5]:  # Limit to 5 articles
+        for article in articles[:5]:
             title = article.get('title', 'No title')
             if '[Removed]' in title:
                 continue
@@ -1266,8 +1268,7 @@ async def world_news(ctx):
             source_name = article.get('source', {}).get('name', 'Unknown') if isinstance(article.get('source'), dict) else article.get('source', 'Unknown')
             published = article.get('publishedAt', '')
             url = article.get('url', '')
-            
-            # Parse time
+
             time_ago = "recently"
             if published:
                 try:
@@ -1284,27 +1285,26 @@ async def world_news(ctx):
                         time_ago = f"{days} day ago" if days == 1 else f"{days} days ago"
                 except:
                     pass
-            
+
             impact_text = analyze_news_impact(title, description)
-            
             field_value = f"**Source:** {source_name} | {time_ago}\n{impact_text}"
             if url:
                 field_value += f"\n[Read more]({url})"
-            
+
             embed.add_field(
                 name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}",
                 value=field_value,
                 inline=False
             )
             count += 1
-        
+
         if count == 0:
             await ctx.send("No relevant news found.")
             return
-        
+
         embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • Not financial advice")
         await ctx.send(embed=embed)
-        
+
     except Exception as e:
         await ctx.send(f"❌ Error fetching world news: {str(e)}")
     finally:
@@ -1315,51 +1315,46 @@ async def world_news(ctx):
 # ====================
 @bot.command(name='news')
 async def stock_news_enhanced(ctx, ticker: str):
-    """Get comprehensive, actionable news for a stock."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
-    
+
     try:
         now = datetime.now()
         last = last_command_time.get(ctx.author.id)
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-        
+
         symbol = ticker.upper()
         await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
-        
-        # Fetch data concurrently
+
         price_task = fetch_stock_price_quick(symbol)
         ratings_task = fetch_analyst_ratings_enhanced(symbol)
         news_task = fetch_company_news_enhanced(symbol)
         finnhub_task = fetch_finnhub_news(symbol)
-        
-        # Wait for all tasks
+
         price_result, ratings_data, news_data, finnhub_data = await asyncio.gather(
             price_task, ratings_task, news_task, finnhub_task, return_exceptions=True
         )
-        
+
         current_price, prev_close = (None, None)
         if not isinstance(price_result, Exception) and price_result:
             current_price, prev_close = price_result
-        
-        # If enhanced news fails, fall back to original Finnhub news
+
         if (isinstance(news_data, Exception) or not news_data) and not isinstance(finnhub_data, Exception) and finnhub_data:
-            # Fall back to original format
             web_url = get_tradingview_web_link(symbol)
             tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-            
+
             embed = discord.Embed(
                 title=f"Latest News for {symbol} (Legacy)",
                 color=0x3498db,
                 timestamp=datetime.now()
             )
-            
+
             if current_price:
                 embed.description = f"Current Price: **${current_price:.2f}**"
-            
+
             for article in finnhub_data[:5]:
                 headline = article.get('headline', 'No Headline')
                 source = article.get('source', 'Unknown')
@@ -1368,19 +1363,18 @@ async def stock_news_enhanced(ctx, ticker: str):
                 if len(headline) > 256:
                     headline = headline[:253] + "..."
                 embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
-            
+
             embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
             embed.set_footer(text=f"Requested by {ctx.author.display_name} • Limited data")
             await ctx.send(embed=embed)
             return
-        
-        # Use enhanced format
+
         if not isinstance(news_data, Exception) and news_data:
             embed = format_enhanced_news_embed(symbol, news_data, ratings_data, current_price, prev_close)
             await ctx.send(embed=embed)
         else:
             await ctx.send(f"❌ Could not fetch news data for {symbol}.")
-            
+
     except Exception as e:
         await ctx.send(f"❌ Error fetching news: {str(e)}")
     finally:
@@ -2835,14 +2829,13 @@ async def list_watchlist(ctx):
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
-    # Help command bypasses user_busy so it always responds
     try:
         embed = discord.Embed(
             title="📚 5-13-50 Trading Bot Commands",
             description="All commands use the prefix `!`\n\n**🟢 SCAN & SIGNALS**",
             color=0x3498db
         )
-        
+
         embed.add_field(
             name="`!scan all [timeframe]`",
             value="Scan all watchlist symbols on a single timeframe (5min,15min,30min,1h,4h,daily,weekly)",
@@ -2863,7 +2856,7 @@ async def help_command(ctx):
             value="Multi‑timeframe report for a single symbol",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n📰 NEWS & EVENTS",
             value="",
@@ -2884,7 +2877,7 @@ async def help_command(ctx):
             value="Upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n🎯 ZONES",
             value="",
@@ -2895,7 +2888,7 @@ async def help_command(ctx):
             value="Default 30min – shows demand zones with strength‑colored lines and ITM option suggestions",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n🔥 OPTIONS FLOW",
             value="",
@@ -2911,7 +2904,7 @@ async def help_command(ctx):
             value="Scan watchlist for unusual options setups, sorted by premium",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n📈 BACKTESTING",
             value="",
@@ -2922,7 +2915,7 @@ async def help_command(ctx):
             value="Backtest EMA crossover strategy, returns win rate, profit factor, max drawdown",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n📋 WATCHLIST",
             value="",
@@ -2943,7 +2936,7 @@ async def help_command(ctx):
             value="Show watchlist",
             inline=False
         )
-        
+
         embed.add_field(
             name="\n⚙️ UTILITY",
             value="",
@@ -2964,13 +2957,13 @@ async def help_command(ctx):
             value="This message",
             inline=True
         )
-        
+
         embed.add_field(
             name="\n⏱️ TIMEFRAMES",
             value="5min, 15min, 30min, 1h, 4h, daily, weekly",
             inline=False
         )
-        
+
         embed.set_footer(text="💡 Pro tip: Use !worldnews to see how global events move markets")
         await ctx.send(embed=embed)
     except Exception as e:
