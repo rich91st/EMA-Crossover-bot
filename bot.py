@@ -2425,7 +2425,7 @@ async def signal_single(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signals (fast watchlist scan)
+# COMMAND: !signals (fast watchlist scan) – UPDATED with stopscan fix
 # ====================
 @bot.command(name='signals')
 async def signals(ctx):
@@ -2453,12 +2453,13 @@ async def signals(ctx):
         found_any = False
 
         for symbol in symbols:
+            # Check cancellation before starting a new symbol
             if await check_cancel(ctx):
+                await ctx.send("🛑 Scan cancelled after processing the last symbol.")
                 break
 
             for tf in all_timeframes:
-                if await check_cancel(ctx):
-                    break
+                # No cancellation check here – we finish this symbol completely
                 df = await fetch_ohlcv(symbol, tf)
                 if df is not None and not df.empty:
                     df_calc = calculate_indicators(df)
@@ -2477,7 +2478,9 @@ async def signals(ctx):
             await ctx.send(f"📭 No symbols with active signals found.")
 
         cancellation_flags[ctx.author.id] = False
-        await ctx.send(f"✅ Signal scan complete!")
+        # Only send completion if not cancelled
+        if not cancellation_flags.get(ctx.author.id, False):
+            await ctx.send(f"✅ Signal scan complete!")
     finally:
         user_busy[ctx.author.id] = False
 
@@ -3009,7 +3012,7 @@ async def check_cancel(ctx):
 @bot.command(name='stopscan')
 async def stop_scan(ctx):
     cancellation_flags[ctx.author.id] = True
-    await ctx.send("⏹️ Cancelling scan... (will stop after current symbol)")
+    await ctx.send("⏹️ Cancelling scan... (will stop after the current symbol)")
 
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     df_calc = calculate_indicators(df)
