@@ -1649,7 +1649,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER – High Probability First
+# OPTIONS FLOW SCANNER – High Probability First, with length checks
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1764,6 +1764,17 @@ def analyze_expiration(opt_chain, current_price, dte, min_volume=5):
             continue
     return analyzed
 
+def add_field_safe(embed, name, value, inline=False):
+    """Split long text into multiple fields if needed."""
+    if len(value) <= 1024:
+        embed.add_field(name=name, value=value, inline=inline)
+    else:
+        # Split into chunks of 1024 characters
+        chunks = [value[i:i+1024] for i in range(0, len(value), 1024)]
+        for i, chunk in enumerate(chunks):
+            suffix = f" (cont.)" if i > 0 else ""
+            embed.add_field(name=f"{name}{suffix}", value=chunk, inline=inline)
+
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
     if user_busy.get(ctx.author.id):
@@ -1798,40 +1809,37 @@ async def options_flow(ctx, ticker: str):
             analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
             significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:10]  # top 10 per expiration
 
-            # Separate high probability (30-45 DTE, within 20% of money) and lottery (short DTE)
             for opt in significant:
                 if 30 <= dte <= 45 and opt['distance_pct'] <= 20:
                     high_prob_options.append((label, exp_str, dte, opt))
-                elif dte <= 21:  # weekly/monthly
+                elif dte <= 21:
                     lottery_options.append((label, exp_str, dte, opt))
                 else:
-                    # 22-29 DTE – still show but not highlighted
                     lottery_options.append((label, exp_str, dte, opt))
 
-        # Display high probability first
-        if high_prob_options:
-            embed.add_field(name="📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", value="", inline=False)
-            for label, exp_str, dte, opt in high_prob_options[:6]:  # limit to 6
-                strike = f"${opt['strike']:.2f}"
-                whale = get_whale_emoji(opt['raw_premium'])
-                distance = f"{opt['distance_pct']:.1f}% away"
-                prob_est = "High" if opt['distance_pct'] < 10 else "Moderate"
-                desc = (f"{label} ({exp_str}, {dte} days)\n"
-                        f"**{strike} {opt['type']}** – Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  "
-                        f"Premium: {opt['premium']} {whale}\n"
-                        f"   • Distance: {distance} – Probability: {prob_est}")
-                embed.add_field(name="", value=desc, inline=False)
+        # Build high probability text
+        hp_text = ""
+        for label, exp_str, dte, opt in high_prob_options[:6]:
+            strike = f"${opt['strike']:.2f}"
+            whale = get_whale_emoji(opt['raw_premium'])
+            distance = f"{opt['distance_pct']:.1f}% away"
+            prob_est = "High" if opt['distance_pct'] < 10 else "Moderate"
+            hp_text += f"**{strike} {opt['type']}** ({label})\n"
+            hp_text += f"   • Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+            hp_text += f"   • DTE: {dte}  Distance: {distance} – Prob: {prob_est}\n\n"
+        if hp_text:
+            add_field_safe(embed, "📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", hp_text, inline=False)
 
-        # Then lottery picks
-        if lottery_options:
-            embed.add_field(name="🎰 LOTTERY / OTHER ACTIVITY", value="", inline=False)
-            for label, exp_str, dte, opt in lottery_options[:8]:
-                strike = f"${opt['strike']:.2f}"
-                whale = get_whale_emoji(opt['raw_premium'])
-                desc = (f"{label} ({exp_str}, {dte} days)\n"
-                        f"**{strike} {opt['type']}** – Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  "
-                        f"Premium: {opt['premium']} {whale}")
-                embed.add_field(name="", value=desc, inline=False)
+        # Build lottery text
+        lt_text = ""
+        for label, exp_str, dte, opt in lottery_options[:10]:
+            strike = f"${opt['strike']:.2f}"
+            whale = get_whale_emoji(opt['raw_premium'])
+            lt_text += f"**{strike} {opt['type']}** ({label})\n"
+            lt_text += f"   • Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+            lt_text += f"   • DTE: {dte}\n\n"
+        if lt_text:
+            add_field_safe(embed, "🎰 LOTTERY / OTHER ACTIVITY", lt_text, inline=False)
 
         if not high_prob_options and not lottery_options:
             await ctx.send("ℹ️ No significant options activity found for this ticker.")
@@ -1898,7 +1906,7 @@ async def scan_options_flow(ctx):
                                     vol_oi_ratio = volume / oi
                                     if vol_oi_ratio >= 1.5 and volume >= 10:
                                         distance_pct = abs(strike - current_price) / current_price * 100
-                                        if distance_pct <= 20:  # near the money
+                                        if distance_pct <= 20:
                                             premium = volume * 100 * last
                                             all_unusual.append({
                                                 'symbol': symbol,
@@ -1921,11 +1929,9 @@ async def scan_options_flow(ctx):
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
-        # Separate high probability and lottery
         high_prob = [opt for opt in all_unusual if 30 <= opt['dte'] <= 45 and opt['distance'] <= 20]
         lottery = [opt for opt in all_unusual if opt not in high_prob]
 
-        # Sort each group by premium
         high_prob.sort(key=lambda x: x['raw_premium'], reverse=True)
         lottery.sort(key=lambda x: x['raw_premium'], reverse=True)
 
@@ -1939,27 +1945,25 @@ async def scan_options_flow(ctx):
             color=0x00ff00
         )
 
-        # Show high probability first
-        if high_prob:
-            embed.add_field(name="📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", value="", inline=False)
-            hp_text = ""
-            for opt in high_prob[:8]:
-                whale = get_whale_emoji(opt['raw_premium'])
-                hp_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
-                hp_text += f"   • Volume: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
-                hp_text += f"   • DTE: {opt['dte']}  Distance: {opt['distance']:.1f}%\n\n"
-            embed.add_field(name="", value=hp_text, inline=False)
+        # High probability text
+        hp_text = ""
+        for opt in high_prob[:8]:
+            whale = get_whale_emoji(opt['raw_premium'])
+            hp_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
+            hp_text += f"   • Vol: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+            hp_text += f"   • DTE: {opt['dte']}  Distance: {opt['distance']:.1f}%\n\n"
+        if hp_text:
+            add_field_safe(embed, "📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", hp_text, inline=False)
 
-        # Then lottery
-        if lottery:
-            embed.add_field(name="🎰 LOTTERY / OTHER ACTIVITY", value="", inline=False)
-            lt_text = ""
-            for opt in lottery[:10]:
-                whale = get_whale_emoji(opt['raw_premium'])
-                lt_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
-                lt_text += f"   • Volume: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
-                lt_text += f"   • DTE: {opt['dte']}  Distance: {opt['distance']:.1f}%\n\n"
-            embed.add_field(name="", value=lt_text, inline=False)
+        # Lottery text
+        lt_text = ""
+        for opt in lottery[:12]:
+            whale = get_whale_emoji(opt['raw_premium'])
+            lt_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
+            lt_text += f"   • Vol: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+            lt_text += f"   • DTE: {opt['dte']}\n\n"
+        if lt_text:
+            add_field_safe(embed, "🎰 LOTTERY / OTHER ACTIVITY", lt_text, inline=False)
 
         explanation = """
 📊 **WHALE RATINGS:**
