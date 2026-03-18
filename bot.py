@@ -1658,7 +1658,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (ENHANCED with Greeks) – CLEAN LAYOUT
+# OPTIONS FLOW SCANNER (ENHANCED with Greeks) – FIXED to always show options
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1777,7 +1777,7 @@ def greek_emoji(value, greek_name):
         return "⚪"
 
 def analyze_expiration(opt_chain, current_price, min_volume=5):
-    """Return list of significant options with Greeks."""
+    """Return list of significant options with Greeks. Always include options that meet volume criteria."""
     if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
@@ -1805,10 +1805,7 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
             if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
                 continue
 
-            # Skip if all Greeks are zero (probably missing data)
-            if abs(delta) < 0.001 and abs(gamma) < 0.001 and abs(theta) < 0.001 and abs(vega) < 0.001:
-                continue
-
+            # We now include options even if Greeks are zero – the data may be missing but volume is real
             vol_oi_ratio = volume / oi
             premium = volume * 100 * last
             distance_pct = abs(strike - current_price) / current_price * 100
@@ -1887,6 +1884,11 @@ async def options_flow(ctx, ticker: str):
                 table += "```"
                 embed.add_field(name="", value=table, inline=False)
                 all_significant.extend(significant)
+
+        # If no significant options found, send a message
+        if not all_significant:
+            await ctx.send("ℹ️ No significant options activity found for this ticker (may be due to low volume or missing data).")
+            return
 
         # Top lottery picks (short DTE, high vol/OI, reasonable premium)
         lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
@@ -1973,9 +1975,6 @@ async def scan_options_flow(ctx):
                                             theta = opt.get('theta', 0)
                                             vega = opt.get('vega', 0)
                                             iv = opt.get('impliedVolatility', 0) * 100
-                                            # Skip if Greeks all zero
-                                            if abs(delta) < 0.001 and abs(gamma) < 0.001 and abs(theta) < 0.001 and abs(vega) < 0.001:
-                                                continue
                                             all_unusual.append({
                                                 'symbol': symbol,
                                                 'strike': strike,
