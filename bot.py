@@ -1658,7 +1658,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (ENHANCED with Greeks)
+# OPTIONS FLOW SCANNER (ENHANCED with Greeks) – CLEAN LAYOUT
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1805,6 +1805,10 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
             if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
                 continue
 
+            # Skip if all Greeks are zero (probably missing data)
+            if abs(delta) < 0.001 and abs(gamma) < 0.001 and abs(theta) < 0.001 and abs(vega) < 0.001:
+                continue
+
             vol_oi_ratio = volume / oi
             premium = volume * 100 * last
             distance_pct = abs(strike - current_price) / current_price * 100
@@ -1862,20 +1866,18 @@ async def options_flow(ctx, ticker: str):
             significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]  # top 6 per expiration
 
             if significant:
-                # Build table with Greek columns
+                # Build table with Greek columns – cleaner layout
                 table = f"```\n{label} ({exp_str}, {dte} days)\n"
                 table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
                 table += "------  ----  ------  ----  ------  --------  -----  -----   -----   -----   -----   ---\n"
                 for opt in significant:
                     strike = f"${opt['strike']:.2f}"
                     whale = get_whale_emoji(opt['raw_premium'])
-                    # Add Greek emojis
                     delta_emoji = greek_emoji(opt['delta'], 'delta')
                     gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
                     theta_emoji = greek_emoji(opt['theta'], 'theta')
                     vega_emoji = greek_emoji(opt['vega'], 'vega')
                     iv_emoji = greek_emoji(opt['iv'], 'iv')
-                    # Format numbers
                     delta_str = f"{delta_emoji}{opt['delta']:.2f}"
                     gamma_str = f"{gamma_emoji}{opt['gamma']:.3f}"
                     theta_str = f"{theta_emoji}{opt['theta']:.4f}"
@@ -1971,6 +1973,9 @@ async def scan_options_flow(ctx):
                                             theta = opt.get('theta', 0)
                                             vega = opt.get('vega', 0)
                                             iv = opt.get('impliedVolatility', 0) * 100
+                                            # Skip if Greeks all zero
+                                            if abs(delta) < 0.001 and abs(gamma) < 0.001 and abs(theta) < 0.001 and abs(vega) < 0.001:
+                                                continue
                                             all_unusual.append({
                                                 'symbol': symbol,
                                                 'strike': strike,
@@ -2010,14 +2015,13 @@ async def scan_options_flow(ctx):
             color=0x00ff00
         )
 
-        # Build table with Greek columns
+        # Build table with Greek columns – cleaner layout
         table = "```\n"
         table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
         table += "------  ------  ---  ------  ---  ------  --------  -----  -----   -----   -----   -----   ---\n"
         top_overall = []
         for opt in all_unusual[:15]:  # show top 15
             whale = get_whale_emoji(opt['raw_premium'])
-            # Add Greek emojis
             delta_emoji = greek_emoji(opt['delta'], 'delta')
             gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
             theta_emoji = greek_emoji(opt['theta'], 'theta')
