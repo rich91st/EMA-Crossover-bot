@@ -177,11 +177,10 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING – New multi‑source strategy
+# DATA FETCHING – Multi-source strategy
 # ====================
 
 async def fetch_finnhub(symbol, timeframe):
-    """Fetch OHLCV from Finnhub (stock primary fallback)."""
     resolution_map = {
         '5min': '5',
         '15min': '15',
@@ -234,7 +233,6 @@ async def fetch_finnhub(symbol, timeframe):
         return None
 
 async def fetch_twelvedata(symbol, timeframe):
-    """Fallback: fetch single symbol from Twelve Data."""
     interval_map = {
         '5min': '5min', '15min': '15min', '30min': '30min',
         '1h': '1h', '4h': '4h', 'daily': '1day', 'weekly': '1week'
@@ -380,7 +378,6 @@ async def fetch_coingecko_price(symbol):
         print(f"CoinGecko price exception for {symbol}: {e}")
         return None
 
-# The main fetch function with new fallback order
 async def fetch_ohlcv(symbol, timeframe):
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
@@ -391,7 +388,6 @@ async def fetch_ohlcv(symbol, timeframe):
     is_crypto = '/' in symbol
 
     if timeframe == '30min' and not is_crypto:
-        # Stocks: try Alpaca 15min resample
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             try:
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
@@ -495,7 +491,7 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# ENHANCED NEWS FETCHING (unchanged, kept for brevity)
+# ENHANCED NEWS FETCHING
 # ====================
 async def fetch_finnhub_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
@@ -733,7 +729,7 @@ async def fetch_economic_events(days=14):
         return []
 
 # ====================
-# INDICATOR CALCULATIONS (unchanged)
+# INDICATOR CALCULATIONS
 # ====================
 def calculate_indicators(df):
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
@@ -845,7 +841,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (standard) – dark background
+# CHART GENERATION – dark background
 # ====================
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
@@ -1128,7 +1124,6 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
 # WORLD NEWS COMMAND (with sentiment analysis)
 # ====================
 IMPACT_KEYWORDS = {
-    # Bullish patterns
     'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
     'cuts rates': ('🟢 Bullish', 'Financials', 'Rate cuts stimulate economic growth.', ['SPY', 'QQQ', 'XLF']),
     'stimulus': ('🟢 Bullish', 'Economy', 'Government stimulus boosts spending and growth.', ['SPY', 'IWM', 'XLY']),
@@ -1140,8 +1135,6 @@ IMPACT_KEYWORDS = {
     'record high': ('🟢 Bullish', 'Sentiment', 'All-time highs can lead to momentum buying.', ['SPY']),
     'job growth': ('🟢 Bullish', 'Economy', 'Strong job market supports consumer spending.', ['XLY', 'SPY']),
     'unemployment falls': ('🟢 Bullish', 'Economy', 'Lower unemployment signals economic strength.', ['SPY', 'IWM']),
-
-    # Bearish patterns
     'rate hike': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
     'hikes rates': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
     'inflation rises': ('🔴 Bearish', 'Economy', 'High inflation may lead to tighter monetary policy.', ['SPY', 'TLT']),
@@ -1153,8 +1146,6 @@ IMPACT_KEYWORDS = {
     'recession': ('🔴 Bearish', 'Economy', 'Recession fears hurt all risk assets.', ['SPY', 'QQQ']),
     'trade war': ('🔴 Bearish', 'Trade', 'Trade tensions disrupt global supply chains.', ['SPY', 'EEM']),
     'tariff': ('🔴 Bearish', 'Trade', 'Tariffs increase costs and reduce profits.', ['CAT', 'DE', 'BA']),
-
-    # Sector-specific (neutral)
     'oil': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'crude': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'opec': ('⚪ Neutral', 'Energy', 'OPEC decisions impact oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
@@ -1356,7 +1347,7 @@ async def stock_news_enhanced(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# EMBED FORMATTING (original, kept for compatibility)
+# EMBED FORMATTING (original)
 # ====================
 def format_embed(symbol, signals, timeframe):
     if not signals:
@@ -1519,7 +1510,7 @@ def format_zone_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# COMBINED SYMBOL REPORT FUNCTIONS (unchanged)
+# COMBINED SYMBOL REPORT FUNCTIONS
 # ====================
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     timeframe_priority = {
@@ -1658,7 +1649,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (ENHANCED with Greeks) – FIXED to always show options
+# OPTIONS FLOW SCANNER (CLEAN, NO GREEKS)
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1681,19 +1672,16 @@ def get_key_expirations(ticker):
         exp_dates = [datetime.strptime(e, '%Y-%m-%d').date() for e in expirations]
 
         key_exps = []
-        # Find nearest weekly (0-7 DTE)
         for exp_date, exp_str in zip(exp_dates, expirations):
             dte = (exp_date - today).days
             if 0 <= dte <= 7:
                 key_exps.append((exp_str, dte, "🔥 WEEKLY (0-7 DTE)"))
                 break
-        # Find next weekly (8-21 DTE)
         for exp_date, exp_str in zip(exp_dates, expirations):
             dte = (exp_date - today).days
             if 8 <= dte <= 21:
                 key_exps.append((exp_str, dte, "💎 MONTHLY (8-21 DTE)"))
                 break
-        # Find 30-45 DTE
         best_exp = None
         best_dte = None
         min_diff = float('inf')
@@ -1733,51 +1721,7 @@ def get_whale_emoji(premium):
     else:
         return "🐟"
 
-def greek_emoji(value, greek_name):
-    """
-    Return a color emoji based on the Greek value.
-    Thresholds for a pro trader (buying calls).
-    """
-    if greek_name == 'delta':
-        if value > 0.60:
-            return "🟢"
-        elif value > 0.30:
-            return "🟡"
-        else:
-            return "🔴"
-    elif greek_name == 'gamma':
-        if value > 0.10:
-            return "🟢"
-        elif value > 0.05:
-            return "🟡"
-        else:
-            return "🔴"
-    elif greek_name == 'theta':
-        if value > -0.01:
-            return "🟢"
-        elif value > -0.03:
-            return "🟡"
-        else:
-            return "🔴"
-    elif greek_name == 'vega':
-        if value > 0.10:
-            return "🟢"
-        elif value > 0.05:
-            return "🟡"
-        else:
-            return "🔴"
-    elif greek_name == 'iv':
-        if value < 30:
-            return "🟢"
-        elif value < 60:
-            return "🟡"
-        else:
-            return "🔴"
-    else:
-        return "⚪"
-
 def analyze_expiration(opt_chain, current_price, min_volume=5):
-    """Return list of significant options with Greeks. Always include options that meet volume criteria."""
     if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
@@ -1796,16 +1740,10 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
             strike = opt.get('strike', 0)
             last = opt.get('lastPrice', 0)
             opt_type = opt.get('type', 'CALL')
-            gamma = opt.get('gamma', 0)
-            delta = opt.get('delta', 0)
-            theta = opt.get('theta', 0)
-            vega = opt.get('vega', 0)
-            iv = opt.get('impliedVolatility', 0) * 100  # convert to percent
 
             if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
                 continue
 
-            # We now include options even if Greeks are zero – the data may be missing but volume is real
             vol_oi_ratio = volume / oi
             premium = volume * 100 * last
             distance_pct = abs(strike - current_price) / current_price * 100
@@ -1820,11 +1758,6 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
                 'premium': format_premium(volume, last),
                 'raw_premium': premium,
                 'distance_pct': distance_pct,
-                'gamma': gamma,
-                'delta': delta,
-                'theta': theta,
-                'vega': vega,
-                'iv': iv
             })
         except:
             continue
@@ -1832,7 +1765,6 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    """Enhanced options flow – scans multiple expirations, adds whale ratings and Greeks."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1860,37 +1792,24 @@ async def options_flow(ctx, ticker: str):
             opt_chain = stock.option_chain(exp_str)
             analyzed = analyze_expiration(opt_chain, current_price)
             analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]  # top 6 per expiration
+            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]
 
             if significant:
-                # Build table with Greek columns – cleaner layout
                 table = f"```\n{label} ({exp_str}, {dte} days)\n"
-                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
-                table += "------  ----  ------  ----  ------  --------  -----  -----   -----   -----   -----   ---\n"
+                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE\n"
+                table += "------  ----  ------  ----  ------  --------  -----\n"
                 for opt in significant:
                     strike = f"${opt['strike']:.2f}"
                     whale = get_whale_emoji(opt['raw_premium'])
-                    delta_emoji = greek_emoji(opt['delta'], 'delta')
-                    gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
-                    theta_emoji = greek_emoji(opt['theta'], 'theta')
-                    vega_emoji = greek_emoji(opt['vega'], 'vega')
-                    iv_emoji = greek_emoji(opt['iv'], 'iv')
-                    delta_str = f"{delta_emoji}{opt['delta']:.2f}"
-                    gamma_str = f"{gamma_emoji}{opt['gamma']:.3f}"
-                    theta_str = f"{theta_emoji}{opt['theta']:.4f}"
-                    vega_str = f"{vega_emoji}{opt['vega']:.4f}"
-                    iv_str = f"{iv_emoji}{opt['iv']:.0f}%"
-                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale:5}  {delta_str:6} {gamma_str:6} {theta_str:7} {vega_str:6} {iv_str:5}\n"
+                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
                 table += "```"
                 embed.add_field(name="", value=table, inline=False)
                 all_significant.extend(significant)
 
-        # If no significant options found, send a message
         if not all_significant:
-            await ctx.send("ℹ️ No significant options activity found for this ticker (may be due to low volume or missing data).")
+            await ctx.send("ℹ️ No significant options activity found for this ticker.")
             return
 
-        # Top lottery picks (short DTE, high vol/OI, reasonable premium)
         lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
         lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
         if lottery:
@@ -1910,10 +1829,7 @@ async def options_flow(ctx, ticker: str):
 • 🐬 = $10K–$100K (notable)
 • 🐟 = <$10K (small)
 
-📊 **GREEK COLOR GUIDE:**
-🟢 = Good / Favorable
-🟡 = Neutral / Moderate
-🔴 = Bad / Unfavorable
+💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
         """
         embed.add_field(name="", value=explanation, inline=False)
 
@@ -1926,7 +1842,6 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    """Scan watchlist for unusual options activity across key expirations, with whale ratings and Greeks."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1968,13 +1883,8 @@ async def scan_options_flow(ctx):
                                     vol_oi_ratio = volume / oi
                                     if vol_oi_ratio >= 1.5 and volume >= 10:
                                         distance_pct = abs(strike - current_price) / current_price * 100
-                                        if distance_pct <= 20:  # near the money
+                                        if distance_pct <= 20:
                                             premium = volume * 100 * last
-                                            delta = opt.get('delta', 0)
-                                            gamma = opt.get('gamma', 0)
-                                            theta = opt.get('theta', 0)
-                                            vega = opt.get('vega', 0)
-                                            iv = opt.get('impliedVolatility', 0) * 100
                                             all_unusual.append({
                                                 'symbol': symbol,
                                                 'strike': strike,
@@ -1987,21 +1897,15 @@ async def scan_options_flow(ctx):
                                                 'premium': format_premium(volume, last),
                                                 'raw_premium': premium,
                                                 'distance': distance_pct,
-                                                'label': label,
-                                                'delta': delta,
-                                                'gamma': gamma,
-                                                'theta': theta,
-                                                'vega': vega,
-                                                'iv': iv
+                                                'label': label
                                             })
                             except:
                                 continue
-                await asyncio.sleep(2)  # be gentle to yfinance
+                await asyncio.sleep(2)
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
-        # Sort by premium (largest first)
         all_unusual.sort(key=lambda x: x['raw_premium'], reverse=True)
 
         if not all_unusual:
@@ -2014,37 +1918,24 @@ async def scan_options_flow(ctx):
             color=0x00ff00
         )
 
-        # Build table with Greek columns – cleaner layout
         table = "```\n"
-        table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
-        table += "------  ------  ---  ------  ---  ------  --------  -----  -----   -----   -----   -----   ---\n"
+        table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE\n"
+        table += "------  ------  ---  ------  ---  ------  --------  -----\n"
         top_overall = []
-        for opt in all_unusual[:15]:  # show top 15
+        for opt in all_unusual[:15]:
             whale = get_whale_emoji(opt['raw_premium'])
-            delta_emoji = greek_emoji(opt['delta'], 'delta')
-            gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
-            theta_emoji = greek_emoji(opt['theta'], 'theta')
-            vega_emoji = greek_emoji(opt['vega'], 'vega')
-            iv_emoji = greek_emoji(opt['iv'], 'iv')
-            delta_str = f"{delta_emoji}{opt['delta']:.2f}"
-            gamma_str = f"{gamma_emoji}{opt['gamma']:.3f}"
-            theta_str = f"{theta_emoji}{opt['theta']:.4f}"
-            vega_str = f"{vega_emoji}{opt['vega']:.4f}"
-            iv_str = f"{iv_emoji}{opt['iv']:.0f}%"
-            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale:5}  {delta_str:6} {gamma_str:6} {theta_str:7} {vega_str:6} {iv_str:5}\n"
+            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
             top_overall.append(opt)
         table += "```"
         embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
 
-        # Top 3 setups by premium
         if top_overall:
             picks = "**🏆 TOP 3 BY PREMIUM:**\n\n"
             for i, pick in enumerate(top_overall[:3]):
-                target = pick['strike'] * 1.20  # simple target for calls
+                target = pick['strike'] * 1.20
                 picks += f"{i+1}. **{pick['symbol']} ${pick['strike']:.2f} CALL** ({pick['label']})\n"
                 picks += f"   • Volume: {pick['volume']} ({pick['ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}  Target: ${target:.2f}\n"
-                picks += f"   • Delta: {pick['delta']:.2f}  Gamma: {pick['gamma']:.3f}  Theta: {pick['theta']:.4f}  IV: {pick['iv']:.0f}%\n\n"
+                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}  Target: ${target:.2f}\n\n"
             embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
 
         explanation = """
@@ -2054,10 +1945,7 @@ async def scan_options_flow(ctx):
 • 🐬 = $10K–$100K (notable)
 • 🐟 = <$10K (small)
 
-📊 **GREEK COLOR GUIDE:**
-🟢 = Good / Favorable
-🟡 = Neutral / Moderate
-🔴 = Bad / Unfavorable
+💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
         """
         embed.add_field(name="", value=explanation, inline=False)
 
@@ -2069,9 +1957,8 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPCOMING COMMAND (ENHANCED with expected move)
+# UPCOMING COMMAND
 # ====================
-
 async def get_earnings_stats(symbol, earnings_date):
     try:
         stock = yf.Ticker(symbol)
@@ -2317,7 +2204,7 @@ async def upcoming_events(ctx, ticker: str = None):
         user_busy[ctx.author.id] = False
 
 # ====================
-# BACKTESTING COMMAND (unchanged)
+# BACKTESTING COMMAND
 # ====================
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
@@ -2472,7 +2359,7 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signal (single symbol multi-timeframe report)
+# COMMAND: !signal
 # ====================
 @bot.command(name='signal')
 async def signal_single(ctx, ticker: str):
@@ -2507,7 +2394,7 @@ async def signal_single(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signals (fast watchlist scan) – UPDATED with stopscan fix
+# COMMAND: !signals
 # ====================
 @bot.command(name='signals')
 async def signals(ctx):
@@ -2535,7 +2422,6 @@ async def signals(ctx):
         found_any = False
 
         for symbol in symbols:
-            # Check cancellation before starting a new symbol
             if await check_cancel(ctx):
                 await ctx.send("🛑 Scan cancelled after processing the last symbol.")
                 break
@@ -2565,7 +2451,7 @@ async def signals(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !scan (single timeframe scan)
+# COMMAND: !scan
 # ====================
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
@@ -2640,7 +2526,7 @@ async def scan(ctx, target='all', timeframe='daily'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ZONE COMMAND (UPDATED with 30min default)
+# ZONE COMMAND
 # ====================
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
     if len(df) < 50:
@@ -2829,7 +2715,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# WATCHLIST COMMANDS (unchanged)
+# WATCHLIST COMMANDS
 # ====================
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
@@ -2899,7 +2785,7 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND (FIXED – always works, uses embed)
+# HELP COMMAND
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
@@ -2943,7 +2829,7 @@ async def help_command(ctx):
         )
         embed.add_field(
             name="`!worldnews`",
-            value="Global headlines with market impact analysis and suggested stocks (NEW)",
+            value="Global headlines with market impact analysis and suggested stocks",
             inline=False
         )
         embed.add_field(
@@ -2964,18 +2850,18 @@ async def help_command(ctx):
         )
 
         embed.add_field(
-            name="\n🔥 OPTIONS FLOW (with Greeks)",
+            name="\n🔥 OPTIONS FLOW",
             value="",
             inline=False
         )
         embed.add_field(
             name="`!flow TICKER`",
-            value="Unusual options activity with whale ratings and Greek color codes (🟢 good, 🔴 bad)",
+            value="Unusual options activity with whale ratings",
             inline=False
         )
         embed.add_field(
             name="`!scanflow`",
-            value="Scan watchlist for unusual options setups, sorted by premium, with Greeks",
+            value="Scan watchlist for unusual options setups, sorted by premium",
             inline=False
         )
 
