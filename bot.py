@@ -1649,7 +1649,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (CLEAN, NO GREEKS)
+# OPTIONS FLOW SCANNER – High Probability First
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1721,7 +1721,7 @@ def get_whale_emoji(premium):
     else:
         return "🐟"
 
-def analyze_expiration(opt_chain, current_price, min_volume=5):
+def analyze_expiration(opt_chain, current_price, dte, min_volume=5):
     if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
@@ -1758,6 +1758,7 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
                 'premium': format_premium(volume, last),
                 'raw_premium': premium,
                 'distance_pct': distance_pct,
+                'dte': dte
             })
         except:
             continue
@@ -1788,39 +1789,53 @@ async def options_flow(ctx, ticker: str):
         )
 
         all_significant = []
+        high_prob_options = []
+        lottery_options = []
+
         for exp_str, dte, label in key_exps:
             opt_chain = stock.option_chain(exp_str)
-            analyzed = analyze_expiration(opt_chain, current_price)
+            analyzed = analyze_expiration(opt_chain, current_price, dte)
             analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]
+            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:10]  # top 10 per expiration
 
-            if significant:
-                table = f"```\n{label} ({exp_str}, {dte} days)\n"
-                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE\n"
-                table += "------  ----  ------  ----  ------  --------  -----\n"
-                for opt in significant:
-                    strike = f"${opt['strike']:.2f}"
-                    whale = get_whale_emoji(opt['raw_premium'])
-                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
-                table += "```"
-                embed.add_field(name="", value=table, inline=False)
-                all_significant.extend(significant)
+            # Separate high probability (30-45 DTE, within 20% of money) and lottery (short DTE)
+            for opt in significant:
+                if 30 <= dte <= 45 and opt['distance_pct'] <= 20:
+                    high_prob_options.append((label, exp_str, dte, opt))
+                elif dte <= 21:  # weekly/monthly
+                    lottery_options.append((label, exp_str, dte, opt))
+                else:
+                    # 22-29 DTE – still show but not highlighted
+                    lottery_options.append((label, exp_str, dte, opt))
 
-        if not all_significant:
+        # Display high probability first
+        if high_prob_options:
+            embed.add_field(name="📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", value="", inline=False)
+            for label, exp_str, dte, opt in high_prob_options[:6]:  # limit to 6
+                strike = f"${opt['strike']:.2f}"
+                whale = get_whale_emoji(opt['raw_premium'])
+                distance = f"{opt['distance_pct']:.1f}% away"
+                prob_est = "High" if opt['distance_pct'] < 10 else "Moderate"
+                desc = (f"{label} ({exp_str}, {dte} days)\n"
+                        f"**{strike} {opt['type']}** – Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  "
+                        f"Premium: {opt['premium']} {whale}\n"
+                        f"   • Distance: {distance} – Probability: {prob_est}")
+                embed.add_field(name="", value=desc, inline=False)
+
+        # Then lottery picks
+        if lottery_options:
+            embed.add_field(name="🎰 LOTTERY / OTHER ACTIVITY", value="", inline=False)
+            for label, exp_str, dte, opt in lottery_options[:8]:
+                strike = f"${opt['strike']:.2f}"
+                whale = get_whale_emoji(opt['raw_premium'])
+                desc = (f"{label} ({exp_str}, {dte} days)\n"
+                        f"**{strike} {opt['type']}** – Vol: {opt['volume']} ({opt['vol_oi_ratio']:.1f}x)  "
+                        f"Premium: {opt['premium']} {whale}")
+                embed.add_field(name="", value=desc, inline=False)
+
+        if not high_prob_options and not lottery_options:
             await ctx.send("ℹ️ No significant options activity found for this ticker.")
             return
-
-        lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
-        lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
-        if lottery:
-            picks_text = "**🎰 LOTTERY PICKS (short DTE, high ratio):**\n"
-            for i, pick in enumerate(lottery[:3]):
-                target = pick['strike'] * 1.20 if pick['type'] == 'CALL' else pick['strike'] * 0.80
-                entry_price = current_price * 1.01 if pick['type'] == 'CALL' else current_price * 0.99
-                picks_text += f"\n**{i+1}. ${pick['strike']:.2f} {pick['type']}**\n"
-                picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks_text += f"   • Entry: Above ${entry_price:.2f}  Target: ${target:.2f}\n"
-            embed.add_field(name="🔥 HIGH RISK / HIGH REWARD", value=picks_text, inline=False)
 
         explanation = """
 📊 **WHALE RATINGS:**
@@ -1829,7 +1844,7 @@ async def options_flow(ctx, ticker: str):
 • 🐬 = $10K–$100K (notable)
 • 🐟 = <$10K (small)
 
-💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
+💡 **TIP:** Focus on **High Probability Setups** (30-45 DTE, within 20% of money) for consistent wins.
         """
         embed.add_field(name="", value=explanation, inline=False)
 
@@ -1883,7 +1898,7 @@ async def scan_options_flow(ctx):
                                     vol_oi_ratio = volume / oi
                                     if vol_oi_ratio >= 1.5 and volume >= 10:
                                         distance_pct = abs(strike - current_price) / current_price * 100
-                                        if distance_pct <= 20:
+                                        if distance_pct <= 20:  # near the money
                                             premium = volume * 100 * last
                                             all_unusual.append({
                                                 'symbol': symbol,
@@ -1906,7 +1921,13 @@ async def scan_options_flow(ctx):
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
-        all_unusual.sort(key=lambda x: x['raw_premium'], reverse=True)
+        # Separate high probability and lottery
+        high_prob = [opt for opt in all_unusual if 30 <= opt['dte'] <= 45 and opt['distance'] <= 20]
+        lottery = [opt for opt in all_unusual if opt not in high_prob]
+
+        # Sort each group by premium
+        high_prob.sort(key=lambda x: x['raw_premium'], reverse=True)
+        lottery.sort(key=lambda x: x['raw_premium'], reverse=True)
 
         if not all_unusual:
             await ctx.send("📭 No unusual options activity detected in your watchlist.")
@@ -1918,25 +1939,27 @@ async def scan_options_flow(ctx):
             color=0x00ff00
         )
 
-        table = "```\n"
-        table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE\n"
-        table += "------  ------  ---  ------  ---  ------  --------  -----\n"
-        top_overall = []
-        for opt in all_unusual[:15]:
-            whale = get_whale_emoji(opt['raw_premium'])
-            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
-            top_overall.append(opt)
-        table += "```"
-        embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
+        # Show high probability first
+        if high_prob:
+            embed.add_field(name="📈 HIGH PROBABILITY SETUPS (30-45 DTE, Near Money)", value="", inline=False)
+            hp_text = ""
+            for opt in high_prob[:8]:
+                whale = get_whale_emoji(opt['raw_premium'])
+                hp_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
+                hp_text += f"   • Volume: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+                hp_text += f"   • DTE: {opt['dte']}  Distance: {opt['distance']:.1f}%\n\n"
+            embed.add_field(name="", value=hp_text, inline=False)
 
-        if top_overall:
-            picks = "**🏆 TOP 3 BY PREMIUM:**\n\n"
-            for i, pick in enumerate(top_overall[:3]):
-                target = pick['strike'] * 1.20
-                picks += f"{i+1}. **{pick['symbol']} ${pick['strike']:.2f} CALL** ({pick['label']})\n"
-                picks += f"   • Volume: {pick['volume']} ({pick['ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}  Target: ${target:.2f}\n\n"
-            embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
+        # Then lottery
+        if lottery:
+            embed.add_field(name="🎰 LOTTERY / OTHER ACTIVITY", value="", inline=False)
+            lt_text = ""
+            for opt in lottery[:10]:
+                whale = get_whale_emoji(opt['raw_premium'])
+                lt_text += f"**{opt['symbol']} ${opt['strike']:.2f} CALL** ({opt['label']})\n"
+                lt_text += f"   • Volume: {opt['volume']} ({opt['ratio']:.1f}x)  Premium: {opt['premium']} {whale}\n"
+                lt_text += f"   • DTE: {opt['dte']}  Distance: {opt['distance']:.1f}%\n\n"
+            embed.add_field(name="", value=lt_text, inline=False)
 
         explanation = """
 📊 **WHALE RATINGS:**
@@ -1945,7 +1968,7 @@ async def scan_options_flow(ctx):
 • 🐬 = $10K–$100K (notable)
 • 🐟 = <$10K (small)
 
-💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
+💡 **TIP:** Focus on **High Probability Setups** (30-45 DTE, within 20% of money) for consistent wins.
         """
         embed.add_field(name="", value=explanation, inline=False)
 
@@ -2856,12 +2879,12 @@ async def help_command(ctx):
         )
         embed.add_field(
             name="`!flow TICKER`",
-            value="Unusual options activity with whale ratings",
+            value="Unusual options activity – high probability setups first",
             inline=False
         )
         embed.add_field(
             name="`!scanflow`",
-            value="Scan watchlist for unusual options setups, sorted by premium",
+            value="Scan watchlist for unusual options – high probability first",
             inline=False
         )
 
@@ -2924,7 +2947,7 @@ async def help_command(ctx):
             inline=False
         )
 
-        embed.set_footer(text="💡 Pro tip: Use !worldnews to see how global events move markets")
+        embed.set_footer(text="💡 Pro tip: Focus on High Probability Setups (30-45 DTE, near money) for consistent wins")
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan")
