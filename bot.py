@@ -61,7 +61,7 @@ cancellation_flags = {}
 # CACHE SETUP
 # ====================
 data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
-CACHE_DURATION = timedelta(minutes=10)   # Increased to 10 minutes
+CACHE_DURATION = timedelta(minutes=10)
 
 # Add cache for world news
 world_news_cache = {"data": None, "expiry": datetime.min}
@@ -87,13 +87,8 @@ class RateLimiter:
                     await asyncio.sleep(sleep_time)
             self.calls.append(now)
 
-# Existing Twelve Data limiter: 8 calls per 60 seconds
 twelvedata_limiter = RateLimiter(max_calls=8, period=60)
-
-# New Finnhub limiter: 60 calls per 60 seconds
 finnhub_limiter = RateLimiter(max_calls=60, period=60)
-
-# New CoinGecko limiter: 30 calls per 60 seconds (conservative)
 coingecko_limiter = RateLimiter(max_calls=30, period=60)
 
 # ====================
@@ -395,7 +390,6 @@ async def fetch_ohlcv(symbol, timeframe):
     df = None
     is_crypto = '/' in symbol
 
-    # Special handling for 30min: try to get 15min from Alpaca and resample
     if timeframe == '30min' and not is_crypto:
         # Stocks: try Alpaca 15min resample
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
@@ -434,7 +428,6 @@ async def fetch_ohlcv(symbol, timeframe):
             data_cache[cache_key] = (df, now + CACHE_DURATION)
         return df
 
-    # For other timeframes, try Alpaca first (stocks)
     alpaca_tf_map = {
         '5min': '5Min',
         '15min': '15Min',
@@ -470,7 +463,6 @@ async def fetch_ohlcv(symbol, timeframe):
     if df is None and not is_crypto:
         df = await fetch_twelvedata(symbol, timeframe)
 
-    # Crypto handling
     if is_crypto:
         try:
             if alpaca_tf:
@@ -503,7 +495,7 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# ENHANCED NEWS FETCHING – Multiple sources (unchanged)
+# ENHANCED NEWS FETCHING (unchanged, kept for brevity)
 # ====================
 async def fetch_finnhub_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
@@ -853,7 +845,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (standard) – now with dark background
+# CHART GENERATION (standard) – dark background
 # ====================
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
@@ -866,7 +858,6 @@ def generate_chart_image(df, symbol, timeframe):
 
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
 
-    # Define dark style (same as zone chart)
     mc = mpf.make_marketcolors(
         up='#26a69a',      # teal for up
         down='#ef5350',    # red for down
@@ -884,7 +875,6 @@ def generate_chart_image(df, symbol, timeframe):
         gridcolor='#444444'
     )
 
-    # EMA plots (keep original colors)
     apds = []
     chart_len = len(chart_data)
     if not df['ema5'].tail(chart_len).isna().all():
@@ -923,7 +913,6 @@ def generate_chart_image(df, symbol, timeframe):
                 tight_layout=True
             )
         if apds:
-            # Style legend
             axes[0].legend(
                 loc='upper left',
                 fontsize=9,
@@ -932,7 +921,6 @@ def generate_chart_image(df, symbol, timeframe):
                 labelcolor='white',
                 framealpha=0.8
             )
-        # Style axes
         axes[0].tick_params(colors='white')
         axes[0].yaxis.label.set_color('white')
         axes[0].xaxis.label.set_color('white')
@@ -942,7 +930,6 @@ def generate_chart_image(df, symbol, timeframe):
             axes[2].tick_params(colors='white')
             axes[2].yaxis.label.set_color('white')
             axes[2].set_facecolor('#1e1e1e')
-        # Save to temp file
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
             fig.savefig(tmpfile.name, format='PNG', dpi=120, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
@@ -956,21 +943,18 @@ def generate_chart_image(df, symbol, timeframe):
         return None
 
 # ====================
-# ZONE CHART GENERATION – Dark background, demand lines by strength (green = most respected)
+# ZONE CHART GENERATION – Dark background, demand lines by strength
 # ====================
 def generate_zone_chart(df, symbol, zones):
-    """Generate a candlestick chart with dark gray background and demand lines colored by strength."""
     print(f"[DEBUG] Generating zone chart for {symbol} with {len(zones)} zones")
     if len(df) < 20:
         print(f"[DEBUG] Insufficient data: {len(df)} rows")
         return None
 
-    # Use last 100 candles for clarity
     chart_data = df[['open', 'high', 'low', 'close', 'volume']].tail(100).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close', 'Volume']
     print(f"[DEBUG] Chart data shape: {chart_data.shape}")
 
-    # Define dark style
     mc = mpf.make_marketcolors(
         up='#26a69a',      # teal for up
         down='#ef5350',    # red for down
@@ -988,7 +972,6 @@ def generate_zone_chart(df, symbol, zones):
         gridcolor='#444444'
     )
 
-    # Color-code demand lines by strength (green = most respected, red = least)
     if zones:
         strengths = [z['strength'] for z in zones]
         min_s = min(strengths)
@@ -996,23 +979,21 @@ def generate_zone_chart(df, symbol, zones):
         if max_s > min_s:
             norm_strengths = [(s - min_s) / (max_s - min_s) for s in strengths]
         else:
-            norm_strengths = [0.5] * len(strengths)  # all same -> middle color
+            norm_strengths = [0.5] * len(strengths)
 
-        # Use RdYlGn colormap (reversed so that high strength = green, low = red)
         colormap = matplotlib.colormaps['RdYlGn_r']
         line_colors = [colormap(norm) for norm in norm_strengths]
         print(f"[DEBUG] Strengths: {strengths}, normalized: {norm_strengths}")
     else:
         line_colors = []
 
-    # Create addplots for each zone
     apds = []
     for i, zone in enumerate(zones):
         level = zone['level']
         if line_colors:
             color = mcolors.to_hex(line_colors[i])
         else:
-            color = '#ffffff'  # fallback white
+            color = '#ffffff'
         label = f"Demand ${level:.2f} (touches: {zone['strength']})"
         apds.append(mpf.make_addplot(
             [level] * len(chart_data),
@@ -1023,7 +1004,6 @@ def generate_zone_chart(df, symbol, zones):
         ))
 
     try:
-        # Plot with volume
         print("[DEBUG] Calling mpf.plot...")
         fig, axes = mpf.plot(
             chart_data,
@@ -1038,7 +1018,6 @@ def generate_zone_chart(df, symbol, zones):
             scale_padding={'left': 0.5, 'right': 0.5, 'top': 0.5, 'bottom': 0.5}
         )
         if apds:
-            # Improved legend
             axes[0].legend(
                 loc='upper left',
                 fontsize=10,
@@ -1047,19 +1026,15 @@ def generate_zone_chart(df, symbol, zones):
                 labelcolor='white',
                 framealpha=0.8
             )
-        # Style volume subplot
         axes[2].set_ylabel('Volume', color='white')
         axes[2].tick_params(colors='white')
         axes[2].yaxis.label.set_color('white')
-        # Style main axis
         axes[0].tick_params(colors='white')
         axes[0].yaxis.label.set_color('white')
         axes[0].xaxis.label.set_color('white')
-        # Set facecolor of axes explicitly
         axes[0].set_facecolor('#1e1e1e')
         axes[2].set_facecolor('#1e1e1e')
 
-        # Save to temp file
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
             fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
@@ -1683,7 +1658,7 @@ async def send_final_summary(ctx, signal_summary):
     await ctx.send(embed=embed)
 
 # ====================
-# OPTIONS FLOW SCANNER (ENHANCED) – (unchanged)
+# OPTIONS FLOW SCANNER (ENHANCED with Greeks)
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1758,7 +1733,51 @@ def get_whale_emoji(premium):
     else:
         return "🐟"
 
+def greek_emoji(value, greek_name):
+    """
+    Return a color emoji based on the Greek value.
+    Thresholds for a pro trader (buying calls).
+    """
+    if greek_name == 'delta':
+        if value > 0.60:
+            return "🟢"
+        elif value > 0.30:
+            return "🟡"
+        else:
+            return "🔴"
+    elif greek_name == 'gamma':
+        if value > 0.10:
+            return "🟢"
+        elif value > 0.05:
+            return "🟡"
+        else:
+            return "🔴"
+    elif greek_name == 'theta':
+        if value > -0.01:
+            return "🟢"
+        elif value > -0.03:
+            return "🟡"
+        else:
+            return "🔴"
+    elif greek_name == 'vega':
+        if value > 0.10:
+            return "🟢"
+        elif value > 0.05:
+            return "🟡"
+        else:
+            return "🔴"
+    elif greek_name == 'iv':
+        if value < 30:
+            return "🟢"
+        elif value < 60:
+            return "🟡"
+        else:
+            return "🔴"
+    else:
+        return "⚪"
+
 def analyze_expiration(opt_chain, current_price, min_volume=5):
+    """Return list of significant options with Greeks."""
     if opt_chain.calls.empty and opt_chain.puts.empty:
         return []
     calls = opt_chain.calls.copy()
@@ -1778,6 +1797,10 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
             last = opt.get('lastPrice', 0)
             opt_type = opt.get('type', 'CALL')
             gamma = opt.get('gamma', 0)
+            delta = opt.get('delta', 0)
+            theta = opt.get('theta', 0)
+            vega = opt.get('vega', 0)
+            iv = opt.get('impliedVolatility', 0) * 100  # convert to percent
 
             if pd.isna(volume) or pd.isna(oi) or volume < min_volume or oi == 0:
                 continue
@@ -1796,7 +1819,11 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
                 'premium': format_premium(volume, last),
                 'raw_premium': premium,
                 'distance_pct': distance_pct,
-                'gamma': gamma
+                'gamma': gamma,
+                'delta': delta,
+                'theta': theta,
+                'vega': vega,
+                'iv': iv
             })
         except:
             continue
@@ -1804,6 +1831,7 @@ def analyze_expiration(opt_chain, current_price, min_volume=5):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
+    """Enhanced options flow – scans multiple expirations, adds whale ratings and Greeks."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1831,29 +1859,44 @@ async def options_flow(ctx, ticker: str):
             opt_chain = stock.option_chain(exp_str)
             analyzed = analyze_expiration(opt_chain, current_price)
             analyzed.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]
+            significant = [opt for opt in analyzed if opt['volume'] >= 5 and opt['oi'] > 0][:6]  # top 6 per expiration
 
             if significant:
+                # Build table with Greek columns
                 table = f"```\n{label} ({exp_str}, {dte} days)\n"
-                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE\n"
-                table += "------  ----  ------  ----  ------  --------  -----\n"
+                table += "STRIKE  TYPE  VOLUME  OI    VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
+                table += "------  ----  ------  ----  ------  --------  -----  -----   -----   -----   -----   ---\n"
                 for opt in significant:
                     strike = f"${opt['strike']:.2f}"
                     whale = get_whale_emoji(opt['raw_premium'])
-                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
+                    # Add Greek emojis
+                    delta_emoji = greek_emoji(opt['delta'], 'delta')
+                    gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
+                    theta_emoji = greek_emoji(opt['theta'], 'theta')
+                    vega_emoji = greek_emoji(opt['vega'], 'vega')
+                    iv_emoji = greek_emoji(opt['iv'], 'iv')
+                    # Format numbers
+                    delta_str = f"{delta_emoji}{opt['delta']:.2f}"
+                    gamma_str = f"{gamma_emoji}{opt['gamma']:.3f}"
+                    theta_str = f"{theta_emoji}{opt['theta']:.4f}"
+                    vega_str = f"{vega_emoji}{opt['vega']:.4f}"
+                    iv_str = f"{iv_emoji}{opt['iv']:.0f}%"
+                    table += f"{strike:6}  {opt['type']:4}  {opt['volume']:6}  {opt['oi']:4}  {opt['vol_oi_ratio']:.1f}x   {opt['premium']:7}  {whale:5}  {delta_str:6} {gamma_str:6} {theta_str:7} {vega_str:6} {iv_str:5}\n"
                 table += "```"
                 embed.add_field(name="", value=table, inline=False)
                 all_significant.extend(significant)
 
+        # Top lottery picks (short DTE, high vol/OI, reasonable premium)
         lottery = [opt for opt in all_significant if opt['vol_oi_ratio'] >= 2.0 and opt['raw_premium'] >= 5000]
         lottery.sort(key=lambda x: x['vol_oi_ratio'] * x['raw_premium'], reverse=True)
         if lottery:
             picks_text = "**🎰 LOTTERY PICKS (short DTE, high ratio):**\n"
             for i, pick in enumerate(lottery[:3]):
-                target = pick['strike'] * 1.20
+                target = pick['strike'] * 1.20 if pick['type'] == 'CALL' else pick['strike'] * 0.80
+                entry_price = current_price * 1.01 if pick['type'] == 'CALL' else current_price * 0.99
                 picks_text += f"\n**{i+1}. ${pick['strike']:.2f} {pick['type']}**\n"
                 picks_text += f"   • Volume: {pick['volume']} ({pick['vol_oi_ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks_text += f"   • Entry: Above ${current_price*1.01:.2f}  Target: ${target:.2f}\n"
+                picks_text += f"   • Entry: Above ${entry_price:.2f}  Target: ${target:.2f}\n"
             embed.add_field(name="🔥 HIGH RISK / HIGH REWARD", value=picks_text, inline=False)
 
         explanation = """
@@ -1863,7 +1906,10 @@ async def options_flow(ctx, ticker: str):
 • 🐬 = $10K–$100K (notable)
 • 🐟 = <$10K (small)
 
-💡 **TIP:** Short‑dated options (0‑7 DTE) can produce 1000%+ gains but are extremely risky.
+📊 **GREEK COLOR GUIDE:**
+🟢 = Good / Favorable
+🟡 = Neutral / Moderate
+🔴 = Bad / Unfavorable
         """
         embed.add_field(name="", value=explanation, inline=False)
 
@@ -1876,6 +1922,7 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
+    """Scan watchlist for unusual options activity across key expirations, with whale ratings and Greeks."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1917,8 +1964,13 @@ async def scan_options_flow(ctx):
                                     vol_oi_ratio = volume / oi
                                     if vol_oi_ratio >= 1.5 and volume >= 10:
                                         distance_pct = abs(strike - current_price) / current_price * 100
-                                        if distance_pct <= 20:
+                                        if distance_pct <= 20:  # near the money
                                             premium = volume * 100 * last
+                                            delta = opt.get('delta', 0)
+                                            gamma = opt.get('gamma', 0)
+                                            theta = opt.get('theta', 0)
+                                            vega = opt.get('vega', 0)
+                                            iv = opt.get('impliedVolatility', 0) * 100
                                             all_unusual.append({
                                                 'symbol': symbol,
                                                 'strike': strike,
@@ -1931,15 +1983,21 @@ async def scan_options_flow(ctx):
                                                 'premium': format_premium(volume, last),
                                                 'raw_premium': premium,
                                                 'distance': distance_pct,
-                                                'label': label
+                                                'label': label,
+                                                'delta': delta,
+                                                'gamma': gamma,
+                                                'theta': theta,
+                                                'vega': vega,
+                                                'iv': iv
                                             })
                             except:
                                 continue
-                await asyncio.sleep(2)
+                await asyncio.sleep(2)  # be gentle to yfinance
             except Exception as e:
                 print(f"Error scanning {symbol}: {e}")
                 continue
 
+        # Sort by premium (largest first)
         all_unusual.sort(key=lambda x: x['raw_premium'], reverse=True)
 
         if not all_unusual:
@@ -1952,27 +2010,54 @@ async def scan_options_flow(ctx):
             color=0x00ff00
         )
 
+        # Build table with Greek columns
         table = "```\n"
-        table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE\n"
-        table += "------  ------  ---  ------  ---  ------  --------  -----\n"
+        table += "SYMBOL  STRIKE  DTE  VOLUME  OI   VOL/OI  PREMIUM   WHALE  Delta   Gamma   Theta   Vega    IV%\n"
+        table += "------  ------  ---  ------  ---  ------  --------  -----  -----   -----   -----   -----   ---\n"
         top_overall = []
-        for opt in all_unusual[:15]:
+        for opt in all_unusual[:15]:  # show top 15
             whale = get_whale_emoji(opt['raw_premium'])
-            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale}\n"
+            # Add Greek emojis
+            delta_emoji = greek_emoji(opt['delta'], 'delta')
+            gamma_emoji = greek_emoji(opt['gamma'], 'gamma')
+            theta_emoji = greek_emoji(opt['theta'], 'theta')
+            vega_emoji = greek_emoji(opt['vega'], 'vega')
+            iv_emoji = greek_emoji(opt['iv'], 'iv')
+            delta_str = f"{delta_emoji}{opt['delta']:.2f}"
+            gamma_str = f"{gamma_emoji}{opt['gamma']:.3f}"
+            theta_str = f"{theta_emoji}{opt['theta']:.4f}"
+            vega_str = f"{vega_emoji}{opt['vega']:.4f}"
+            iv_str = f"{iv_emoji}{opt['iv']:.0f}%"
+            table += f"{opt['symbol']:6}  ${opt['strike']:.2f}  {opt['dte']:3}  {opt['volume']:6}  {opt['oi']:3}  {opt['ratio']:.1f}x   {opt['premium']:7}  {whale:5}  {delta_str:6} {gamma_str:6} {theta_str:7} {vega_str:6} {iv_str:5}\n"
             top_overall.append(opt)
         table += "```"
         embed.add_field(name="📊 ALL DETECTED ACTIVITY", value=table, inline=False)
 
+        # Top 3 setups by premium
         if top_overall:
             picks = "**🏆 TOP 3 BY PREMIUM:**\n\n"
             for i, pick in enumerate(top_overall[:3]):
-                target = pick['strike'] * 1.20
+                target = pick['strike'] * 1.20  # simple target for calls
                 picks += f"{i+1}. **{pick['symbol']} ${pick['strike']:.2f} CALL** ({pick['label']})\n"
                 picks += f"   • Volume: {pick['volume']} ({pick['ratio']:.1f}x)  Premium: {pick['premium']}\n"
-                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}  Target: ${target:.2f}\n\n"
+                picks += f"   • Entry: Above ${pick['price'] * 1.01:.2f}  Target: ${target:.2f}\n"
+                picks += f"   • Delta: {pick['delta']:.2f}  Gamma: {pick['gamma']:.3f}  Theta: {pick['theta']:.4f}  IV: {pick['iv']:.0f}%\n\n"
             embed.add_field(name="🏆 TOP PICKS", value=picks, inline=False)
 
-        embed.set_footer(text="Whale ratings: 🐋🐋 >$1M, 🐋 $100K‑$1M, 🐬 $10K‑$100K, 🐟 <$10K")
+        explanation = """
+📊 **WHALE RATINGS:**
+• 🐋🐋 = >$1M premium (massive institutional)
+• 🐋 = $100K–$1M (strong interest)
+• 🐬 = $10K–$100K (notable)
+• 🐟 = <$10K (small)
+
+📊 **GREEK COLOR GUIDE:**
+🟢 = Good / Favorable
+🟡 = Neutral / Moderate
+🔴 = Bad / Unfavorable
+        """
+        embed.add_field(name="", value=explanation, inline=False)
+
         await ctx.send(embed=embed)
 
     except Exception as e:
@@ -2453,7 +2538,6 @@ async def signals(ctx):
                 break
 
             for tf in all_timeframes:
-                # No cancellation check here – we finish this symbol completely
                 df = await fetch_ohlcv(symbol, tf)
                 if df is not None and not df.empty:
                     df_calc = calculate_indicators(df)
@@ -2472,7 +2556,6 @@ async def signals(ctx):
             await ctx.send(f"📭 No symbols with active signals found.")
 
         cancellation_flags[ctx.author.id] = False
-        # Only send completion if not cancelled
         if not cancellation_flags.get(ctx.author.id, False):
             await ctx.send(f"✅ Signal scan complete!")
     finally:
@@ -2557,11 +2640,6 @@ async def scan(ctx, target='all', timeframe='daily'):
 # ZONE COMMAND (UPDATED with 30min default)
 # ====================
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
-    """
-    Identify demand zones based on unusually large candles.
-    Returns list of zones that have not been broken (no close below level after formation).
-    Each zone: {'level': price, 'date': index, 'strength': number of touches (lows within tolerance)}
-    """
     if len(df) < 50:
         return []
     df = df.iloc[-lookback:].copy()
@@ -2574,11 +2652,9 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
         after = df.loc[idx:]
         if len(after) < 2:
             continue
-        # Check if price ever closed below this level (broken support)
         closes_below = after['close'] < level * (1 - touch_tolerance)
         if closes_below.any():
-            continue   # zone broken, discard
-        # Count touches (low within tolerance)
+            continue
         touches = after['low'] <= level * (1 + touch_tolerance)
         strength = int(touches.sum())
         if strength >= 1:
@@ -2587,7 +2663,6 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
                 'date': idx,
                 'strength': strength
             })
-    # Sort by level (ascending)
     zones.sort(key=lambda x: x['level'])
     return zones
 
@@ -2642,7 +2717,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 color=0x00ff00
             )
 
-            # Show all demand zones
             for z in zones:
                 distance = (current_price - z['level']) / current_price * 100
                 status = "🔵 **NEAR**" if abs(distance) < 2 else ""
@@ -2653,7 +2727,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                     inline=False
                 )
 
-            # If price is near any zone, suggest an ITM call option
             near_zones = [z for z in zones if abs((current_price - z['level']) / current_price) < 0.02]
             if near_zones and '/' not in symbol:
                 best_zone = min(near_zones, key=lambda z: abs(current_price - z['level']))
@@ -2723,7 +2796,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 except Exception as e:
                     embed.add_field(name="Options suggestion", value=f"Could not fetch options: {str(e)}", inline=False)
 
-            # Generate and attach the zone chart
             try:
                 chart_buffer = generate_zone_chart(df, symbol, zones)
                 if chart_buffer:
@@ -2738,7 +2810,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
                 await ctx.send(f"❌ Error generating chart: {str(e)}")
             return
 
-        # Other timeframes: use old zone logic
         await ctx.send(f"🔍 Fetching zones for **{symbol}** ({timeframe})...")
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
@@ -2890,18 +2961,18 @@ async def help_command(ctx):
         )
 
         embed.add_field(
-            name="\n🔥 OPTIONS FLOW",
+            name="\n🔥 OPTIONS FLOW (with Greeks)",
             value="",
             inline=False
         )
         embed.add_field(
             name="`!flow TICKER`",
-            value="Unusual options activity with whale ratings (🐋🐋 = massive)",
+            value="Unusual options activity with whale ratings and Greek color codes (🟢 good, 🔴 bad)",
             inline=False
         )
         embed.add_field(
             name="`!scanflow`",
-            value="Scan watchlist for unusual options setups, sorted by premium",
+            value="Scan watchlist for unusual options setups, sorted by premium, with Greeks",
             inline=False
         )
 
@@ -2967,7 +3038,6 @@ async def help_command(ctx):
         embed.set_footer(text="💡 Pro tip: Use !worldnews to see how global events move markets")
         await ctx.send(embed=embed)
     except Exception as e:
-        # Fallback in case embed fails
         await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan")
         print(f"Help command error: {e}")
 
