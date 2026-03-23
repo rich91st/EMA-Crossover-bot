@@ -1984,7 +1984,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPCOMING COMMAND (ENHANCED with timeouts and error handling)
+# UPCOMING COMMAND (FIXED – removed slow price check)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -2052,6 +2052,7 @@ async def upcoming_events(ctx, ticker: str = None):
 
             await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
 
+            # Economic events first
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
                 econ_embed = discord.Embed(
@@ -2078,17 +2079,7 @@ async def upcoming_events(ctx, ticker: str = None):
                     await ctx.send("🛑 Scan cancelled.")
                     break
 
-                # Skip symbols that are likely delisted by checking price with timeout
-                try:
-                    price_task = asyncio.create_task(get_stock_price(sym))
-                    price = await asyncio.wait_for(price_task, timeout=5)
-                    if price is None:
-                        continue
-                except (asyncio.TimeoutError, Exception) as e:
-                    print(f"Skipping {sym}: {e}")
-                    continue
-
-                # Fetch other data concurrently
+                # Fetch all data concurrently (no price check)
                 earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
                 dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
                 splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
@@ -2180,20 +2171,8 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send("✅ Upcoming events scan complete.")
 
         else:
+            # Single ticker
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
-            try:
-                price_task = asyncio.create_task(get_stock_price(ticker.upper()))
-                price = await asyncio.wait_for(price_task, timeout=5)
-                if price is None:
-                    await ctx.send(f"⚠️ Could not fetch current price for {ticker.upper()}. The symbol may be invalid.")
-                    return
-            except asyncio.TimeoutError:
-                await ctx.send(f"⏱️ Timeout fetching price for {ticker.upper()}.")
-                return
-            except Exception as e:
-                await ctx.send(f"❌ Error fetching price: {str(e)}")
-                return
-
             earnings = await fetch_earnings_upcoming(ticker.upper())
             dividends = await fetch_dividends_upcoming(ticker.upper())
             splits = await fetch_splits_upcoming(ticker.upper())
