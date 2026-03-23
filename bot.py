@@ -1984,7 +1984,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPCOMING COMMAND
+# UPCOMING COMMAND (ENHANCED with timeouts and error handling)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -2078,10 +2078,35 @@ async def upcoming_events(ctx, ticker: str = None):
                     await ctx.send("🛑 Scan cancelled.")
                     break
 
-                earnings = await fetch_earnings_upcoming(sym)
-                dividends = await fetch_dividends_upcoming(sym)
-                splits = await fetch_splits_upcoming(sym)
-                ratings = await fetch_analyst_ratings(sym, limit=3)
+                # Skip symbols that are likely delisted by checking price with timeout
+                try:
+                    price_task = asyncio.create_task(get_stock_price(sym))
+                    price = await asyncio.wait_for(price_task, timeout=5)
+                    if price is None:
+                        continue
+                except (asyncio.TimeoutError, Exception) as e:
+                    print(f"Skipping {sym}: {e}")
+                    continue
+
+                # Fetch other data concurrently
+                earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
+                dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
+                splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
+                ratings_task = asyncio.create_task(fetch_analyst_ratings(sym, limit=3))
+
+                earnings, dividends, splits, ratings = await asyncio.gather(
+                    earnings_task, dividends_task, splits_task, ratings_task,
+                    return_exceptions=True
+                )
+                # Handle exceptions
+                if isinstance(earnings, Exception):
+                    earnings = []
+                if isinstance(dividends, Exception):
+                    dividends = []
+                if isinstance(splits, Exception):
+                    splits = []
+                if isinstance(ratings, Exception):
+                    ratings = []
 
                 if earnings or dividends or splits or ratings:
                     found_any = True
@@ -2147,7 +2172,7 @@ async def upcoming_events(ctx, ticker: str = None):
                     embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
                     await ctx.send(embed=embed)
 
-                await asyncio.sleep(5)
+                await asyncio.sleep(2)  # slight delay to avoid rate limits
 
             if not found_any:
                 await ctx.send("No upcoming events found for any stock in your watchlist.")
@@ -2156,6 +2181,19 @@ async def upcoming_events(ctx, ticker: str = None):
 
         else:
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
+            try:
+                price_task = asyncio.create_task(get_stock_price(ticker.upper()))
+                price = await asyncio.wait_for(price_task, timeout=5)
+                if price is None:
+                    await ctx.send(f"⚠️ Could not fetch current price for {ticker.upper()}. The symbol may be invalid.")
+                    return
+            except asyncio.TimeoutError:
+                await ctx.send(f"⏱️ Timeout fetching price for {ticker.upper()}.")
+                return
+            except Exception as e:
+                await ctx.send(f"❌ Error fetching price: {str(e)}")
+                return
+
             earnings = await fetch_earnings_upcoming(ticker.upper())
             dividends = await fetch_dividends_upcoming(ticker.upper())
             splits = await fetch_splits_upcoming(ticker.upper())
