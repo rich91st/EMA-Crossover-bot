@@ -1121,7 +1121,7 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     return embed
 
 # ====================
-# WORLD NEWS COMMAND (FIXED)
+# WORLD NEWS COMMAND (ENHANCED)
 # ====================
 IMPACT_KEYWORDS = {
     'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
@@ -1198,13 +1198,13 @@ async def world_news(ctx):
         await ctx.send("🌍 Fetching global market news...")
 
         now = datetime.now()
-        source = "unknown"  # initialize
+        source = "unknown"
         if world_news_cache["data"] and world_news_cache["expiry"] > now:
             combined_news = world_news_cache["data"]
             source = "cached"
         else:
             # Fetch from multiple countries
-            countries = ['us', 'gb', 'cn']  # US, UK, China
+            countries = ['us', 'gb', 'cn', 'in', 'jp']  # US, UK, China, India, Japan
             all_articles = []
             for country in countries:
                 articles = await fetch_newsapi_top_headlines(country=country)
