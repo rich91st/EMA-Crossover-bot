@@ -1121,7 +1121,7 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     return embed
 
 # ====================
-# WORLD NEWS COMMAND (IMPROVED)
+# WORLD NEWS COMMAND (FIXED)
 # ====================
 IMPACT_KEYWORDS = {
     'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
@@ -1198,6 +1198,7 @@ async def world_news(ctx):
         await ctx.send("🌍 Fetching global market news...")
 
         now = datetime.now()
+        source = "unknown"  # initialize
         if world_news_cache["data"] and world_news_cache["expiry"] > now:
             combined_news = world_news_cache["data"]
             source = "cached"
@@ -1226,6 +1227,8 @@ async def world_news(ctx):
                     source = "Finnhub + NewsAPI"
                 else:
                     source = "NewsAPI (multiple countries)"
+            else:
+                source = "NewsAPI (multiple countries)"
 
             # Deduplicate by title
             seen = set()
@@ -2024,7 +2027,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPCOMING COMMAND (FIXED – removed slow price check)
+# UPCOMING COMMAND
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
