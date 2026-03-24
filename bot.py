@@ -528,14 +528,14 @@ async def fetch_finnhub_general_news():
         print(f"Error fetching Finnhub general news: {e}")
         return None
 
-async def fetch_newsapi_top_headlines():
+async def fetch_newsapi_top_headlines(country='us'):
     if not NEWSAPI_KEY:
         return None
     url = "https://newsapi.org/v2/top-headlines"
     params = {
         'apiKey': NEWSAPI_KEY,
         'language': 'en',
-        'country': 'us',
+        'country': country,
         'pageSize': 10
     }
     timeout = aiohttp.ClientTimeout(total=10)
@@ -543,14 +543,14 @@ async def fetch_newsapi_top_headlines():
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    print(f"NewsAPI error: {resp.status}")
+                    print(f"NewsAPI error for {country}: {resp.status}")
                     return None
                 data = await resp.json()
                 if data.get('status') != 'ok':
                     return None
                 return data.get('articles', [])
     except Exception as e:
-        print(f"Error fetching NewsAPI: {e}")
+        print(f"Error fetching NewsAPI for {country}: {e}")
         return None
 
 async def fetch_analyst_ratings_enhanced(symbol):
@@ -1121,7 +1121,7 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     return embed
 
 # ====================
-# WORLD NEWS COMMAND (with sentiment analysis)
+# WORLD NEWS COMMAND (IMPROVED)
 # ====================
 IMPACT_KEYWORDS = {
     'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
@@ -1149,11 +1149,16 @@ IMPACT_KEYWORDS = {
     'oil': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'crude': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
     'opec': ('⚪ Neutral', 'Energy', 'OPEC decisions impact oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
+    'gas': ('⚪ Neutral', 'Energy', 'Natural gas prices affect utilities and energy.', ['UNG', 'XOM', 'CVX']),
+    'rice': ('⚪ Neutral', 'Commodities', 'Food prices impact consumer spending and inflation.', ['ADM', 'INGR']),
+    'fertilizer': ('⚪ Neutral', 'Commodities', 'Fertilizer prices affect agriculture and food stocks.', ['MOS', 'NTR']),
+    'coal': ('⚪ Neutral', 'Energy', 'Coal prices affect power generation and mining stocks.', ['ARCH', 'BTU']),
     'semiconductor': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
     'chip': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
     'nvidia': ('⚪ Neutral', 'Technology', 'Nvidia leads AI and chip sector.', ['NVDA', 'AMD', 'SMH']),
     'ai': ('⚪ Neutral', 'Technology', 'AI investment boosts tech.', ['NVDA', 'MSFT', 'GOOGL']),
     'china': ('⚪ Neutral', 'China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
+    'beijing': ('⚪ Neutral', 'China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
     'retail': ('⚪ Neutral', 'Consumer', 'Retail sales reflect consumer confidence.', ['AMZN', 'WMT', 'TGT', 'XRT']),
     'consumer': ('⚪ Neutral', 'Consumer', 'Consumer spending drives economy.', ['AMZN', 'WMT', 'PG', 'KO']),
     'housing': ('⚪ Neutral', 'Housing', 'Housing data affect builders and banks.', ['LEN', 'DHI', 'KBH', 'XHB']),
@@ -1167,6 +1172,8 @@ IMPACT_KEYWORDS = {
     'airline': ('⚪ Neutral', 'Travel', 'Airlines react to travel demand and fuel costs.', ['AAL', 'DAL', 'UAL', 'LUV']),
     'auto': ('⚪ Neutral', 'Automotive', 'Auto sales and EV trends.', ['TSLA', 'F', 'GM', 'NIO']),
     'ev': ('⚪ Neutral', 'Electric Vehicles', 'EV adoption drives Tesla and emerging players.', ['TSLA', 'NIO', 'LI', 'XPEV']),
+    'bitcoin': ('⚪ Neutral', 'Crypto', 'Bitcoin is a global, non-regional asset.', ['BTC-USD', 'MSTR', 'COIN']),
+    'btc': ('⚪ Neutral', 'Crypto', 'Bitcoin is a global, non-regional asset.', ['BTC-USD', 'MSTR', 'COIN']),
 }
 
 def analyze_news_impact(title, description):
@@ -1188,33 +1195,51 @@ async def world_news(ctx):
         return
     user_busy[ctx.author.id] = True
     try:
-        await ctx.send("🌍 Fetching latest world news...")
+        await ctx.send("🌍 Fetching global market news...")
 
         now = datetime.now()
         if world_news_cache["data"] and world_news_cache["expiry"] > now:
-            articles = world_news_cache["data"]
+            combined_news = world_news_cache["data"]
             source = "cached"
         else:
-            articles = await fetch_newsapi_top_headlines()
-            source = "NewsAPI"
-            if not articles:
+            # Fetch from multiple countries
+            countries = ['us', 'gb', 'cn']  # US, UK, China
+            all_articles = []
+            for country in countries:
+                articles = await fetch_newsapi_top_headlines(country=country)
+                if articles:
+                    all_articles.extend(articles)
+                await asyncio.sleep(0.5)  # avoid hitting rate limit
+
+            # If NewsAPI fails or not enough, fallback to Finnhub
+            if len(all_articles) < 5:
                 finnhub_news = await fetch_finnhub_general_news()
                 if finnhub_news:
-                    articles = []
                     for item in finnhub_news[:10]:
-                        articles.append({
+                        all_articles.append({
                             'title': item.get('headline', ''),
                             'description': item.get('summary', ''),
                             'source': {'name': item.get('source', 'Finnhub')},
                             'publishedAt': datetime.fromtimestamp(item.get('datetime', 0)).isoformat() if item.get('datetime') else None,
                             'url': item.get('url', '')
                         })
-                    source = "Finnhub"
-            if articles:
-                world_news_cache["data"] = articles
-                world_news_cache["expiry"] = now + timedelta(minutes=30)
+                    source = "Finnhub + NewsAPI"
+                else:
+                    source = "NewsAPI (multiple countries)"
 
-        if not articles:
+            # Deduplicate by title
+            seen = set()
+            unique_articles = []
+            for a in all_articles:
+                title = a.get('title', '')
+                if title and title not in seen:
+                    seen.add(title)
+                    unique_articles.append(a)
+            combined_news = unique_articles[:12]  # take top 12
+            world_news_cache["data"] = combined_news
+            world_news_cache["expiry"] = now + timedelta(minutes=30)
+
+        if not combined_news:
             await ctx.send("❌ Could not fetch world news at this time.")
             return
 
@@ -1225,10 +1250,23 @@ async def world_news(ctx):
             timestamp=now
         )
 
+        # Add economic events section
+        econ_events = await fetch_economic_events(days=7)
+        if econ_events:
+            econ_text = ""
+            for ev in econ_events[:3]:
+                date = ev.get('date', 'N/A')
+                event = ev.get('event', 'N/A')
+                country = ev.get('country', '')
+                importance = ev.get('importance', '')
+                star = "★" if importance == "high" else "☆" if importance == "medium" else "·" if importance else ""
+                econ_text += f"**{date}** {country}: {event} {star}\n"
+            embed.add_field(name="📆 Upcoming Economic Events (next 7 days)", value=econ_text or "None", inline=False)
+
         count = 0
-        for article in articles[:5]:
+        for article in combined_news[:8]:  # show up to 8
             title = article.get('title', 'No title')
-            if '[Removed]' in title:
+            if '[Removed]' in title or len(title) < 10:
                 continue
             description = article.get('description', '') or article.get('summary', '')
             source_name = article.get('source', {}).get('name', 'Unknown') if isinstance(article.get('source'), dict) else article.get('source', 'Unknown')
@@ -1263,6 +1301,8 @@ async def world_news(ctx):
                 inline=False
             )
             count += 1
+            if count >= 8:
+                break
 
         if count == 0:
             await ctx.send("No relevant news found.")
