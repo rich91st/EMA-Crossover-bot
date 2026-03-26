@@ -121,9 +121,10 @@ async def load_watchlist():
                 "crypto": doc.get('crypto', [])
             }
         else:
+            # Remove NKLA from the default list
             default = {
                 "_id": "main",
-                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL", "NKLA"],
+                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL"],
                 "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD", "LINK/USD"]
             }
             await watchlist_collection.insert_one(default)
@@ -131,7 +132,7 @@ async def load_watchlist():
     except Exception as e:
         print(f"❌ Error loading watchlist: {e}")
         return {
-            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL", "NKLA"],
+            "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL"],
             "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD", "LINK/USD"]
         }
 
@@ -2027,7 +2028,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# UPCOMING COMMAND
+# UPCOMING COMMAND (FIXED with timeout)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -2122,16 +2123,21 @@ async def upcoming_events(ctx, ticker: str = None):
                     await ctx.send("🛑 Scan cancelled.")
                     break
 
-                # Fetch all data concurrently (no price check)
-                earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
-                dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
-                splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
-                ratings_task = asyncio.create_task(fetch_analyst_ratings(sym, limit=3))
+                # Fetch all data concurrently with a timeout
+                try:
+                    earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
+                    dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
+                    splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
+                    ratings_task = asyncio.create_task(fetch_analyst_ratings(sym, limit=3))
 
-                earnings, dividends, splits, ratings = await asyncio.gather(
-                    earnings_task, dividends_task, splits_task, ratings_task,
-                    return_exceptions=True
-                )
+                    earnings, dividends, splits, ratings = await asyncio.wait_for(
+                        asyncio.gather(earnings_task, dividends_task, splits_task, ratings_task, return_exceptions=True),
+                        timeout=15.0  # total timeout per symbol
+                    )
+                except asyncio.TimeoutError:
+                    print(f"Timeout fetching data for {sym}, skipping.")
+                    continue
+
                 # Handle exceptions
                 if isinstance(earnings, Exception):
                     earnings = []
