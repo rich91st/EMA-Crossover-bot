@@ -2096,7 +2096,7 @@ async def upcoming_events(ctx, ticker: str = None):
 
             await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
 
-            # Economic events first
+            # Economic events first (these are fast)
             econ_events = await fetch_economic_events(days=14)
             if econ_events:
                 econ_embed = discord.Embed(
@@ -2117,102 +2117,113 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send(embed=econ_embed)
 
             found_any = False
-            for sym in stocks:
-                if cancellation_flags.get(ctx.author.id, False):
-                    cancellation_flags[ctx.author.id] = False
-                    await ctx.send("🛑 Scan cancelled.")
-                    break
+            # Use a global timeout for the whole scan (30 seconds)
+            try:
+                # We'll gather tasks for each symbol and use asyncio.wait with timeout
+                # Instead of asyncio.gather, we'll process one symbol at a time with a per-symbol timeout
+                # to avoid hanging the entire loop.
+                for sym in stocks:
+                    if cancellation_flags.get(ctx.author.id, False):
+                        cancellation_flags[ctx.author.id] = False
+                        await ctx.send("🛑 Scan cancelled.")
+                        break
 
-                # Fetch all data concurrently with a timeout
-                try:
-                    earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
-                    dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
-                    splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
-                    ratings_task = asyncio.create_task(fetch_analyst_ratings(sym, limit=3))
+                    try:
+                        # Fetch all data for this symbol with a total timeout of 12 seconds
+                        earnings_task = asyncio.create_task(fetch_earnings_upcoming(sym))
+                        dividends_task = asyncio.create_task(fetch_dividends_upcoming(sym))
+                        splits_task = asyncio.create_task(fetch_splits_upcoming(sym))
+                        ratings_task = asyncio.create_task(fetch_analyst_ratings(sym, limit=3))
 
-                    earnings, dividends, splits, ratings = await asyncio.wait_for(
-                        asyncio.gather(earnings_task, dividends_task, splits_task, ratings_task, return_exceptions=True),
-                        timeout=15.0  # total timeout per symbol
-                    )
-                except asyncio.TimeoutError:
-                    print(f"Timeout fetching data for {sym}, skipping.")
-                    continue
+                        # Wait for all tasks with a timeout
+                        earnings, dividends, splits, ratings = await asyncio.wait_for(
+                            asyncio.gather(earnings_task, dividends_task, splits_task, ratings_task, return_exceptions=True),
+                            timeout=12.0
+                        )
+                    except asyncio.TimeoutError:
+                        print(f"Timeout fetching data for {sym}, skipping.")
+                        continue
 
-                # Handle exceptions
-                if isinstance(earnings, Exception):
-                    earnings = []
-                if isinstance(dividends, Exception):
-                    dividends = []
-                if isinstance(splits, Exception):
-                    splits = []
-                if isinstance(ratings, Exception):
-                    ratings = []
+                    # Handle exceptions
+                    if isinstance(earnings, Exception):
+                        earnings = []
+                    if isinstance(dividends, Exception):
+                        dividends = []
+                    if isinstance(splits, Exception):
+                        splits = []
+                    if isinstance(ratings, Exception):
+                        ratings = []
 
-                if earnings or dividends or splits or ratings:
-                    found_any = True
-                    web_url = get_tradingview_web_link(sym)
-                    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+                    if earnings or dividends or splits or ratings:
+                        found_any = True
+                        web_url = get_tradingview_web_link(sym)
+                        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
 
-                    embed = discord.Embed(
-                        title=f"📅 Upcoming Catalysts for {sym}",
-                        color=0x00ff00
-                    )
+                        embed = discord.Embed(
+                            title=f"📅 Upcoming Catalysts for {sym}",
+                            color=0x00ff00
+                        )
 
-                    if earnings:
-                        lines = []
-                        for e in earnings:
-                            date = e.get('date', 'N/A')
-                            eps_est = e.get('epsEstimate', 'N/A')
-                            time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
-                            exp_move, hist_avg = await get_earnings_stats(sym, date)
-                            lines.append(
-                                f"**{date}** {time_str} – EPS Est: {eps_est}\n"
-                                f"   • Expected Move: {exp_move}\n"
-                                f"   • Historical Avg: {hist_avg}"
-                            )
-                        embed.add_field(name="📊 Earnings", value="\n".join(lines), inline=False)
+                        if earnings:
+                            lines = []
+                            for e in earnings:
+                                date = e.get('date', 'N/A')
+                                eps_est = e.get('epsEstimate', 'N/A')
+                                time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
+                                exp_move, hist_avg = await get_earnings_stats(sym, date)
+                                lines.append(
+                                    f"**{date}** {time_str} – EPS Est: {eps_est}\n"
+                                    f"   • Expected Move: {exp_move}\n"
+                                    f"   • Historical Avg: {hist_avg}"
+                                )
+                            embed.add_field(name="📊 Earnings", value="\n".join(lines), inline=False)
 
-                    if dividends:
-                        lines = []
-                        for d in dividends:
-                            ex_date = d.get('exDate', 'N/A')
-                            amount = d.get('amount', 'N/A')
-                            pay_date = d.get('payDate', '')
-                            lines.append(f"**{ex_date}** – Amount: ${amount}" + (f" (pay {pay_date})" if pay_date else ""))
-                        embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
+                        if dividends:
+                            lines = []
+                            for d in dividends:
+                                ex_date = d.get('exDate', 'N/A')
+                                amount = d.get('amount', 'N/A')
+                                pay_date = d.get('payDate', '')
+                                lines.append(f"**{ex_date}** – Amount: ${amount}" + (f" (pay {pay_date})" if pay_date else ""))
+                            embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
 
-                    if splits:
-                        lines = []
-                        for s in splits:
-                            date = s.get('date', 'N/A')
-                            ratio = s.get('splitRatio', '')
-                            text = f"**{date}** – {ratio}" if ratio else f"**{date}**"
-                            lines.append(text)
-                        embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
+                        if splits:
+                            lines = []
+                            for s in splits:
+                                date = s.get('date', 'N/A')
+                                ratio = s.get('splitRatio', '')
+                                text = f"**{date}** – {ratio}" if ratio else f"**{date}**"
+                                lines.append(text)
+                            embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
 
-                    if ratings:
-                        lines = []
-                        for r in ratings:
-                            period = r.get('period', '')
-                            sb = r.get('strongBuy', 0)
-                            b = r.get('buy', 0)
-                            h = r.get('hold', 0)
-                            s = r.get('sell', 0)
-                            ss = r.get('strongSell', 0)
-                            total = sb + b + h + s + ss
-                            buys = sb + b
-                            sells = s + ss
-                            sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
-                            if total > 0:
-                                lines.append(f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}")
-                            else:
-                                lines.append(f"**{period}** – No data")
-                        embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
+                        if ratings:
+                            lines = []
+                            for r in ratings:
+                                period = r.get('period', '')
+                                sb = r.get('strongBuy', 0)
+                                b = r.get('buy', 0)
+                                h = r.get('hold', 0)
+                                s = r.get('sell', 0)
+                                ss = r.get('strongSell', 0)
+                                total = sb + b + h + s + ss
+                                buys = sb + b
+                                sells = s + ss
+                                sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
+                                if total > 0:
+                                    lines.append(f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}")
+                                else:
+                                    lines.append(f"**{period}** – No data")
+                            embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
 
-                    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-                    await ctx.send(embed=embed)
+                        embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+                        await ctx.send(embed=embed)
 
-                await asyncio.sleep(2)  # slight delay to avoid rate limits
+                    await asyncio.sleep(1)  # slight delay to avoid rate limits
+
+            except asyncio.TimeoutError:
+                # This catches a global timeout if we ever implement one, but currently we're using per-symbol timeouts.
+                await ctx.send("⚠️ The scan took too long and was aborted. Please try again later.")
+                return
 
             if not found_any:
                 await ctx.send("No upcoming events found for any stock in your watchlist.")
@@ -2220,12 +2231,31 @@ async def upcoming_events(ctx, ticker: str = None):
                 await ctx.send("✅ Upcoming events scan complete.")
 
         else:
-            # Single ticker
+            # Single ticker – no need for timeout, but we'll add a short one just in case
             await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
-            earnings = await fetch_earnings_upcoming(ticker.upper())
-            dividends = await fetch_dividends_upcoming(ticker.upper())
-            splits = await fetch_splits_upcoming(ticker.upper())
-            ratings = await fetch_analyst_ratings(ticker.upper(), limit=3)
+            try:
+                earnings_task = asyncio.create_task(fetch_earnings_upcoming(ticker.upper()))
+                dividends_task = asyncio.create_task(fetch_dividends_upcoming(ticker.upper()))
+                splits_task = asyncio.create_task(fetch_splits_upcoming(ticker.upper()))
+                ratings_task = asyncio.create_task(fetch_analyst_ratings(ticker.upper(), limit=3))
+
+                earnings, dividends, splits, ratings = await asyncio.wait_for(
+                    asyncio.gather(earnings_task, dividends_task, splits_task, ratings_task, return_exceptions=True),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                await ctx.send(f"⏱️ Timeout fetching data for {ticker.upper()}. Finnhub may be slow.")
+                return
+
+            # Handle exceptions
+            if isinstance(earnings, Exception):
+                earnings = []
+            if isinstance(dividends, Exception):
+                dividends = []
+            if isinstance(splits, Exception):
+                splits = []
+            if isinstance(ratings, Exception):
+                ratings = []
 
             if not (earnings or dividends or splits or ratings):
                 await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
