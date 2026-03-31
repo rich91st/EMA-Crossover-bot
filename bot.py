@@ -382,13 +382,14 @@ async def fetch_ohlcv(symbol, timeframe):
     df = None
     is_crypto = '/' in symbol
 
+    # Special case for 30min (resample from 15min)
     if timeframe == '30min' and not is_crypto:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             try:
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
                 request = StockBarsRequest(
                     symbol_or_symbols=symbol,
-                    timeframe='15Min',
+                    timeframe=TimeFrame.Minute15,          # <-- FIXED
                     start=now - timedelta(days=60),
                     end=now
                 )
@@ -419,22 +420,31 @@ async def fetch_ohlcv(symbol, timeframe):
             data_cache[cache_key] = (df, now + CACHE_DURATION)
         return df
 
-    alpaca_tf_map = {
-        '5min': '5Min',
-        '15min': '15Min',
-        '1h': '1H',
-        '4h': '4H',
-        'daily': '1D',
-        'weekly': '1W',
-    }
-    alpaca_tf = alpaca_tf_map.get(timeframe)
+    # Map our timeframe strings to Alpaca TimeFrame objects
+    def get_alpaca_timeframe(tf):
+        if tf == '5min':
+            return TimeFrame.Minute5
+        elif tf == '15min':
+            return TimeFrame.Minute15
+        elif tf == '1h':
+            return TimeFrame.Hour
+        elif tf == '4h':
+            return TimeFrame(4, TimeFrameUnit.Hour)
+        elif tf == 'daily':
+            return TimeFrame.Day
+        elif tf == 'weekly':
+            return TimeFrame.Week
+        else:
+            return None
+
+    alpaca_tf = get_alpaca_timeframe(timeframe)
 
     if not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY and alpaca_tf:
         try:
             client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
-                timeframe=alpaca_tf,
+                timeframe=alpaca_tf,              # <-- FIXED: use TimeFrame object
                 start=now - timedelta(days=60),
                 end=now
             )
@@ -447,6 +457,8 @@ async def fetch_ohlcv(symbol, timeframe):
         except Exception as e:
             print(f"⚠️ Alpaca stock fetch failed for {symbol}, trying Finnhub... {e}")
             df = None
+
+    # ... rest of the function (Finnhub, Twelve Data, crypto fallbacks) unchanged ...
 
     if df is None and not is_crypto:
         df = await fetch_finnhub(symbol, timeframe)
