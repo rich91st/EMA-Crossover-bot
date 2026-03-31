@@ -18,6 +18,7 @@ import yfinance as yf
 # Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
+from alpaca.data.enums import TimeFrame, TimeFrameUnit   # <-- ADDED for timeframe fix
 
 # Charting libraries
 import matplotlib
@@ -457,8 +458,6 @@ async def fetch_ohlcv(symbol, timeframe):
         except Exception as e:
             print(f"⚠️ Alpaca stock fetch failed for {symbol}, trying Finnhub... {e}")
             df = None
-
-    # ... rest of the function (Finnhub, Twelve Data, crypto fallbacks) unchanged ...
 
     if df is None and not is_crypto:
         df = await fetch_finnhub(symbol, timeframe)
@@ -2021,16 +2020,17 @@ def analyze_structure(df, window=5):
         last_event: 'BOS' or 'CHoCH' or None
         last_event_direction: 'up' or 'down'
         description: readable summary
+        event_points: dict with 'points' (list of two (index, price) tuples), 'type' (str), 'direction' (str)
     """
     if len(df) < 50:
         return {
             'trend': 'insufficient data',
             'last_event': None,
             'last_event_direction': None,
-            'description': 'Not enough data to determine market structure.'
+            'description': 'Not enough data to determine market structure.',
+            'event_points': None
         }
     
-    # Get swing highs and lows
     highs, lows = find_swings(df, window)
     
     if len(highs) < 2 and len(lows) < 2:
@@ -2038,11 +2038,11 @@ def analyze_structure(df, window=5):
             'trend': 'sideways',
             'last_event': None,
             'last_event_direction': None,
-            'description': 'No clear swing points found.'
+            'description': 'No clear swing points found.',
+            'event_points': None
         }
     
-    # Determine trend by comparing last two swing points
-    # If last two swing highs are higher, uptrend; if last two swing lows are lower, downtrend
+    # Determine trend
     last_highs = highs[-2:] if len(highs) >= 2 else []
     last_lows = lows[-2:] if len(lows) >= 2 else []
     
@@ -2052,15 +2052,12 @@ def analyze_structure(df, window=5):
     elif len(last_lows) >= 2 and last_lows[-1][1] < last_lows[-2][1]:
         trend = 'downtrend'
     
-    # Check last event (BOS or CHoCH)
-    # Use the most recent swing point and compare with previous one
     last_event = None
     last_event_direction = None
     description = f"Trend: {trend}. "
+    event_points = None
     
     if trend == 'uptrend':
-        # In uptrend, a BOS is when price breaks above the previous swing high
-        # A CHoCH would be a break below previous swing low (possible reversal)
         if len(highs) >= 2:
             prev_high = highs[-2][1]
             curr_high = highs[-1][1]
@@ -2068,13 +2065,22 @@ def analyze_structure(df, window=5):
                 last_event = 'BOS'
                 last_event_direction = 'up'
                 description += f"Break of Structure (BOS) confirmed – uptrend likely to continue."
+                event_points = {
+                    'type': 'BOS',
+                    'direction': 'up',
+                    'points': [highs[-2], highs[-1]]  # (index, price)
+                }
             else:
                 description += f"No recent BOS. Uptrend may be stalling."
-        # Also check for CHoCH (lower low in uptrend)
         if len(lows) >= 2 and lows[-1][1] < lows[-2][1]:
             last_event = 'CHoCH'
             last_event_direction = 'down'
             description += f" Change of Character (CHoCH) detected – possible reversal to downtrend."
+            event_points = {
+                'type': 'CHoCH',
+                'direction': 'down',
+                'points': [lows[-2], lows[-1]]
+            }
     elif trend == 'downtrend':
         if len(lows) >= 2:
             prev_low = lows[-2][1]
@@ -2083,12 +2089,22 @@ def analyze_structure(df, window=5):
                 last_event = 'BOS'
                 last_event_direction = 'down'
                 description += f"Break of Structure (BOS) confirmed – downtrend likely to continue."
+                event_points = {
+                    'type': 'BOS',
+                    'direction': 'down',
+                    'points': [lows[-2], lows[-1]]
+                }
             else:
                 description += f"No recent BOS. Downtrend may be stalling."
         if len(highs) >= 2 and highs[-1][1] > highs[-2][1]:
             last_event = 'CHoCH'
             last_event_direction = 'up'
             description += f" Change of Character (CHoCH) detected – possible reversal to uptrend."
+            event_points = {
+                'type': 'CHoCH',
+                'direction': 'up',
+                'points': [highs[-2], highs[-1]]
+            }
     else:
         description += "Market is sideways. Wait for a clear BOS or CHoCH."
     
@@ -2096,8 +2112,85 @@ def analyze_structure(df, window=5):
         'trend': trend,
         'last_event': last_event,
         'last_event_direction': last_event_direction,
-        'description': description
+        'description': description,
+        'event_points': event_points
     }
+
+def generate_structure_chart(df, symbol, structure):
+    """
+    Generate a chart showing price, swing highs/lows, and BOS/CHoCH lines.
+    """
+    if len(df) < 50:
+        return None
+
+    # Use a decent number of candles for context, but focus on recent structure
+    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close']
+
+    # Get swing points
+    swing_highs, swing_lows = find_swings(df)
+
+    # Convert to matplotlib-compatible data for plotting
+    dates = chart_data.index
+    prices = chart_data['Close'].values
+
+    # Create figure
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
+
+    # Plot candlesticks manually (since we need flexibility for annotations)
+    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)  # approximate width in days
+    for i, (idx, row) in enumerate(chart_data.iterrows()):
+        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
+        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
+        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
+
+    # Mark swing highs
+    for idx, price in swing_highs:
+        if idx in chart_data.index:
+            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
+
+    # Mark swing lows
+    for idx, price in swing_lows:
+        if idx in chart_data.index:
+            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
+
+    # Draw event lines if available
+    if structure.get('event_points'):
+        ev = structure['event_points']
+        points = ev['points']
+        if len(points) == 2:
+            idx1, price1 = points[0]
+            idx2, price2 = points[1]
+            # Only draw if both points are within chart range
+            if idx1 in chart_data.index and idx2 in chart_data.index:
+                # Draw line connecting the two points
+                ax.plot([idx1, idx2], [price1, price2], 'w--', linewidth=2, alpha=0.8)
+                # Add label at midpoint
+                mid_x = idx1 + (idx2 - idx1) / 2
+                mid_y = (price1 + price2) / 2
+                ax.text(mid_x, mid_y, ev['type'], color='yellow', fontsize=12, weight='bold',
+                        ha='center', va='center', bbox=dict(facecolor='black', alpha=0.7, pad=2))
+
+    # Formatting
+    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
+    ax.set_xlabel('Date', color='white')
+    ax.set_ylabel('Price', color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    plt.xticks(rotation=45)
+
+    # Save to buffer
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+        plt.tight_layout()
+        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
+        tmpfile.flush()
+        with open(tmpfile.name, 'rb') as f:
+            img_data = f.read()
+    os.unlink(tmpfile.name)
+    plt.close(fig)
+    return io.BytesIO(img_data)
 
 @bot.command(name='structure')
 async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
@@ -2130,8 +2223,6 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             return
 
         structure = analyze_structure(df)
-
-        # Current price
         current_price = df['close'].iloc[-1]
 
         embed = discord.Embed(
@@ -2161,7 +2252,14 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         web_url = get_tradingview_web_link(symbol)
         embed.add_field(name="📊 TradingView", value=f"[Click here for charts]({web_url})", inline=False)
 
-        await ctx.send(embed=embed)
+        # Generate chart
+        chart_buffer = generate_structure_chart(df, symbol, structure)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='structure_chart.png')
+            embed.set_image(url='attachment://structure_chart.png')
+            await ctx.send(embed=embed, file=file)
+        else:
+            await ctx.send(embed=embed)
 
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
