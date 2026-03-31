@@ -18,7 +18,7 @@ import yfinance as yf
 # Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.enums import TimeFrame, TimeFrameUnit   # <-- ADDED for timeframe fix
+from alpaca.data.enums import TimeFrame, TimeFrameUnit   # <-- ADDED THIS LINE
 
 # Charting libraries
 import matplotlib
@@ -390,7 +390,7 @@ async def fetch_ohlcv(symbol, timeframe):
                 client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
                 request = StockBarsRequest(
                     symbol_or_symbols=symbol,
-                    timeframe=TimeFrame.Minute15,          # <-- FIXED
+                    timeframe=TimeFrame.Minute15,
                     start=now - timedelta(days=60),
                     end=now
                 )
@@ -445,7 +445,7 @@ async def fetch_ohlcv(symbol, timeframe):
             client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
             request = StockBarsRequest(
                 symbol_or_symbols=symbol,
-                timeframe=alpaca_tf,              # <-- FIXED: use TimeFrame object
+                timeframe=alpaca_tf,
                 start=now - timedelta(days=60),
                 end=now
             )
@@ -2068,7 +2068,7 @@ def analyze_structure(df, window=5):
                 event_points = {
                     'type': 'BOS',
                     'direction': 'up',
-                    'points': [highs[-2], highs[-1]]  # (index, price)
+                    'points': [highs[-2], highs[-1]]
                 }
             else:
                 description += f"No recent BOS. Uptrend may be stalling."
@@ -2210,6 +2210,9 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             await ctx.send("Market structure analysis is currently only available for stocks.")
             return
 
+        # Accept both "4h" and "4hr" as aliases
+        if timeframe.lower() == '4hr':
+            timeframe = '4h'
         valid_timeframes = ['1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
             await ctx.send(f"Invalid timeframe. Use one of: {', '.join(valid_timeframes)}")
