@@ -60,10 +60,9 @@ cancellation_flags = {}
 # ====================
 # CACHE SETUP
 # ====================
-data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
+data_cache = {}
 CACHE_DURATION = timedelta(minutes=10)
 
-# Add cache for world news
 world_news_cache = {"data": None, "expiry": datetime.min}
 
 # ====================
@@ -94,7 +93,6 @@ coingecko_limiter = RateLimiter(max_calls=30, period=60)
 # ====================
 # WEB SERVER
 # ====================
-
 async def handle_health(request):
     return web.Response(text="OK")
 
@@ -111,7 +109,6 @@ async def start_web_server():
 # ====================
 # WATCHLIST FUNCTIONS (MongoDB)
 # ====================
-
 async def load_watchlist():
     try:
         doc = await watchlist_collection.find_one({'_id': 'main'})
@@ -164,7 +161,6 @@ def normalize_symbol(symbol):
 # ====================
 # TRADINGVIEW WEB LINK
 # ====================
-
 def get_tradingview_web_link(symbol):
     if '/' in symbol:  # Crypto
         base = symbol.split('/')[0]
@@ -179,7 +175,6 @@ def get_tradingview_web_link(symbol):
 # ====================
 # DATA FETCHING – Multi-source strategy
 # ====================
-
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
         '5min': '5',
@@ -3125,4 +3120,111 @@ async def add_symbol(ctx, symbol):
     try:
         symbol = normalize_symbol(symbol.upper())
         watchlist = await load_watchlist()
-        if '/' in
+        if '/' in symbol:
+            # Crypto
+            if symbol not in watchlist['crypto']:
+                watchlist['crypto'].append(symbol)
+                await save_watchlist(watchlist)
+                await ctx.send(f"✅ Added {symbol} to crypto watchlist.")
+            else:
+                await ctx.send(f"{symbol} already in crypto watchlist.")
+        else:
+            # Stock
+            if symbol not in watchlist['stocks']:
+                watchlist['stocks'].append(symbol)
+                await save_watchlist(watchlist)
+                await ctx.send(f"✅ Added {symbol} to stock watchlist.")
+            else:
+                await ctx.send(f"{symbol} already in stock watchlist.")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='remove')
+async def remove_symbol(ctx, symbol):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(symbol.upper())
+        watchlist = await load_watchlist()
+        if '/' in symbol:
+            if symbol in watchlist['crypto']:
+                watchlist['crypto'].remove(symbol)
+                await save_watchlist(watchlist)
+                await ctx.send(f"✅ Removed {symbol} from crypto watchlist.")
+            else:
+                await ctx.send(f"{symbol} not found in crypto watchlist.")
+        else:
+            if symbol in watchlist['stocks']:
+                watchlist['stocks'].remove(symbol)
+                await save_watchlist(watchlist)
+                await ctx.send(f"✅ Removed {symbol} from stock watchlist.")
+            else:
+                await ctx.send(f"{symbol} not found in stock watchlist.")
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='watchlist')
+async def show_watchlist(ctx):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        watchlist = await load_watchlist()
+        stocks = watchlist['stocks']
+        crypto = watchlist['crypto']
+
+        embed = discord.Embed(title="📋 Your Watchlist", color=0x3498db)
+        embed.add_field(name="Stocks", value=", ".join(stocks[:25]) if stocks else "None", inline=False)
+        embed.add_field(name="Crypto", value=", ".join(crypto) if crypto else "None", inline=False)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# CANCEL COMMAND
+# ====================
+@bot.command(name='cancel')
+async def cancel_scan(ctx):
+    """Cancel a running scan."""
+    cancellation_flags[ctx.author.id] = True
+    await ctx.send("🛑 Cancellation requested. The current scan will stop after the current symbol.")
+    print(f"Cancel requested by {ctx.author.id}")
+
+# ====================
+# HELPER FUNCTIONS (missing)
+# ====================
+async def fetch_stock_price_quick(symbol):
+    """Fetch current price and previous close quickly."""
+    try:
+        stock = yf.Ticker(symbol)
+        data = stock.history(period="2d")
+        if not data.empty:
+            current = data['Close'].iloc[-1]
+            prev = data['Close'].iloc[-2] if len(data) > 1 else None
+            return current, prev
+        return None, None
+    except Exception as e:
+        print(f"Error fetching price for {symbol}: {e}")
+        return None, None
+
+async def check_cancel(ctx):
+    """Check if cancellation is requested for the user."""
+    return cancellation_flags.get(ctx.author.id, False)
+
+# ====================
+# BOT STARTUP
+# ====================
+@bot.event
+async def on_ready():
+    print(f"✅ Logged in as {bot.user}")
+    await start_web_server()
+
+if __name__ == "__main__":
+    bot.run(DISCORD_TOKEN)
