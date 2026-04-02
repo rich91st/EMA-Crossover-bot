@@ -29,6 +29,9 @@ import matplotlib.colors as mcolors
 import mplfinance as mpf
 import io
 
+# Finviz integration
+from finvizfinance.screener.overview import Overview
+
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
 # === CONFIGURATION ===
@@ -60,10 +63,9 @@ cancellation_flags = {}
 # ====================
 # CACHE SETUP
 # ====================
-data_cache = {}          # key: f"{symbol}_{timeframe}", value: (DataFrame, expiry)
+data_cache = {}
 CACHE_DURATION = timedelta(minutes=10)
 
-# Add cache for world news
 world_news_cache = {"data": None, "expiry": datetime.min}
 
 # ====================
@@ -94,7 +96,6 @@ coingecko_limiter = RateLimiter(max_calls=30, period=60)
 # ====================
 # WEB SERVER
 # ====================
-
 async def handle_health(request):
     return web.Response(text="OK")
 
@@ -111,7 +112,6 @@ async def start_web_server():
 # ====================
 # WATCHLIST FUNCTIONS (MongoDB)
 # ====================
-
 async def load_watchlist():
     try:
         doc = await watchlist_collection.find_one({'_id': 'main'})
@@ -121,7 +121,6 @@ async def load_watchlist():
                 "crypto": doc.get('crypto', [])
             }
         else:
-            # Remove NKLA from the default list
             default = {
                 "_id": "main",
                 "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL"],
@@ -165,7 +164,6 @@ def normalize_symbol(symbol):
 # ====================
 # TRADINGVIEW WEB LINK
 # ====================
-
 def get_tradingview_web_link(symbol):
     if '/' in symbol:  # Crypto
         base = symbol.split('/')[0]
@@ -180,7 +178,6 @@ def get_tradingview_web_link(symbol):
 # ====================
 # DATA FETCHING – Multi-source strategy
 # ====================
-
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
         '5min': '5',
@@ -554,86 +551,20 @@ async def fetch_newsapi_top_headlines(country='us'):
         print(f"Error fetching NewsAPI for {country}: {e}")
         return None
 
-async def fetch_analyst_ratings_enhanced(symbol):
-    mock_ratings = {
-        'NIO': {
-            'ratings': [
-                {'firm': 'HSBC', 'action': 'Upgrade', 'from': 'Hold', 'to': 'Buy', 'pt': 6.80, 'date': '2026-03-13'},
-                {'firm': 'Nomura', 'action': 'Upgrade', 'from': 'Neutral', 'to': 'Buy', 'pt': 6.60, 'date': '2026-03-11'},
-                {'firm': 'Citi', 'action': 'Maintain', 'rating': 'Buy', 'pt': 6.90, 'date': '2026-03-10'},
-                {'firm': 'Macquarie', 'action': 'Downgrade', 'from': 'Outperform', 'to': 'Neutral', 'pt': 5.30, 'date': '2026-02-15'}
-            ],
-            'consensus': {
-                'buy': 12,
-                'hold': 8,
-                'sell': 3,
-                'avg_pt': 6.45
-            }
-        }
-    }
-    if symbol == 'NIO':
-        return mock_ratings[symbol]
-    return None
-
-async def fetch_company_news_enhanced(symbol):
-    mock_news = {
-        'NIO': [
-            {
-                'title': 'HSBC upgrades NIO to Buy, raises target to $6.80 on strong volume growth',
-                'source': 'HSBC Research',
-                'date': '2026-03-13',
-                'url': '',
-                'type': 'analyst',
-                'summary': 'HSBC upgraded NIO to Buy from Hold, citing above-industry visibility for earnings and strong order momentum.'
-            },
-            {
-                'title': 'NIO achieves first-ever quarterly profit, shares surge 15%',
-                'source': 'Company Report',
-                'date': '2026-03-10',
-                'url': '',
-                'type': 'earnings',
-                'summary': 'NIO reported Q4 net profit of RMB0.12 billion, its first quarterly profit ever, on record deliveries of 124,807 vehicles.'
-            },
-            {
-                'title': 'NIO ES9 flagship SUV to launch April 10 with advanced tech',
-                'source': 'Product Launch',
-                'date': '2026-03-09',
-                'url': '',
-                'type': 'product',
-                'summary': 'ES9 tech launch set for April 10, featuring three LiDAR units and SkyRide intelligent chassis. Deliveries begin June 1.'
-            },
-            {
-                'title': 'Onvo L80 specifications due late April, targeting 200k-300k yuan segment',
-                'source': 'Product Pipeline',
-                'date': '2026-03-08',
-                'url': '',
-                'type': 'product',
-                'summary': 'The Onvo L80, a large five-seat SUV focused on space and practicality, will reveal specs in late April.'
-            },
-            {
-                'title': 'Institutional investors build large positions in NIO',
-                'source': '13F Filings',
-                'date': '2026-03-05',
-                'url': '',
-                'type': 'institutional',
-                'summary': 'Aspex Management took a $266M position, WT Asset Management added $142M, showing strong institutional interest.'
-            }
-        ]
-    }
-    if symbol in mock_news:
-        return mock_news[symbol]
-    return None
-
-async def fetch_stock_price_quick(symbol):
+async def fetch_analyst_ratings(symbol, limit=3):
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+    timeout = aiohttp.ClientTimeout(total=10)
     try:
-        stock = yf.Ticker(symbol)
-        data = stock.history(period="1d")
-        if not data.empty:
-            return float(data['Close'].iloc[-1]), float(data['Open'].iloc[0]) if len(data) > 0 else None
-        return None, None
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data[:limit] if data else []
     except Exception as e:
-        print(f"Error fetching price for {symbol}: {e}")
-        return None, None
+        print(f"Error fetching analyst ratings for {symbol}: {e}")
+        return []
 
 async def fetch_earnings_upcoming(symbol, days=14):
     url = "https://finnhub.io/api/v1/calendar/earnings"
@@ -1340,50 +1271,69 @@ async def stock_news_enhanced(ctx, ticker: str):
         await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
 
         price_task = fetch_stock_price_quick(symbol)
-        ratings_task = fetch_analyst_ratings_enhanced(symbol)
-        news_task = fetch_company_news_enhanced(symbol)
-        finnhub_task = fetch_finnhub_news(symbol)
+        ratings_task = fetch_analyst_ratings(symbol, limit=3)
+        news_task = fetch_finnhub_news(symbol)
 
-        price_result, ratings_data, news_data, finnhub_data = await asyncio.gather(
-            price_task, ratings_task, news_task, finnhub_task, return_exceptions=True
+        price_result, ratings_data, finnhub_data = await asyncio.gather(
+            price_task, ratings_task, news_task, return_exceptions=True
         )
 
         current_price, prev_close = (None, None)
         if not isinstance(price_result, Exception) and price_result:
             current_price, prev_close = price_result
 
-        if (isinstance(news_data, Exception) or not news_data) and not isinstance(finnhub_data, Exception) and finnhub_data:
-            web_url = get_tradingview_web_link(symbol)
-            tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+        if isinstance(ratings_data, Exception):
+            ratings_data = None
+        if isinstance(finnhub_data, Exception):
+            finnhub_data = None
 
-            embed = discord.Embed(
-                title=f"Latest News for {symbol} (Legacy)",
-                color=0x3498db,
-                timestamp=datetime.now()
-            )
-
-            if current_price:
-                embed.description = f"Current Price: **${current_price:.2f}**"
-
-            for article in finnhub_data[:5]:
-                headline = article.get('headline', 'No Headline')
-                source = article.get('source', 'Unknown')
-                date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M') if article.get('datetime') else 'Unknown'
-                url = article.get('url', '')
-                if len(headline) > 256:
-                    headline = headline[:253] + "..."
-                embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
-
-            embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-            embed.set_footer(text=f"Requested by {ctx.author.display_name} • Limited data")
-            await ctx.send(embed=embed)
+        if not finnhub_data:
+            await ctx.send(f"❌ Could not fetch news data for {symbol}.")
             return
 
-        if not isinstance(news_data, Exception) and news_data:
-            embed = format_enhanced_news_embed(symbol, news_data, ratings_data, current_price, prev_close)
-            await ctx.send(embed=embed)
-        else:
-            await ctx.send(f"❌ Could not fetch news data for {symbol}.")
+        web_url = get_tradingview_web_link(symbol)
+        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+
+        embed = discord.Embed(
+            title=f"Latest News for {symbol}",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+
+        if current_price:
+            embed.description = f"Current Price: **${current_price:.2f}**"
+
+        # Add analyst ratings if available
+        if ratings_data:
+            ratings_text = ""
+            for r in ratings_data[:3]:
+                period = r.get('period', '')
+                sb = r.get('strongBuy', 0)
+                b = r.get('buy', 0)
+                h = r.get('hold', 0)
+                s = r.get('sell', 0)
+                ss = r.get('strongSell', 0)
+                total = sb + b + h + s + ss
+                buys = sb + b
+                sells = s + ss
+                sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
+                if total > 0:
+                    ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
+            if ratings_text:
+                embed.add_field(name="📈 Analyst Ratings (last 3)", value=ratings_text, inline=False)
+
+        for article in finnhub_data[:5]:
+            headline = article.get('headline', 'No Headline')
+            source = article.get('source', 'Unknown')
+            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M') if article.get('datetime') else 'Unknown'
+            url = article.get('url', '')
+            if len(headline) > 256:
+                headline = headline[:253] + "..."
+            embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
+
+        embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
 
     except Exception as e:
         await ctx.send(f"❌ Error fetching news: {str(e)}")
@@ -2619,6 +2569,103 @@ async def leaps_candidates(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
+# FINVIZ SCANNER (NEW)
+# ====================
+@bot.command(name='finviz_scan')
+async def finviz_scan(ctx, *, filters: str = None):
+    """
+    Scan Finviz for stocks using filters.
+    Example usage:
+        !finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%
+    You can also use the shorthand '!finviz_scan' to get a list of preset filters.
+    """
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        if not filters:
+            # Send a help message with example filters
+            help_embed = discord.Embed(
+                title="🔎 Finviz Scanner Help",
+                description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $15`\n- `Optionable: Yes`\n- `Avg Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Price Change: Over 3%`\n- `Market Cap: Over $1B`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.",
+                color=0x3498db
+            )
+            await ctx.send(embed=help_embed)
+            return
+
+        await ctx.send("🔎 Running Finviz scan... This may take a few seconds.")
+
+        # Parse filters – user can input a comma-separated string
+        # We'll split by comma and strip each filter
+        filter_list = [f.strip() for f in filters.split(',') if f.strip()]
+        if not filter_list:
+            await ctx.send("❌ No valid filters provided.")
+            return
+
+        # Build a filter dictionary
+        filter_dict = {}
+        for f in filter_list:
+            if ':' in f:
+                key, value = f.split(':', 1)
+                filter_dict[key.strip()] = value.strip()
+            else:
+                # If no colon, treat as a single filter (unlikely but handle)
+                filter_dict[f] = ""
+
+        # Initialize Finviz screener
+        fov = Overview()
+        fov.set_filter(filters_dict=filter_dict)
+        
+        # Run the scan
+        df = fov.screener_view()
+        
+        if df.empty:
+            await ctx.send("📭 No stocks found matching your filters.")
+            return
+
+        # Limit to first 25 results to avoid spam
+        df = df.head(25)
+        
+        # Build embed
+        embed = discord.Embed(
+            title="📊 Finviz Scan Results",
+            description=f"Filters used: {filters[:200]}{'...' if len(filters) > 200 else ''}",
+            color=0x00ff00,
+            timestamp=datetime.now()
+        )
+        
+        # Prepare a text block of results
+        results_text = ""
+        for idx, row in df.iterrows():
+            ticker = row.get('Ticker', 'N/A')
+            price = row.get('Price', 'N/A')
+            change = row.get('Change', 'N/A')
+            volume = row.get('Volume', 'N/A')
+            rel_vol = row.get('Rel Volume', 'N/A')
+            market_cap = row.get('Market Cap', 'N/A')
+            results_text += f"**{ticker}** – ${price} ({change}) | Vol: {volume} | RelVol: {rel_vol} | MCap: {market_cap}\n"
+        
+        if results_text:
+            add_field_safe(embed, "📈 Top Matches", results_text, inline=False)
+        else:
+            embed.add_field(name="📈 Top Matches", value="No data returned", inline=False)
+        
+        embed.set_footer(text="Use !structure TICKER or !flow TICKER for deeper analysis")
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Finviz scan error: {str(e)}")
+        print(f"Finviz error: {e}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
 # UPCOMING COMMAND (FIXED with timeout)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
@@ -3412,6 +3459,22 @@ async def help_command(ctx):
         )
 
         embed.add_field(
+            name="\n🔎 FINVIZ SCANNER",
+            value="",
+            inline=False
+        )
+        embed.add_field(
+            name="`!finviz_scan`",
+            value="Show filter help",
+            inline=False
+        )
+        embed.add_field(
+            name="`!finviz_scan filters`",
+            value="Run Finviz screener. Example: `!finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5`",
+            inline=False
+        )
+
+        embed.add_field(
             name="\n📋 WATCHLIST",
             value="",
             inline=False
@@ -3467,7 +3530,7 @@ async def help_command(ctx):
         embed.set_footer(text="💡 Pro tip: Focus on High Probability Setups (30-45 DTE, near money) for consistent wins")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !finviz_scan, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
