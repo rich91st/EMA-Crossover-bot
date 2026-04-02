@@ -2576,7 +2576,7 @@ async def finviz_scan(ctx, *, filters: str = None):
     """
     Scan Finviz for stocks using filters.
     Example usage:
-        !finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%
+        !finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%
     You can also use the shorthand '!finviz_scan' to get a list of preset filters.
     """
     if user_busy.get(ctx.author.id):
@@ -2593,7 +2593,7 @@ async def finviz_scan(ctx, *, filters: str = None):
             # Send a help message with example filters
             help_embed = discord.Embed(
                 title="🔎 Finviz Scanner Help",
-                description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $15`\n- `Optionable: Yes`\n- `Avg Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Price Change: Over 3%`\n- `Market Cap: Over $1B`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.",
+                description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $20`\n- `Optionable: Yes`\n- `Avg Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Price Change: Over 3%`\n- `Market Cap: Over $1B`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.",
                 color=0x3498db
             )
             await ctx.send(embed=help_embed)
@@ -2602,7 +2602,6 @@ async def finviz_scan(ctx, *, filters: str = None):
         await ctx.send("🔎 Running Finviz scan... This may take a few seconds.")
 
         # Parse filters – user can input a comma-separated string
-        # We'll split by comma and strip each filter
         filter_list = [f.strip() for f in filters.split(',') if f.strip()]
         if not filter_list:
             await ctx.send("❌ No valid filters provided.")
@@ -2615,7 +2614,6 @@ async def finviz_scan(ctx, *, filters: str = None):
                 key, value = f.split(':', 1)
                 filter_dict[key.strip()] = value.strip()
             else:
-                # If no colon, treat as a single filter (unlikely but handle)
                 filter_dict[f] = ""
 
         # Initialize Finviz screener
@@ -2664,6 +2662,24 @@ async def finviz_scan(ctx, *, filters: str = None):
         print(f"Finviz error: {e}")
     finally:
         user_busy[ctx.author.id] = False
+
+# ====================
+# PRESET FINVIZ COMMANDS (NEW)
+# ====================
+@bot.command(name='cheap_options')
+async def cheap_options(ctx):
+    """Preset scan for cheap optionable stocks ($10-20, high relative volume, positive price change)."""
+    await finviz_scan(ctx, filters="Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%, Market Cap: Over $1B")
+
+@bot.command(name='hype_stocks')
+async def hype_stocks(ctx):
+    """Preset scan for high relative volume and price movement stocks (hype)."""
+    await finviz_scan(ctx, filters="Relative Volume: Over 2, Price Change: Over 5%, Optionable: Yes, Avg Volume: Over 500K, Market Cap: Over $500M")
+
+@bot.command(name='cheap_plays')
+async def cheap_plays(ctx):
+    """Alias for !cheap_options."""
+    await cheap_options(ctx)
 
 # ====================
 # UPCOMING COMMAND (FIXED with timeout)
@@ -3357,7 +3373,7 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND
+# HELP COMMAND (updated with new presets)
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
@@ -3470,7 +3486,22 @@ async def help_command(ctx):
         )
         embed.add_field(
             name="`!finviz_scan filters`",
-            value="Run Finviz screener. Example: `!finviz_scan Price: $10 to $15, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5`",
+            value="Run Finviz screener. Example: `!finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5`",
+            inline=False
+        )
+        embed.add_field(
+            name="`!cheap_options`",
+            value="Preset scan: $10‑$20, optionable, avg volume >1M, rel volume >1.5, price change >3%, market cap >$1B",
+            inline=False
+        )
+        embed.add_field(
+            name="`!hype_stocks`",
+            value="Preset scan: rel volume >2, price change >5%, optionable, avg volume >500K, market cap >$500M",
+            inline=False
+        )
+        embed.add_field(
+            name="`!cheap_plays`",
+            value="Alias for !cheap_options",
             inline=False
         )
 
@@ -3530,7 +3561,7 @@ async def help_command(ctx):
         embed.set_footer(text="💡 Pro tip: Focus on High Probability Setups (30-45 DTE, near money) for consistent wins")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !finviz_scan, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
