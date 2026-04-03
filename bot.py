@@ -3378,185 +3378,69 @@ async def help_command(ctx):
     try:
         embed = discord.Embed(
             title="📚 5-13-50 Trading Bot Commands",
-            description="All commands use the prefix `!`\n\n**🟢 SCAN & SIGNALS**",
+            description=(
+                "All commands use the prefix `!`\n\n"
+                "**SCAN & SIGNALS**\n"
+                "`!scan all [timeframe]`\n"
+                "  Scan all watchlist symbols on a single timeframe (5min,15min,30min,1h,4h,daily,weekly)\n"
+                "`!scan SYMBOL [timeframe]`\n"
+                "  Scan a single symbol on a specific timeframe\n"
+                "`!signals`\n"
+                "  Scan your ENTIRE watchlist across ALL 7 timeframes (fast, uses Alpaca)\n"
+                "`!signal SYMBOL`\n"
+                "  Multi‑timeframe report for a single symbol\n\n"
+                "**NEWS & EVENTS**\n"
+                "`!news TICKER`\n"
+                "  Comprehensive, actionable news (analyst actions, product launches, institutional moves)\n"
+                "`!worldnews`\n"
+                "  Global headlines with market impact analysis and suggested stocks\n"
+                "`!upcoming [TICKER]`\n"
+                "  Upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)\n\n"
+                "**ZONES & STRUCTURE**\n"
+                "`!zone SYMBOL [timeframe]`\n"
+                "  Default 30min – shows demand zones with strength‑colored lines and ITM option suggestions. Also includes 4h market structure analysis.\n"
+                "`!structure SYMBOL [timeframe]`\n"
+                "  Analyse market structure (BOS / CHoCH) on 1h, 4h, daily, or weekly. Includes chart with swing points and event lines.\n\n"
+                "**OPTIONS FLOW**\n"
+                "`!flow TICKER`\n"
+                "  Unusual options activity – high probability setups first\n"
+                "`!scanflow`\n"
+                "  Scan watchlist for unusual options – high probability first\n\n"
+                "**BACKTESTING & LEAPS**\n"
+                "`!backtest SYMBOL [days=365]`\n"
+                "  Backtest EMA crossover strategy, returns win rate, profit factor, max drawdown\n"
+                "`!leaps`\n"
+                "  Scan watchlist for LEAPS candidates (stocks with CHoCH on weekly chart)\n\n"
+                "**FINVIZ SCANNER**\n"
+                "`!finviz_scan [filters]`\n"
+                "  Run a custom Finviz scan (e.g., `!finviz_scan Price: $10 to $20, Option/Short: Optionable`)\n"
+                "`!cheap_options`\n"
+                "  Preset: $10‑20, optionable, avg volume >1M, rel volume >1.5, up 3%\n"
+                "`!hype_stocks`\n"
+                "  Preset: rel volume >2, up 5%, optionable, avg volume >500K\n"
+                "`!cheap_plays`\n"
+                "  Alias for `!cheap_options`\n\n"
+                "**WATCHLIST**\n"
+                "`!add SYMBOL`\n"
+                "  Add stock or crypto (use BTC/USD for crypto)\n"
+                "`!remove SYMBOL`\n"
+                "  Remove from watchlist\n"
+                "`!list`\n"
+                "  Show watchlist\n\n"
+                "**UTILITY**\n"
+                "`!ping`\n"
+                "  Test bot\n"
+                "`!stopscan` / `!cancel`\n"
+                "  Stop ongoing scan\n"
+                "`!help`\n"
+                "  This message\n\n"
+                "**TIMEFRAMES**\n"
+                "5min, 15min, 30min, 1h, 4h, daily, weekly\n\n"
+                "💡 **Pro tip:** Focus on High Probability Setups (30‑45 DTE, near money) for consistent wins"
+            ),
             color=0x3498db
         )
-
-        embed.add_field(
-            name="`!scan all [timeframe]`",
-            value="Scan all watchlist symbols on a single timeframe (5min,15min,30min,1h,4h,daily,weekly)",
-            inline=False
-        )
-        embed.add_field(
-            name="`!scan SYMBOL [timeframe]`",
-            value="Scan a single symbol on a specific timeframe",
-            inline=False
-        )
-        embed.add_field(
-            name="`!signals`",
-            value="Scan your ENTIRE watchlist across ALL 7 timeframes (fast, uses Alpaca)",
-            inline=False
-        )
-        embed.add_field(
-            name="`!signal SYMBOL`",
-            value="Multi‑timeframe report for a single symbol",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n📰 NEWS & EVENTS",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!news TICKER`",
-            value="Comprehensive, actionable news (analyst actions, product launches, institutional moves)",
-            inline=False
-        )
-        embed.add_field(
-            name="`!worldnews`",
-            value="Global headlines with market impact analysis and suggested stocks",
-            inline=False
-        )
-        embed.add_field(
-            name="`!upcoming [TICKER]`",
-            value="Upcoming catalysts (earnings, dividends, splits, analyst ratings, expected move)",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n🎯 ZONES & STRUCTURE",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!zone SYMBOL [timeframe]`",
-            value="Default 30min – shows demand zones with strength‑colored lines and ITM option suggestions. Also includes 4h market structure analysis.",
-            inline=False
-        )
-        embed.add_field(
-            name="`!structure SYMBOL [timeframe]`",
-            value="Analyse market structure (BOS / CHoCH) on 1h, 4h, daily, or weekly. Includes chart with swing points and event lines.",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n🔥 OPTIONS FLOW",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!flow TICKER`",
-            value="Unusual options activity – high probability setups first",
-            inline=False
-        )
-        embed.add_field(
-            name="`!scanflow`",
-            value="Scan watchlist for unusual options – high probability first",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n📈 BACKTESTING & LEAPS",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!backtest SYMBOL [days=365]`",
-            value="Backtest EMA crossover strategy, returns win rate, profit factor, max drawdown",
-            inline=False
-        )
-        embed.add_field(
-            name="`!leaps`",
-            value="Scan watchlist for LEAPS candidates (stocks with CHoCH on weekly chart)",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n🔎 FINVIZ SCANNER",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!finviz_scan`",
-            value="Show filter help",
-            inline=False
-        )
-        embed.add_field(
-            name="`!finviz_scan filters`",
-            value="Run Finviz screener. Example: `!finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5`",
-            inline=False
-        )
-        embed.add_field(
-            name="`!cheap_options`",
-            value="Preset scan: $10‑$20, optionable, avg volume >1M, rel volume >1.5, price change >3%, market cap >$1B",
-            inline=False
-        )
-        embed.add_field(
-            name="`!hype_stocks`",
-            value="Preset scan: rel volume >2, price change >5%, optionable, avg volume >500K, market cap >$500M",
-            inline=False
-        )
-        embed.add_field(
-            name="`!cheap_plays`",
-            value="Alias for !cheap_options",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n📋 WATCHLIST",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!add SYMBOL`",
-            value="Add stock or crypto (use BTC/USD for crypto)",
-            inline=False
-        )
-        embed.add_field(
-            name="`!remove SYMBOL`",
-            value="Remove from watchlist",
-            inline=False
-        )
-        embed.add_field(
-            name="`!list`",
-            value="Show watchlist",
-            inline=False
-        )
-
-        embed.add_field(
-            name="\n⚙️ UTILITY",
-            value="",
-            inline=False
-        )
-        embed.add_field(
-            name="`!ping`",
-            value="Test bot",
-            inline=True
-        )
-        embed.add_field(
-            name="`!stopscan`",
-            value="Stop ongoing scan",
-            inline=True
-        )
-        embed.add_field(
-            name="`!cancel`",
-            value="Alias for !stopscan",
-            inline=True
-        )
-        embed.add_field(
-            name="`!help`",
-            value="This message",
-            inline=True
-        )
-
-        embed.add_field(
-            name="\n⏱️ TIMEFRAMES",
-            value="5min, 15min, 30min, 1h, 4h, daily, weekly",
-            inline=False
-        )
-
-        embed.set_footer(text="💡 Pro tip: Focus on High Probability Setups (30-45 DTE, near money) for consistent wins")
+        embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
