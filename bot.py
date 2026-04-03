@@ -2667,12 +2667,12 @@ async def finviz_scan(ctx, *, filters: str = None):
 # PRESET FINVIZ COMMANDS (NEW)
 @bot.command(name='cheap_options')
 async def cheap_options(ctx):
-    filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Over 3%, Market Cap.: Over $1B"
+    filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%, Market Cap.: Over $1B"
     await finviz_scan(ctx, filters=filters)
 
 @bot.command(name='hype_stocks')
 async def hype_stocks(ctx):
-    filters = "Relative Volume: Over 2, Change: Over 5%, Option/Short: Optionable, Average Volume: Over 500K, Market Cap.: Over $500M"
+    filters = "Relative Volume: Over 2, Change: Up 5%, Option/Short: Optionable, Average Volume: Over 500K, Market Cap.: Over $500M"
     await finviz_scan(ctx, filters=filters)
 
 @bot.command(name='cheap_plays')
