@@ -2670,7 +2670,7 @@ async def cheap_options(ctx):
     filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%"
     await finviz_scan(ctx, filters=filters)
 
-@bo@bot.command(name='hype_stocks')
+@bot.command(name='hype_stocks')
 async def hype_stocks(ctx):
     filters = "Relative Volume: Over 2, Change: Up 5%, Option/Short: Optionable, Average Volume: Over 500K"
     await finviz_scan(ctx, filters=filters)
