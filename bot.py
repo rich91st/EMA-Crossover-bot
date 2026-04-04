@@ -1341,9 +1341,44 @@ async def stock_news_enhanced(ctx, ticker: str):
         user_busy[ctx.author.id] = False
 
 # ====================
-# EMBED FORMATTING (original)
+# PEG RATIO HELPER (NEW – with color coding)
 # ====================
-def format_embed(symbol, signals, timeframe):
+async def get_peg_ratio(symbol):
+    """Fetch PEG ratio for a stock. Returns a tuple (float_value, formatted_string_with_emoji) or (None, None)."""
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        peg = info.get('pegRatio')
+        if peg and peg > 0:
+            peg_val = float(peg)
+        else:
+            # Try manual calculation
+            pe = info.get('trailingPE')
+            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth')
+            if pe and earnings_growth and earnings_growth != 0:
+                peg_val = pe / (earnings_growth * 100)
+                if peg_val <= 0:
+                    return None, None
+            else:
+                return None, None
+
+        # Determine emoji based on value
+        if peg_val < 1.0:
+            emoji = "🟢"  # Great
+        elif peg_val < 2.0:
+            emoji = "🟡"  # Decent
+        else:
+            emoji = "🔴"  # Not good
+
+        return peg_val, f"{emoji} {peg_val:.2f}"
+    except Exception as e:
+        print(f"Error fetching PEG for {symbol}: {e}")
+        return None, None
+
+# ====================
+# EMBED FORMATTING (updated with PEG)
+# ====================
+def format_embed(symbol, signals, timeframe, peg_str=None):
     if not signals:
         return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
 
@@ -1422,6 +1457,11 @@ def format_embed(symbol, signals, timeframe):
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
     embed.add_field(name="Volume", value=vol_display, inline=True)
+
+    # Add PEG ratio for stocks if available
+    if peg_str and '/' not in symbol:
+        embed.add_field(name="PEG Ratio", value=peg_str, inline=True)
+
     embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
     embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
     embed.add_field(name="Reason", value=reason_str, inline=False)
@@ -1504,7 +1544,7 @@ def format_zone_embed(symbol, signals, timeframe):
     return embed
 
 # ====================
-# COMBINED SYMBOL REPORT FUNCTIONS
+# COMBINED SYMBOL REPORT FUNCTIONS (updated with PEG)
 # ====================
 async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     timeframe_priority = {
@@ -1528,8 +1568,12 @@ async def send_combined_symbol_report(ctx, symbol, symbol_signals):
     df = best_data['df']
     signals = best_data['signals']
 
-    df_calc = calculate_indicators(df)
-    main_embed = format_embed(symbol, signals, best_tf)
+    # Fetch PEG ratio for stocks
+    peg_str = None
+    if '/' not in symbol:
+        _, peg_str = await get_peg_ratio(symbol)
+
+    main_embed = format_embed(symbol, signals, best_tf, peg_str=peg_str)
 
     try:
         chart_buffer = generate_chart_image(df, symbol, best_tf)
@@ -1639,7 +1683,7 @@ async def send_final_summary(ctx, signal_summary):
     if strong_sell:
         embed.add_field(name="🔴🔴 STRONG SELL", value="\n".join(strong_sell[:10]), inline=False)
 
-    embed.set_footer(text="Use !signals SYMBOL for detailed analysis")
+    embed.set_footer(text="Use !signal SYMBOL for detailed analysis")
     await ctx.send(embed=embed)
 
 # ====================
@@ -1978,7 +2022,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# MARKET STRUCTURE ANALYSIS (NEW)
+# MARKET STRUCTURE ANALYSIS
 # ====================
 def find_swings(df, window=5):
     """
@@ -2450,7 +2494,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# LEAPS COMMAND (NEW)
+# LEAPS COMMAND
 # ====================
 @bot.command(name='leaps')
 async def leaps_candidates(ctx):
@@ -2569,14 +2613,14 @@ async def leaps_candidates(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# FINVIZ SCANNER (NEW)
+# FINVIZ SCANNER
 # ====================
 @bot.command(name='finviz_scan')
 async def finviz_scan(ctx, *, filters: str = None):
     """
     Scan Finviz for stocks using filters.
     Example usage:
-        !finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%
+        !finviz_scan Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%
     You can also use the shorthand '!finviz_scan' to get a list of preset filters.
     """
     if user_busy.get(ctx.author.id):
@@ -2593,7 +2637,7 @@ async def finviz_scan(ctx, *, filters: str = None):
             # Send a help message with example filters
             help_embed = discord.Embed(
                 title="🔎 Finviz Scanner Help",
-                description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $20, Optionable: Yes, Avg Volume: Over 1M, Relative Volume: Over 1.5, Price Change: Over 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $20`\n- `Optionable: Yes`\n- `Avg Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Price Change: Over 3%`\n- `Market Cap: Over $1B`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.",
+                description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $20`\n- `Option/Short: Optionable`\n- `Average Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Change: Up 3%`\n- `Market Cap.: +Mid (over $2bln)`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.",
                 color=0x3498db
             )
             await ctx.send(embed=help_embed)
@@ -2664,7 +2708,8 @@ async def finviz_scan(ctx, *, filters: str = None):
         user_busy[ctx.author.id] = False
 
 # ====================
-# PRESET FINVIZ COMMANDS (NEW)
+# PRESET FINVIZ COMMANDS
+# ====================
 @bot.command(name='cheap_options')
 async def cheap_options(ctx):
     filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%"
@@ -3228,7 +3273,10 @@ async def scan(ctx, target='all', timeframe='daily'):
                 return
             df_calc = calculate_indicators(df)
             signals = get_signals(df_calc)
-            embed = format_embed(symbol, signals, timeframe)
+            peg_str = None
+            if '/' not in symbol:
+                _, peg_str = await get_peg_ratio(symbol)
+            embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
             try:
                 chart_buffer = generate_chart_image(df, symbol, timeframe)
                 if chart_buffer:
@@ -3251,7 +3299,10 @@ async def scan(ctx, target='all', timeframe='daily'):
             if df is not None and not df.empty:
                 df_calc = calculate_indicators(df)
                 signals = get_signals(df_calc)
-                embed = format_embed(symbol, signals, timeframe)
+                peg_str = None
+                if '/' not in symbol:
+                    _, peg_str = await get_peg_ratio(symbol)
+                embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
                 try:
                     chart_buffer = generate_chart_image(df, symbol, timeframe)
                     if chart_buffer:
@@ -3371,7 +3422,7 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND (updated with new presets)
+# HELP COMMAND (compact format)
 # ====================
 @bot.command(name='help')
 async def help_command(ctx):
@@ -3490,7 +3541,10 @@ async def cancel_scan(ctx):
 async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     df_calc = calculate_indicators(df)
     signals = get_signals(df_calc)
-    embed = format_embed(symbol, signals, timeframe)
+    peg_str = None
+    if '/' not in symbol:
+        _, peg_str = await get_peg_ratio(symbol)
+    embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
     try:
         chart_buffer = generate_chart_image(df, symbol, timeframe)
         if chart_buffer:
