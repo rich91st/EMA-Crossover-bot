@@ -1348,31 +1348,46 @@ async def get_peg_ratio(symbol):
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
-        peg = info.get('pegRatio')
-        if peg and peg > 0:
-            peg_val = float(peg)
-        else:
-            # Try manual calculation
+        
+        # Try different possible PEG fields
+        peg = None
+        for field in ['pegRatio', 'pegRatio5yr', 'pegRatioTTM', 'trailingPEG']:
+            val = info.get(field)
+            if val and isinstance(val, (int, float)) and val > 0:
+                peg = float(val)
+                print(f"✅ {symbol} PEG from {field}: {peg}")
+                break
+        
+        # If still no PEG, try manual calculation
+        if peg is None:
             pe = info.get('trailingPE')
-            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth')
-            if pe and earnings_growth and earnings_growth != 0:
-                peg_val = pe / (earnings_growth * 100)
-                if peg_val <= 0:
-                    return None, None
+            # Try multiple growth fields
+            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('earningsGrowth5y')
+            if pe and earnings_growth and isinstance(earnings_growth, (int, float)) and earnings_growth != 0:
+                # earnings_growth is often a decimal like 0.15 for 15%
+                peg = pe / (earnings_growth * 100)
+                if peg > 0:
+                    print(f"✅ {symbol} PEG calculated: PE={pe}, growth={earnings_growth}, PEG={peg}")
+                else:
+                    peg = None
             else:
-                return None, None
-
+                print(f"⚠️ {symbol} missing data: PE={pe}, growth={earnings_growth}")
+        
+        if peg is None or peg <= 0:
+            print(f"❌ No PEG ratio available for {symbol}")
+            return None, None
+        
         # Determine emoji based on value
-        if peg_val < 1.0:
+        if peg < 1.0:
             emoji = "🟢"  # Great
-        elif peg_val < 2.0:
+        elif peg < 2.0:
             emoji = "🟡"  # Decent
         else:
             emoji = "🔴"  # Not good
-
-        return peg_val, f"{emoji} {peg_val:.2f}"
+        
+        return peg, f"{emoji} {peg:.2f}"
     except Exception as e:
-        print(f"Error fetching PEG for {symbol}: {e}")
+        print(f"❌ Error fetching PEG for {symbol}: {e}")
         return None, None
 
 # ====================
