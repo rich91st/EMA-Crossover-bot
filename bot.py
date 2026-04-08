@@ -19,7 +19,7 @@ import yfinance as yf
 # Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
-from alpaca.data.enums import TimeFrame
+from alpaca.data.timeframe import TimeFrame
 
 # Charting libraries
 import matplotlib
