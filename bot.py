@@ -3607,40 +3607,47 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
 # TRUMP / TACO FUNCTIONS (preserved)
 # ====================
 async def fetch_latest_trump_post():
-    try:
-        url = "https://truthsocial.rss.simple-web.org/feed.xml"
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    print(f"Trump RSS fetch failed: {resp.status}")
-                    return None
-                text = await resp.text()
-                root = ET.fromstring(text)
-                item = root.find('.//item')
-                if item is not None:
-                    title = item.find('title').text
-                    pub_date = item.find('pubDate').text
-                    link = item.find('link').text
-                    return {
-                        'text': title,
-                        'timestamp': pub_date,
-                        'url': link
-                    }
-                entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
-                if entry is not None:
-                    title = entry.find('{http://www.w3.org/2005/Atom}title').text
-                    pub_date = entry.find('{http://www.w3.org/2005/Atom}updated').text
-                    link = entry.find('{http://www.w3.org/2005/Atom}link').get('href')
-                    return {
-                        'text': title,
-                        'timestamp': pub_date,
-                        'url': link
-                    }
-        return None
-    except Exception as e:
-        print(f"Error fetching Trump post: {e}")
-        return None
+    """Fetch the latest post from Trump's Truth Social using multiple RSS feeds."""
+    feeds = [
+        "https://trumpstruth.org/feed",           # Community-run, more reliable
+        "https://truthsocial.rss.simple-web.org/feed.xml",  # Backup
+    ]
+    
+    for url in feeds:
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        continue
+                    text = await resp.text()
+                    root = ET.fromstring(text)
+                    # Try RSS 2.0 first
+                    item = root.find('.//item')
+                    if item is not None:
+                        title = item.find('title').text
+                        pub_date = item.find('pubDate').text
+                        link = item.find('link').text
+                        return {
+                            'text': title,
+                            'timestamp': pub_date,
+                            'url': link
+                        }
+                    # Try Atom
+                    entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
+                    if entry is not None:
+                        title = entry.find('{http://www.w3.org/2005/Atom}title').text
+                        pub_date = entry.find('{http://www.w3.org/2005/Atom}updated').text
+                        link = entry.find('{http://www.w3.org/2005/Atom}link').get('href')
+                        return {
+                            'text': title,
+                            'timestamp': pub_date,
+                            'url': link
+                        }
+        except Exception as e:
+            print(f"Error with feed {url}: {e}")
+            continue
+    return None
 
 def analyze_trump_post(post_text):
     text_lower = post_text.lower()
