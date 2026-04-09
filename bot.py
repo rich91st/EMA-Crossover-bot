@@ -2094,8 +2094,15 @@ def generate_structure_chart(df, symbol, structure):
     plt.close(fig)
     return io.BytesIO(img_data)
 
+# ====================
+# STRUCTURE COMMAND – supports both single symbol and 'all' scan
+# ====================
 @bot.command(name='structure')
 async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
+    """Analyse market structure for a single symbol OR scan watchlist.
+    Usage: !structure AAPL 4h        (individual symbol)
+           !structure all 4h         (scan watchlist)
+    """
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2106,15 +2113,81 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             return
         last_command_time[ctx.author.id] = now
 
+        # Accept "all" to scan watchlist
+        if ticker.lower() == 'all':
+            watchlist = await load_watchlist()
+            symbols = watchlist['stocks']
+            if not symbols:
+                await ctx.send("No stocks in watchlist to scan.")
+                return
+
+            if timeframe.lower() == '4hr':
+                timeframe = '4h'
+            valid_timeframes = ['1h', '4h', 'daily', 'weekly']
+            if timeframe not in valid_timeframes:
+                await ctx.send(f"Invalid timeframe. Use: {', '.join(valid_timeframes)}")
+                return
+
+            await ctx.send(f"🔍 Scanning {len(symbols)} stocks for structure changes on {timeframe}...")
+
+            bos_up = []
+            choch_up = []
+            bos_down = []
+            choch_down = []
+
+            for sym in symbols:
+                if await check_cancel(ctx):
+                    break
+                try:
+                    df = await fetch_ohlcv(sym, timeframe)
+                    if df is None or len(df) < 50:
+                        continue
+                    structure = analyze_structure(df)
+                    current_price = df['close'].iloc[-1]
+                    desc = structure['description'][:100]
+                    if structure['last_event'] == 'BOS':
+                        if structure['last_event_direction'] == 'up':
+                            bos_up.append(f"{sym} (${current_price:.2f}) – {desc}")
+                        else:
+                            bos_down.append(f"{sym} (${current_price:.2f}) – {desc}")
+                    elif structure['last_event'] == 'CHoCH':
+                        if structure['last_event_direction'] == 'up':
+                            choch_up.append(f"{sym} (${current_price:.2f}) – {desc}")
+                        else:
+                            choch_down.append(f"{sym} (${current_price:.2f}) – {desc}")
+                except Exception as e:
+                    print(f"Error scanning {sym}: {e}")
+                await asyncio.sleep(0.5)
+
+            embed = discord.Embed(
+                title=f"📊 Market Structure Scan – {timeframe.upper()}",
+                color=0x3498db,
+                timestamp=datetime.now()
+            )
+            if bos_up:
+                embed.add_field(name="🟢 BOS UP (uptrend continuation)", value="\n".join(bos_up[:5]), inline=False)
+            if choch_up:
+                embed.add_field(name="🟠 CHoCH UP (potential reversal to uptrend)", value="\n".join(choch_up[:5]), inline=False)
+            if bos_down:
+                embed.add_field(name="🔴 BOS DOWN (downtrend continuation)", value="\n".join(bos_down[:5]), inline=False)
+            if choch_down:
+                embed.add_field(name="🟣 CHoCH DOWN (potential reversal to downtrend)", value="\n".join(choch_down[:5]), inline=False)
+            if not (bos_up or choch_up or bos_down or choch_down):
+                embed.description = "No clear BOS or CHoCH events found."
+            await ctx.send(embed=embed)
+            return
+
+        # Otherwise, treat as single symbol
         symbol = normalize_symbol(ticker)
         if '/' in symbol:
             await ctx.send("Market structure analysis is currently only available for stocks.")
             return
+
         if timeframe.lower() == '4hr':
             timeframe = '4h'
         valid_timeframes = ['1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
-            await ctx.send(f"Invalid timeframe. Use one of: {', '.join(valid_timeframes)}")
+            await ctx.send(f"Invalid timeframe. Use: {', '.join(valid_timeframes)}")
             return
 
         await ctx.send(f"🔍 Analyzing market structure for **{symbol}** ({timeframe})...")
@@ -2156,6 +2229,7 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             await ctx.send(embed=embed, file=file)
         else:
             await ctx.send(embed=embed)
+
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
@@ -3259,7 +3333,14 @@ async def help_command(ctx):
                 "`!zone SYMBOL [timeframe]`\n"
                 "  Default 30min – shows demand zones with strength‑colored lines and ITM option suggestions. Also includes 4h market structure analysis.\n"
                 "`!structure SYMBOL [timeframe]`\n"
-                "  Analyse market structure (BOS / CHoCH) on 1h, 4h, daily, or weekly. Includes chart with swing points and event lines.\n\n"
+                "  Analyse market structure (BOS / CHoCH) on 1h, 4h, daily, or weekly. Includes chart with swing points and event lines.\n"
+                "`!structure all [timeframe]`\n"
+                "  Scan watchlist for BOS/CHoCH events.\n\n"
+                "**TACO TRADE**\n"
+                "`!taco`\n"
+                "  Get actionable trade signal based on Trump's latest post (Trump Always Chickens Out).\n"
+                "`!pennant [timeframe]`\n"
+                "  Scan watchlist for bullish pennant (flat bottom) patterns.\n\n"
                 "**OPTIONS FLOW**\n"
                 "`!flow TICKER`\n"
                 "  Unusual options activity – high probability setups first\n"
@@ -3302,19 +3383,15 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
-# SCAN FOR CHoCH (Change of Character)
+# SCAN FOR PENNANT (BULLISH FLAG)
 # ====================
-@bot.command(name='scanchoch')
-async def scan_choch(ctx, timeframe: str = '4h'):
-    """
-    Scan watchlist for Change of Character (CHoCH) patterns.
-    Usage: !scanchoch [timeframe]
-    Timeframes: 1h, 4h, daily, weekly (default: 4h)
-    """
+@bot.command(name='pennant')
+async def scan_pennant(ctx, timeframe: str = '4h'):
+    """Scan watchlist for bullish pennant (flat bottom) patterns."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -3327,87 +3404,143 @@ async def scan_choch(ctx, timeframe: str = '4h'):
 
         valid_tfs = ['1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_tfs:
-            await ctx.send(f"❌ Invalid timeframe. Use one of: {', '.join(valid_tfs)}")
+            await ctx.send(f"❌ Invalid timeframe. Use: {', '.join(valid_tfs)}")
             return
 
         watchlist = await load_watchlist()
         symbols = watchlist['stocks']
         if not symbols:
-            await ctx.send("No stocks in watchlist to scan.")
+            await ctx.send("No stocks in watchlist.")
             return
 
-        await ctx.send(f"🔍 Scanning {len(symbols)} stocks for **CHoCH** on **{timeframe}** timeframe...")
+        await ctx.send(f"🔍 Scanning {len(symbols)} stocks for bullish pennants on {timeframe}...")
 
-        choch_up = []
-        choch_down = []
-        errors = []
-
+        found = []
         for symbol in symbols:
             if await check_cancel(ctx):
                 break
-
             try:
                 df = await fetch_ohlcv(symbol, timeframe)
-                if df is None or len(df) < 50:
+                if df is None or len(df) < 30:
                     continue
 
-                structure = analyze_structure(df)
-                if structure['last_event'] == 'CHoCH':
-                    direction = structure['last_event_direction']
+                recent_high = df['high'].tail(20).max()
+                recent_low = df['low'].tail(20).min()
+                highs_last10 = df['high'].tail(10)
+                lows_last10 = df['low'].tail(10)
+                descending = highs_last10.iloc[0] > highs_last10.iloc[-1] * 1.01
+                flat_bottom = (lows_last10.max() - lows_last10.min()) / lows_last10.min() < 0.02
+                if descending and flat_bottom:
                     current_price = df['close'].iloc[-1]
-                    info = f"{symbol} (${current_price:.2f}) – CHoCH **{direction.upper()}**\n{structure['description'][:150]}"
-                    if direction == 'up':
-                        choch_up.append(info)
-                    else:
-                        choch_down.append(info)
-                await asyncio.sleep(0.5)
+                    if current_price <= recent_low * 1.02:
+                        found.append(f"{symbol} (${current_price:.2f}) – flat support near ${recent_low:.2f}")
             except Exception as e:
-                errors.append(f"{symbol}: {str(e)[:50]}")
-                continue
+                print(f"Error scanning {symbol} for pennant: {e}")
+            await asyncio.sleep(0.3)
 
-        if not choch_up and not choch_down:
-            await ctx.send(f"📭 No CHoCH patterns found on {timeframe} timeframe.")
-            if errors:
-                await ctx.send(f"⚠️ Errors for: {', '.join(errors[:3])}")
+        if not found:
+            await ctx.send(f"📭 No bullish pennants found on {timeframe}.")
             return
 
         embed = discord.Embed(
-            title=f"🔄 Change of Character (CHoCH) Scan – {timeframe.upper()}",
-            description=f"Found {len(choch_up)} bullish CHoCH + {len(choch_down)} bearish CHoCH",
-            color=0x3498db,
+            title=f"🚩 Bullish Pennant (Flag) Scan – {timeframe.upper()}",
+            description=f"Found {len(found)} stocks with flat-bottom pennants",
+            color=0x00ff00,
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="📈 Potential Breakout Candidates", value="\n".join(found[:10]), inline=False)
+        embed.add_field(
+            name="💡 Trading Advice",
+            value="• Wait for price to break ABOVE the descending resistance line.\n"
+                  "• Entry on breakout + volume confirmation.\n"
+                  "• Stop loss just below the flat support.\n"
+                  "• Use `!structure SYMBOL` to see the chart.",
+            inline=False
+        )
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Error scanning pennants: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# TACO TRADE COMMAND (actionable Trump signal)
+# ====================
+@bot.command(name='taco')
+async def taco_trade(ctx):
+    """Get actionable TACO trade signal based on Trump's latest post."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send("🌮 Checking Trump's latest Truth for TACO signal...")
+
+        trump_post = await fetch_latest_trump_post()
+        if not trump_post:
+            await ctx.send("❌ Could not fetch Trump's latest post. RSS feed may be down.")
+            return
+
+        analysis = analyze_trump_post(trump_post['text'])
+
+        embed = discord.Embed(
+            title="🌮 TACO TRADE SIGNAL",
+            description="**Trump Always Chickens Out** – trade the reversal",
+            color=0xff6600,
             timestamp=datetime.now()
         )
 
-        if choch_up:
+        embed.add_field(name="📢 Latest Truth", value=f"> {trump_post['text'][:500]}{'…' if len(trump_post['text'])>500 else ''}", inline=False)
+        embed.add_field(name="📅 Time", value=trump_post['timestamp'], inline=True)
+        embed.add_field(name="📊 Sentiment", value=analysis['sentiment'], inline=True)
+        embed.add_field(name="🎲 TACO Probability", value=analysis['taco_probability'], inline=False)
+        embed.add_field(name="🎯 Affected Sectors", value=analysis['affected_sectors'], inline=True)
+        embed.add_field(name="💎 Suggested Stocks", value=analysis['suggested_stocks'], inline=True)
+
+        if "Bearish" in analysis['sentiment'] and "High" in analysis['taco_probability']:
             embed.add_field(
-                name="🟢 CHoCH UP (Potential reversal to uptrend)",
-                value="\n\n".join(choch_up[:5]) if choch_up else "None",
+                name="✅ TRADE ACTION",
+                value=(
+                    "**BUY CALLS** on the suggested stocks.\n"
+                    "• Wait for the market to dip on the threat.\n"
+                    "• Look for a **flat bottom (bullish pennant)** on the 4h chart.\n"
+                    "• Enter when price breaks above descending resistance.\n"
+                    "• Set stop loss just below the flat support.\n"
+                    "• Target: +10‑20% move when Trump backtracks.\n"
+                    "Use `!structure SYMBOL` to see the chart and `!pennant` to find flat bottoms."
+                ),
                 inline=False
             )
-        if choch_down:
+        elif "Bullish" in analysis['sentiment']:
             embed.add_field(
-                name="🔴 CHoCH DOWN (Potential reversal to downtrend)",
-                value="\n\n".join(choch_down[:5]) if choch_down else "None",
+                name="✅ TRADE ACTION",
+                value=(
+                    "**SELL / TAKE PROFITS** on the suggested stocks.\n"
+                    "• Trump is talking peace – the rally may end soon.\n"
+                    "• Consider selling calls or buying puts after a bounce.\n"
+                    "• Wait for a CHoCH down on the 4h chart.\n"
+                    "Use `!structure SYMBOL` to confirm reversal."
+                ),
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="⏳ TRADE ACTION",
+                value=(
+                    "No clear TACO signal yet. **Monitor** for threats or peace talks.\n"
+                    "When you see a threat, prepare to buy dips. When you see peace talks, prepare to sell.\n"
+                    "Use `!worldnews` for broader context."
+                ),
                 inline=False
             )
 
-        if choch_up or choch_down:
-            embed.add_field(
-                name="💡 Trading Advice",
-                value="• **CHoCH UP** → Wait for a pullback, then consider long entries.\n"
-                      "• **CHoCH DOWN** → Avoid catching falling knives; look for short entries after confirmation.\n"
-                      "• Always confirm with other signals (!zone, !flow).",
-                inline=False
-            )
+        embed.add_field(name="🔗 Link", value=f"[View on Truth Social]({trump_post['url']})", inline=False)
+        embed.set_footer(text="TACO = Trump Always Chickens Out • Not financial advice")
 
-        embed.set_footer(text="Use !structure SYMBOL for detailed chart")
         await ctx.send(embed=embed)
 
-        if errors:
-            await ctx.send(f"⚠️ Could not scan: {', '.join(errors[:3])}")
-
     except Exception as e:
-        await ctx.send(f"❌ Error scanning CHoCH: {str(e)}")
+        await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
