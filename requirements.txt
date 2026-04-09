@@ -11,3 +11,4 @@ yfinance
 alpaca-py
 tastytrade>=0.8.0
 finvizfinance
+marketaux
