@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
+import aiohttp
 
 # Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
@@ -1230,58 +1231,42 @@ async def world_news(ctx):
         return
     user_busy[ctx.author.id] = True
     try:
-        await ctx.send("🌍 Fetching global market news + Trump latest...")
+        await ctx.send("🌍 Fetching global market news with AI sentiment analysis...")
 
-        now = datetime.now()
-        source = "unknown"
-        if world_news_cache["data"] and world_news_cache["expiry"] > now:
-            combined_news = world_news_cache["data"]
-            source = "cached"
-        else:
-            countries = ['us', 'gb', 'cn', 'in', 'jp']
-            all_articles = []
-            for country in countries:
-                articles = await fetch_newsapi_top_headlines(country=country)
-                if articles:
-                    all_articles.extend(articles)
-                await asyncio.sleep(0.5)
+        api_key = os.getenv('MARKETAUX_API_KEY')
+        if not api_key:
+            await ctx.send("❌ Marketaux API key not configured. Please contact the bot administrator.")
+            return
 
-            if len(all_articles) < 5:
-                finnhub_news = await fetch_finnhub_general_news()
-                if finnhub_news:
-                    for item in finnhub_news[:10]:
-                        all_articles.append({
-                            'title': item.get('headline', ''),
-                            'description': item.get('summary', ''),
-                            'source': {'name': item.get('source', 'Finnhub')},
-                            'publishedAt': datetime.fromtimestamp(item.get('datetime', 0)).isoformat() if item.get('datetime') else None,
-                            'url': item.get('url', '')
-                        })
-                    source = "Finnhub + NewsAPI"
-                else:
-                    source = "NewsAPI (multiple countries)"
-            else:
-                source = "NewsAPI (multiple countries)"
+        # Marketaux API endpoint for latest financial news
+        url = "https://api.marketaux.com/v1/news/all"
+        params = {
+            'api_token': api_key,
+            'language': 'en',
+            'limit': 10,
+            'must_have_entities': 'true'  # Only get articles that mention specific stocks
+        }
 
-            seen = set()
-            unique_articles = []
-            for a in all_articles:
-                title = a.get('title', '')
-                if title and title not in seen:
-                    seen.add(title)
-                    unique_articles.append(a)
-            combined_news = unique_articles[:12]
-            world_news_cache["data"] = combined_news
-            world_news_cache["expiry"] = now + timedelta(minutes=30)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    await ctx.send(f"❌ News API error: {resp.status}")
+                    return
+                data = await resp.json()
+
+        articles = data.get('data', [])
+        if not articles:
+            await ctx.send("No news articles found.")
+            return
 
         embed = discord.Embed(
-            title="🌍 World News – Market Impact",
-            description=f"Top headlines from {source} (updated every 30 min)",
+            title="🌍 World News – AI Market Sentiment",
+            description=f"Top financial headlines from Marketaux (updated real-time)",
             color=0x3498db,
-            timestamp=now
+            timestamp=datetime.now()
         )
 
-        # --- Trump / TACO section ---
+        # Also fetch and display Trump's latest post (preserving your existing TACO feature)
         trump_post = await fetch_latest_trump_post()
         if trump_post:
             analysis = analyze_trump_post(trump_post['text'])
@@ -1296,37 +1281,33 @@ async def world_news(ctx):
                 f"[Link to post]({trump_post['url']})"
             )
             embed.add_field(name="🔔 @realDonaldTrump (Latest Truth)", value=trump_value, inline=False)
-        else:
-            embed.add_field(name="🔔 Trump Truth Feed", value="Could not fetch latest post (feed may be temporary down).", inline=False)
 
-        # Economic events
-        econ_events = await fetch_economic_events(days=7)
-        if econ_events:
-            econ_text = ""
-            for ev in econ_events[:3]:
-                date = ev.get('date', 'N/A')
-                event = ev.get('event', 'N/A')
-                country = ev.get('country', '')
-                importance = ev.get('importance', '')
-                star = "★" if importance == "high" else "☆" if importance == "medium" else "·" if importance else ""
-                econ_text += f"**{date}** {country}: {event} {star}\n"
-            embed.add_field(name="📆 Upcoming Economic Events (next 7 days)", value=econ_text or "None", inline=False)
-
-        count = 0
-        for article in combined_news[:8]:
+        for article in articles[:8]:
             title = article.get('title', 'No title')
-            if '[Removed]' in title or len(title) < 10:
-                continue
-            description = article.get('description', '') or article.get('summary', '')
-            source_name = article.get('source', {}).get('name', 'Unknown') if isinstance(article.get('source'), dict) else article.get('source', 'Unknown')
-            published = article.get('publishedAt', '')
-            url = article.get('url', '')
+            source = article.get('source', 'Unknown')
+            published_at = article.get('published_at', '')
+            url_link = article.get('url', '')
+            
+            # Get the sentiment from the first entity in the article
+            entities = article.get('entities', [])
+            sentiment_score = 0
+            if entities and len(entities) > 0:
+                sentiment_score = entities[0].get('sentiment_score', 0)
+            
+            # Convert sentiment score to emoji and color
+            if sentiment_score > 0.2:
+                sentiment_emoji = "🟢 Bullish"
+            elif sentiment_score < -0.2:
+                sentiment_emoji = "🔴 Bearish"
+            else:
+                sentiment_emoji = "⚪ Neutral"
 
+            # Format time ago
             time_ago = "recently"
-            if published:
+            if published_at:
                 try:
-                    pub_time = datetime.fromisoformat(published.replace('Z', '+00:00'))
-                    delta = now - pub_time
+                    pub_time = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                    delta = datetime.now() - pub_time
                     if delta.total_seconds() < 3600:
                         mins = int(delta.total_seconds() / 60)
                         time_ago = f"{mins} min ago" if mins > 0 else "just now"
@@ -1339,25 +1320,17 @@ async def world_news(ctx):
                 except:
                     pass
 
-            impact_text = analyze_news_impact(title, description)
-            field_value = f"**Source:** {source_name} | {time_ago}\n{impact_text}"
-            if url:
-                field_value += f"\n[Read more]({url})"
+            field_value = f"**Source:** {source} | {time_ago}\n**Sentiment:** {sentiment_emoji} (score: {sentiment_score:.2f})"
+            if url_link:
+                field_value += f"\n[Read more]({url_link})"
 
             embed.add_field(
                 name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}",
                 value=field_value,
                 inline=False
             )
-            count += 1
-            if count >= 8:
-                break
 
-        if count == 0 and not trump_post:
-            await ctx.send("No relevant news found.")
-            return
-
-        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • TACO = Trump Always Chickens Out • Not financial advice")
+        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • AI-powered sentiment analysis")
         await ctx.send(embed=embed)
 
     except Exception as e:
