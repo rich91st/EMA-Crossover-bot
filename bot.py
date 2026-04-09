@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
-# Alpaca imports
+# Alpaca imports - FIXED
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -43,6 +43,7 @@ DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
+MARKETAUX_API_KEY = os.getenv('MARKETAUX_API_KEY')
 
 # Alpaca keys
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
@@ -418,7 +419,6 @@ async def fetch_ohlcv(symbol, timeframe):
 
     # For other timeframes, try Alpaca first (if available)
     if df is None and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        # Map timeframe to (TimeFrame, multiplier)
         tf_map = {
             '5min': (TimeFrame.Minute, 5),
             '15min': (TimeFrame.Minute, 15),
@@ -454,7 +454,6 @@ async def fetch_ohlcv(symbol, timeframe):
         df = await fetch_twelvedata(symbol, timeframe)
 
     if is_crypto:
-        # Try Alpaca crypto first
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             tf_map_crypto = {
                 '5min': (TimeFrame.Minute, 5),
@@ -496,7 +495,7 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# ENHANCED NEWS FETCHING
+# ENHANCED NEWS FETCHING (Finnhub company news – kept for !news command)
 # ====================
 async def fetch_finnhub_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
@@ -573,8 +572,10 @@ async def fetch_analyst_ratings(symbol, limit=3):
         print(f"Error fetching analyst ratings for {symbol}: {e}")
         return []
 
+# ====================
+# EARNINGS/DIVIDENDS/SPLITS USING YFINANCE (NO API KEY NEEDED)
+# ====================
 async def fetch_earnings_upcoming(symbol, days=14):
-    """Fetch upcoming earnings dates using yfinance."""
     try:
         stock = yf.Ticker(symbol)
         earnings_dates = stock.earnings_dates
@@ -584,13 +585,11 @@ async def fetch_earnings_upcoming(symbol, days=14):
         cutoff = today + timedelta(days=days)
         upcoming = []
         for date, row in earnings_dates.iterrows():
-            # date is Timestamp, convert to date
             if hasattr(date, 'date'):
                 e_date = date.date()
             else:
                 e_date = datetime.strptime(str(date), '%Y-%m-%d').date()
             if today <= e_date <= cutoff:
-                # Get EPS estimate
                 eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
                 if eps_est is None or pd.isna(eps_est):
                     eps_est = 'N/A'
@@ -599,7 +598,7 @@ async def fetch_earnings_upcoming(symbol, days=14):
                 upcoming.append({
                     'date': e_date.strftime('%Y-%m-%d'),
                     'epsEstimate': eps_est,
-                    'hour': 'AMC'  # default, yfinance doesn't provide hour
+                    'hour': 'AMC'
                 })
         return upcoming
     except Exception as e:
@@ -607,7 +606,6 @@ async def fetch_earnings_upcoming(symbol, days=14):
         return []
 
 async def fetch_dividends_upcoming(symbol, days=14):
-    """Fetch upcoming dividend ex-dates using yfinance."""
     try:
         stock = yf.Ticker(symbol)
         dividends = stock.dividends
@@ -625,7 +623,7 @@ async def fetch_dividends_upcoming(symbol, days=14):
                 upcoming.append({
                     'exDate': d_date.strftime('%Y-%m-%d'),
                     'amount': f"{amount:.2f}",
-                    'payDate': ''  # yfinance doesn't provide pay date easily
+                    'payDate': ''
                 })
         return upcoming
     except Exception as e:
@@ -633,7 +631,6 @@ async def fetch_dividends_upcoming(symbol, days=14):
         return []
 
 async def fetch_splits_upcoming(symbol, days=14):
-    """Fetch upcoming stock splits using yfinance."""
     try:
         stock = yf.Ticker(symbol)
         splits = stock.splits
@@ -648,7 +645,6 @@ async def fetch_splits_upcoming(symbol, days=14):
             else:
                 s_date = datetime.strptime(str(date), '%Y-%m-%d').date()
             if today <= s_date <= cutoff:
-                # ratio is like 2 for 2:1 split
                 ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
                 upcoming.append({
                     'date': s_date.strftime('%Y-%m-%d'),
@@ -657,6 +653,30 @@ async def fetch_splits_upcoming(symbol, days=14):
         return upcoming
     except Exception as e:
         print(f"Error fetching splits for {symbol} via yfinance: {e}")
+        return []
+
+async def fetch_economic_events(days=14):
+    # Economic events still require Finnhub; if key fails, return empty
+    if not FINNHUB_API_KEY:
+        return []
+    url = "https://finnhub.io/api/v1/calendar/economic"
+    start = datetime.now().strftime('%Y-%m-%d')
+    end = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+    params = {
+        'from': start,
+        'to': end,
+        'token': FINNHUB_API_KEY
+    }
+    timeout = aiohttp.ClientTimeout(total=10)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get('economicCalendar', [])
+    except Exception as e:
+        print(f"Error fetching economic calendar: {e}")
         return []
 
 # ====================
@@ -978,7 +998,7 @@ def generate_zone_chart(df, symbol, zones):
         return None
 
 # ====================
-# ENHANCED NEWS FORMATTING
+# ENHANCED NEWS FORMATTING (kept for !news command)
 # ====================
 def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, prev_close):
     embed = discord.Embed(
@@ -1052,228 +1072,49 @@ def format_enhanced_news_embed(symbol, news_items, ratings_data, current_price, 
     return embed
 
 # ====================
-# WORLD NEWS COMMAND (ENHANCED WITH TRUMP/TACO)
+# WORLD NEWS COMMAND – MARKETAUX + TRUMP/TACO
 # ====================
-IMPACT_KEYWORDS = {
-    'rate cut': ('🟢 Bullish', 'Financials', 'Rate cuts lower borrowing costs and boost stocks.', ['SPY', 'QQQ', 'XLF']),
-    'cuts rates': ('🟢 Bullish', 'Financials', 'Rate cuts stimulate economic growth.', ['SPY', 'QQQ', 'XLF']),
-    'stimulus': ('🟢 Bullish', 'Economy', 'Government stimulus boosts spending and growth.', ['SPY', 'IWM', 'XLY']),
-    'beat earnings': ('🟢 Bullish', 'Earnings', 'Strong earnings indicate company health.', ['SPY', 'QQQ']),
-    'exceeds expectations': ('🟢 Bullish', 'Sentiment', 'Positive surprises drive stock prices higher.', ['SPY', 'QQQ']),
-    'upgrade': ('🟢 Bullish', 'Analysts', 'Analyst upgrades signal confidence.', ['SPY']),
-    'buy rating': ('🟢 Bullish', 'Analysts', 'Buy ratings encourage institutional buying.', ['SPY']),
-    'profit surge': ('🟢 Bullish', 'Financials', 'Rising profits attract investors.', ['SPY']),
-    'record high': ('🟢 Bullish', 'Sentiment', 'All-time highs can lead to momentum buying.', ['SPY']),
-    'job growth': ('🟢 Bullish', 'Economy', 'Strong job market supports consumer spending.', ['XLY', 'SPY']),
-    'unemployment falls': ('🟢 Bullish', 'Economy', 'Lower unemployment signals economic strength.', ['SPY', 'IWM']),
-    'rate hike': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
-    'hikes rates': ('🔴 Bearish', 'Financials', 'Rate hikes increase borrowing costs and slow growth.', ['SPY', 'QQQ', 'XLF']),
-    'inflation rises': ('🔴 Bearish', 'Economy', 'High inflation may lead to tighter monetary policy.', ['SPY', 'TLT']),
-    'miss earnings': ('🔴 Bearish', 'Earnings', 'Earnings misses disappoint investors.', ['SPY', 'QQQ']),
-    'downgrade': ('🔴 Bearish', 'Analysts', 'Downgrades can trigger selling.', ['SPY']),
-    'sell rating': ('🔴 Bearish', 'Analysts', 'Sell ratings indicate negative outlook.', ['SPY']),
-    'profit warning': ('🔴 Bearish', 'Financials', 'Profit warnings signal trouble ahead.', ['SPY']),
-    'layoffs': ('🔴 Bearish', 'Economy', 'Layoffs indicate corporate stress.', ['SPY', 'IWM']),
-    'recession': ('🔴 Bearish', 'Economy', 'Recession fears hurt all risk assets.', ['SPY', 'QQQ']),
-    'trade war': ('🔴 Bearish', 'Trade', 'Trade tensions disrupt global supply chains.', ['SPY', 'EEM']),
-    'tariff': ('🔴 Bearish', 'Trade', 'Tariffs increase costs and reduce profits.', ['CAT', 'DE', 'BA']),
-    'oil': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'crude': ('⚪ Neutral', 'Energy', 'Oil price changes affect energy stocks.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'opec': ('⚪ Neutral', 'Energy', 'OPEC decisions impact oil supply.', ['XOM', 'CVX', 'OXY', 'USO']),
-    'gas': ('⚪ Neutral', 'Energy', 'Natural gas prices affect utilities and energy.', ['UNG', 'XOM', 'CVX']),
-    'rice': ('⚪ Neutral', 'Commodities', 'Food prices impact consumer spending and inflation.', ['ADM', 'INGR']),
-    'fertilizer': ('⚪ Neutral', 'Commodities', 'Fertilizer prices affect agriculture and food stocks.', ['MOS', 'NTR']),
-    'coal': ('⚪ Neutral', 'Energy', 'Coal prices affect power generation and mining stocks.', ['ARCH', 'BTU']),
-    'semiconductor': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
-    'chip': ('⚪ Neutral', 'Technology', 'Chip demand drives tech earnings.', ['NVDA', 'AMD', 'INTC', 'SMH']),
-    'nvidia': ('⚪ Neutral', 'Technology', 'Nvidia leads AI and chip sector.', ['NVDA', 'AMD', 'SMH']),
-    'ai': ('⚪ Neutral', 'Technology', 'AI investment boosts tech.', ['NVDA', 'MSFT', 'GOOGL']),
-    'china': ('⚪ Neutral', 'China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
-    'beijing': ('⚪ Neutral', 'China exposure', 'Companies with China revenue may be affected.', ['BABA', 'JD', 'NIO', 'FXI']),
-    'retail': ('⚪ Neutral', 'Consumer', 'Retail sales reflect consumer confidence.', ['AMZN', 'WMT', 'TGT', 'XRT']),
-    'consumer': ('⚪ Neutral', 'Consumer', 'Consumer spending drives economy.', ['AMZN', 'WMT', 'PG', 'KO']),
-    'housing': ('⚪ Neutral', 'Housing', 'Housing data affect builders and banks.', ['LEN', 'DHI', 'KBH', 'XHB']),
-    'real estate': ('⚪ Neutral', 'Real Estate', 'Real estate investment trusts.', ['SPG', 'PLD', 'AMT', 'XLRE']),
-    'bank': ('⚪ Neutral', 'Financials', 'Bank health reflects economic conditions.', ['JPM', 'BAC', 'WFC', 'XLF']),
-    'tech': ('⚪ Neutral', 'Technology', 'Tech sentiment drives growth.', ['QQQ', 'AAPL', 'MSFT', 'GOOGL']),
-    'pharma': ('⚪ Neutral', 'Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
-    'drug': ('⚪ Neutral', 'Healthcare', 'Drug approvals and healthcare policy.', ['PFE', 'MRK', 'LLY', 'XLV']),
-    'covid': ('⚪ Neutral', 'Healthcare', 'Pandemic developments affect vaccines and travel.', ['MRNA', 'PFE', 'JNJ', 'CCL']),
-    'travel': ('⚪ Neutral', 'Travel', 'Travel demand affects airlines, cruises, hotels.', ['AAL', 'DAL', 'CCL', 'MAR']),
-    'airline': ('⚪ Neutral', 'Travel', 'Airlines react to travel demand and fuel costs.', ['AAL', 'DAL', 'UAL', 'LUV']),
-    'auto': ('⚪ Neutral', 'Automotive', 'Auto sales and EV trends.', ['TSLA', 'F', 'GM', 'NIO']),
-    'ev': ('⚪ Neutral', 'Electric Vehicles', 'EV adoption drives Tesla and emerging players.', ['TSLA', 'NIO', 'LI', 'XPEV']),
-    'bitcoin': ('⚪ Neutral', 'Crypto', 'Bitcoin is a global, non-regional asset.', ['BTC-USD', 'MSTR', 'COIN']),
-    'btc': ('⚪ Neutral', 'Crypto', 'Bitcoin is a global, non-regional asset.', ['BTC-USD', 'MSTR', 'COIN']),
-}
-
-def analyze_news_impact(title, description):
-    combined = (title + " " + (description or "")).lower()
-    matched = []
-    for keyword, (sentiment, sector, impact, tickers) in IMPACT_KEYWORDS.items():
-        if keyword in combined:
-            matched.append((sentiment, sector, impact, tickers))
-    if matched:
-        sentiment, sector, impact, tickers = matched[0]
-        ticker_str = ", ".join([f"${t}" for t in tickers[:3]])
-        return f"{sentiment} **{sector}:** {impact}\n📊 **Stocks:** {ticker_str}"
-    else:
-        return "⚪ **General:** May affect broad market sentiment. Check related sectors.\n📊 **Stocks:** $SPY, $QQQ, $DIA"
-
-# ---------- TRUMP / TACO INTEGRATION ----------
-async def fetch_latest_trump_post():
-    """Fetch the latest post from Trump's Truth Social via public RSS feed."""
-    try:
-        url = "https://truthsocial.rss.simple-web.org/feed.xml"
-        timeout = aiohttp.ClientTimeout(total=10)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as resp:
-                if resp.status != 200:
-                    print(f"Trump RSS fetch failed: {resp.status}")
-                    return None
-                text = await resp.text()
-                # Parse XML
-                root = ET.fromstring(text)
-                # RSS 2.0
-                item = root.find('.//item')
-                if item is not None:
-                    title = item.find('title').text
-                    pub_date = item.find('pubDate').text
-                    link = item.find('link').text
-                    return {
-                        'text': title,
-                        'timestamp': pub_date,
-                        'url': link
-                    }
-                # Try Atom
-                entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
-                if entry is not None:
-                    title = entry.find('{http://www.w3.org/2005/Atom}title').text
-                    pub_date = entry.find('{http://www.w3.org/2005/Atom}updated').text
-                    link = entry.find('{http://www.w3.org/2005/Atom}link').get('href')
-                    return {
-                        'text': title,
-                        'timestamp': pub_date,
-                        'url': link
-                    }
-        return None
-    except Exception as e:
-        print(f"Error fetching Trump post: {e}")
-        return None
-
-def analyze_trump_post(post_text):
-    """Analyze a Trump post for market impact and TACO pattern."""
-    text_lower = post_text.lower()
-    threat_keywords = ['tariff', 'sanction', 'war', 'military', 'bomb', 'strike', 'deadline', 'penalty', 'tax', 'duty', 'ban', 'restrict', 'withdraw']
-    backtrack_keywords = ['exemption', 'delay', 'postpone', 'review', 'negotiate', 'deal', 'agreement', 'temporary', 'exception', 'reconsider']
-
-    has_threat = any(kw in text_lower for kw in threat_keywords)
-    has_backtrack = any(kw in text_lower for kw in backtrack_keywords)
-
-    if has_threat and not has_backtrack:
-        sentiment = "🔴 Bearish"
-        taco_prob = "High (expected market dip & reversal)"
-        advice = "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
-    elif has_threat and has_backtrack:
-        sentiment = "🟡 Mixed (threat with caveats)"
-        taco_prob = "Medium – possible backtrack"
-        advice = "Monitor for clarification. Could swing either way."
-    elif any(word in text_lower for word in ['good', 'great', 'deal', 'agreement']):
-        sentiment = "🟢 Bullish"
-        taco_prob = "Low – positive news"
-        advice = "Potential rally. Check related sectors."
-    else:
-        sentiment = "⚪ Neutral"
-        taco_prob = "Low – no clear threat or positive"
-        advice = "No immediate TACO signal."
-
-    sectors = []
-    stocks = []
-    if 'tariff' in text_lower or 'trade' in text_lower:
-        sectors.extend(['Industrials', 'Consumer Goods'])
-        stocks.extend(['CAT', 'DE', 'F', 'GM', 'WMT', 'TGT'])
-    if 'china' in text_lower:
-        sectors.append('China exposure')
-        stocks.extend(['BABA', 'JD', 'NIO', 'FXI', 'KWEB'])
-    if 'oil' in text_lower or 'energy' in text_lower:
-        sectors.append('Energy')
-        stocks.extend(['XOM', 'CVX', 'OXY', 'USO'])
-    if 'military' in text_lower or 'defense' in text_lower:
-        sectors.append('Defense')
-        stocks.extend(['LMT', 'NOC', 'GD', 'RTX'])
-    if 'iran' in text_lower or 'middle east' in text_lower:
-        sectors.append('Geopolitical risk')
-        stocks.extend(['XOM', 'CVX', 'LMT', 'NOC'])
-
-    sectors = list(dict.fromkeys(sectors))
-    stocks = list(dict.fromkeys(stocks))[:5]
-
-    return {
-        'sentiment': sentiment,
-        'taco_probability': taco_prob,
-        'affected_sectors': ', '.join(sectors) if sectors else 'General market',
-        'suggested_stocks': ', '.join([f"${s}" for s in stocks]) if stocks else '$SPY, $QQQ',
-        'advice': advice
-    }
-
 @bot.command(name='worldnews')
 async def world_news(ctx):
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
     try:
-        await ctx.send("🌍 Fetching global market news + Trump latest...")
+        await ctx.send("🌍 Fetching global market news with AI sentiment analysis...")
 
-        now = datetime.now()
-        source = "unknown"
-        if world_news_cache["data"] and world_news_cache["expiry"] > now:
-            combined_news = world_news_cache["data"]
-            source = "cached"
-        else:
-            countries = ['us', 'gb', 'cn', 'in', 'jp']
-            all_articles = []
-            for country in countries:
-                articles = await fetch_newsapi_top_headlines(country=country)
-                if articles:
-                    all_articles.extend(articles)
-                await asyncio.sleep(0.5)
+        api_key = MARKETAUX_API_KEY
+        if not api_key:
+            await ctx.send("❌ Marketaux API key not configured. Please contact the bot administrator.")
+            return
 
-            if len(all_articles) < 5:
-                finnhub_news = await fetch_finnhub_general_news()
-                if finnhub_news:
-                    for item in finnhub_news[:10]:
-                        all_articles.append({
-                            'title': item.get('headline', ''),
-                            'description': item.get('summary', ''),
-                            'source': {'name': item.get('source', 'Finnhub')},
-                            'publishedAt': datetime.fromtimestamp(item.get('datetime', 0)).isoformat() if item.get('datetime') else None,
-                            'url': item.get('url', '')
-                        })
-                    source = "Finnhub + NewsAPI"
-                else:
-                    source = "NewsAPI (multiple countries)"
-            else:
-                source = "NewsAPI (multiple countries)"
+        url = "https://api.marketaux.com/v1/news/all"
+        params = {
+            'api_token': api_key,
+            'language': 'en',
+            'limit': 10,
+            'must_have_entities': 'true'
+        }
 
-            seen = set()
-            unique_articles = []
-            for a in all_articles:
-                title = a.get('title', '')
-                if title and title not in seen:
-                    seen.add(title)
-                    unique_articles.append(a)
-            combined_news = unique_articles[:12]
-            world_news_cache["data"] = combined_news
-            world_news_cache["expiry"] = now + timedelta(minutes=30)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    await ctx.send(f"❌ News API error: {resp.status}")
+                    return
+                data = await resp.json()
+
+        articles = data.get('data', [])
+        if not articles:
+            await ctx.send("No news articles found.")
+            return
 
         embed = discord.Embed(
-            title="🌍 World News – Market Impact",
-            description=f"Top headlines from {source} (updated every 30 min)",
+            title="🌍 World News – AI Market Sentiment",
+            description="Top financial headlines from Marketaux (updated real‑time)",
             color=0x3498db,
-            timestamp=now
+            timestamp=datetime.now()
         )
 
-        # --- Trump / TACO section ---
+        # Trump / TACO section
         trump_post = await fetch_latest_trump_post()
         if trump_post:
             analysis = analyze_trump_post(trump_post['text'])
@@ -1291,34 +1132,27 @@ async def world_news(ctx):
         else:
             embed.add_field(name="🔔 Trump Truth Feed", value="Could not fetch latest post (feed may be temporary down).", inline=False)
 
-        # Economic events
-        econ_events = await fetch_economic_events(days=7)
-        if econ_events:
-            econ_text = ""
-            for ev in econ_events[:3]:
-                date = ev.get('date', 'N/A')
-                event = ev.get('event', 'N/A')
-                country = ev.get('country', '')
-                importance = ev.get('importance', '')
-                star = "★" if importance == "high" else "☆" if importance == "medium" else "·" if importance else ""
-                econ_text += f"**{date}** {country}: {event} {star}\n"
-            embed.add_field(name="📆 Upcoming Economic Events (next 7 days)", value=econ_text or "None", inline=False)
-
-        count = 0
-        for article in combined_news[:8]:
+        for article in articles[:8]:
             title = article.get('title', 'No title')
-            if '[Removed]' in title or len(title) < 10:
-                continue
-            description = article.get('description', '') or article.get('summary', '')
-            source_name = article.get('source', {}).get('name', 'Unknown') if isinstance(article.get('source'), dict) else article.get('source', 'Unknown')
-            published = article.get('publishedAt', '')
-            url = article.get('url', '')
+            source = article.get('source', 'Unknown')
+            published_at = article.get('published_at', '')
+            url_link = article.get('url', '')
+            entities = article.get('entities', [])
+            sentiment_score = 0.0
+            if entities and len(entities) > 0:
+                sentiment_score = entities[0].get('sentiment_score', 0.0)
+            if sentiment_score > 0.2:
+                sentiment_emoji = "🟢 Bullish"
+            elif sentiment_score < -0.2:
+                sentiment_emoji = "🔴 Bearish"
+            else:
+                sentiment_emoji = "⚪ Neutral"
 
             time_ago = "recently"
-            if published:
+            if published_at:
                 try:
-                    pub_time = datetime.fromisoformat(published.replace('Z', '+00:00'))
-                    delta = now - pub_time
+                    pub_time = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                    delta = datetime.now() - pub_time
                     if delta.total_seconds() < 3600:
                         mins = int(delta.total_seconds() / 60)
                         time_ago = f"{mins} min ago" if mins > 0 else "just now"
@@ -1331,25 +1165,17 @@ async def world_news(ctx):
                 except:
                     pass
 
-            impact_text = analyze_news_impact(title, description)
-            field_value = f"**Source:** {source_name} | {time_ago}\n{impact_text}"
-            if url:
-                field_value += f"\n[Read more]({url})"
+            field_value = f"**Source:** {source} | {time_ago}\n**Sentiment:** {sentiment_emoji} (score: {sentiment_score:.2f})"
+            if url_link:
+                field_value += f"\n[Read more]({url_link})"
 
             embed.add_field(
                 name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}",
                 value=field_value,
                 inline=False
             )
-            count += 1
-            if count >= 8:
-                break
 
-        if count == 0 and not trump_post:
-            await ctx.send("No relevant news found.")
-            return
-
-        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • TACO = Trump Always Chickens Out • Not financial advice")
+        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • AI-powered sentiment analysis")
         await ctx.send(embed=embed)
 
     except Exception as e:
@@ -1358,7 +1184,7 @@ async def world_news(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# ENHANCED NEWS COMMAND
+# ENHANCED NEWS COMMAND (FIXED – uses get_stock_price)
 # ====================
 @bot.command(name='news')
 async def stock_news_enhanced(ctx, ticker: str):
@@ -1376,7 +1202,7 @@ async def stock_news_enhanced(ctx, ticker: str):
         symbol = ticker.upper()
         await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
 
-        # Use your existing get_stock_price function
+        # Use existing get_stock_price function
         current_price = await get_stock_price(symbol)
         prev_close = None
         if current_price:
@@ -1421,7 +1247,6 @@ async def stock_news_enhanced(ctx, ticker: str):
                 arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
                 embed.description += f" | {arrow} {change:+.2f} ({change_pct:+.2f}%)"
 
-        # Analyst ratings (unchanged – keep using Finnhub)
         if ratings_data:
             ratings_text = ""
             for r in ratings_data[:3]:
@@ -1469,7 +1294,6 @@ async def stock_news_enhanced(ctx, ticker: str):
 # PEG RATIO HELPER
 # ====================
 async def get_peg_ratio(symbol):
-    """Fetch PEG ratio for a stock. Returns a tuple (float_value, formatted_string_with_emoji) or (None, None)."""
     try:
         stock = yf.Ticker(symbol)
         info = stock.info
@@ -2721,7 +2545,7 @@ async def cheap_plays(ctx):
     await cheap_options(ctx)
 
 # ====================
-# UPCOMING COMMAND
+# UPCOMING COMMAND (USING YFINANCE)
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -2853,7 +2677,7 @@ async def upcoming_events(ctx, ticker: str = None):
                         for e in earnings:
                             date = e.get('date', 'N/A')
                             eps_est = e.get('epsEstimate', 'N/A')
-                            time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
+                            time_str = e.get('hour', '')
                             exp_move, hist_avg = await get_earnings_stats(sym, date)
                             lines.append(
                                 f"**{date}** {time_str} – EPS Est: {eps_est}\n"
@@ -2867,8 +2691,7 @@ async def upcoming_events(ctx, ticker: str = None):
                         for d in dividends:
                             ex_date = d.get('exDate', 'N/A')
                             amount = d.get('amount', 'N/A')
-                            pay_date = d.get('payDate', '')
-                            lines.append(f"**{ex_date}** – Amount: ${amount}" + (f" (pay {pay_date})" if pay_date else ""))
+                            lines.append(f"**{ex_date}** – Amount: ${amount}")
                         embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
 
                     if splits:
@@ -2876,8 +2699,7 @@ async def upcoming_events(ctx, ticker: str = None):
                         for s in splits:
                             date = s.get('date', 'N/A')
                             ratio = s.get('splitRatio', '')
-                            text = f"**{date}** – {ratio}" if ratio else f"**{date}**"
-                            lines.append(text)
+                            lines.append(f"**{date}** – {ratio}")
                         embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
 
                     if ratings:
@@ -2933,7 +2755,7 @@ async def upcoming_events(ctx, ticker: str = None):
                 for e in earnings:
                     date = e.get('date', 'N/A')
                     eps_est = e.get('epsEstimate', 'N/A')
-                    time_str = "BMO" if e.get('hour') == 'bmo' else "AMC" if e.get('hour') == 'amc' else ""
+                    time_str = e.get('hour', '')
                     exp_move, hist_avg = await get_earnings_stats(ticker.upper(), date)
                     lines.append(
                         f"**{date}** {time_str} – EPS Est: {eps_est}\n"
@@ -2947,8 +2769,7 @@ async def upcoming_events(ctx, ticker: str = None):
                 for d in dividends:
                     ex_date = d.get('exDate', 'N/A')
                     amount = d.get('amount', 'N/A')
-                    pay_date = d.get('payDate', '')
-                    lines.append(f"**{ex_date}** – Amount: ${amount}" + (f" (pay {pay_date})" if pay_date else ""))
+                    lines.append(f"**{ex_date}** – Amount: ${amount}")
                 embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
 
             if splits:
@@ -2956,8 +2777,7 @@ async def upcoming_events(ctx, ticker: str = None):
                 for s in splits:
                     date = s.get('date', 'N/A')
                     ratio = s.get('splitRatio', '')
-                    text = f"**{date}** – {ratio}" if ratio else f"**{date}**"
-                    lines.append(text)
+                    lines.append(f"**{date}** – {ratio}")
                 embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
 
             if ratings:
@@ -3486,6 +3306,112 @@ async def help_command(ctx):
         print(f"Help command error: {e}")
 
 # ====================
+# SCAN FOR CHoCH (Change of Character)
+# ====================
+@bot.command(name='scanchoch')
+async def scan_choch(ctx, timeframe: str = '4h'):
+    """
+    Scan watchlist for Change of Character (CHoCH) patterns.
+    Usage: !scanchoch [timeframe]
+    Timeframes: 1h, 4h, daily, weekly (default: 4h)
+    """
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        valid_tfs = ['1h', '4h', 'daily', 'weekly']
+        if timeframe not in valid_tfs:
+            await ctx.send(f"❌ Invalid timeframe. Use one of: {', '.join(valid_tfs)}")
+            return
+
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks']
+        if not symbols:
+            await ctx.send("No stocks in watchlist to scan.")
+            return
+
+        await ctx.send(f"🔍 Scanning {len(symbols)} stocks for **CHoCH** on **{timeframe}** timeframe...")
+
+        choch_up = []
+        choch_down = []
+        errors = []
+
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                break
+
+            try:
+                df = await fetch_ohlcv(symbol, timeframe)
+                if df is None or len(df) < 50:
+                    continue
+
+                structure = analyze_structure(df)
+                if structure['last_event'] == 'CHoCH':
+                    direction = structure['last_event_direction']
+                    current_price = df['close'].iloc[-1]
+                    info = f"{symbol} (${current_price:.2f}) – CHoCH **{direction.upper()}**\n{structure['description'][:150]}"
+                    if direction == 'up':
+                        choch_up.append(info)
+                    else:
+                        choch_down.append(info)
+                await asyncio.sleep(0.5)
+            except Exception as e:
+                errors.append(f"{symbol}: {str(e)[:50]}")
+                continue
+
+        if not choch_up and not choch_down:
+            await ctx.send(f"📭 No CHoCH patterns found on {timeframe} timeframe.")
+            if errors:
+                await ctx.send(f"⚠️ Errors for: {', '.join(errors[:3])}")
+            return
+
+        embed = discord.Embed(
+            title=f"🔄 Change of Character (CHoCH) Scan – {timeframe.upper()}",
+            description=f"Found {len(choch_up)} bullish CHoCH + {len(choch_down)} bearish CHoCH",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+
+        if choch_up:
+            embed.add_field(
+                name="🟢 CHoCH UP (Potential reversal to uptrend)",
+                value="\n\n".join(choch_up[:5]) if choch_up else "None",
+                inline=False
+            )
+        if choch_down:
+            embed.add_field(
+                name="🔴 CHoCH DOWN (Potential reversal to downtrend)",
+                value="\n\n".join(choch_down[:5]) if choch_down else "None",
+                inline=False
+            )
+
+        if choch_up or choch_down:
+            embed.add_field(
+                name="💡 Trading Advice",
+                value="• **CHoCH UP** → Wait for a pullback, then consider long entries.\n"
+                      "• **CHoCH DOWN** → Avoid catching falling knives; look for short entries after confirmation.\n"
+                      "• Always confirm with other signals (!zone, !flow).",
+                inline=False
+            )
+
+        embed.set_footer(text="Use !structure SYMBOL for detailed chart")
+        await ctx.send(embed=embed)
+
+        if errors:
+            await ctx.send(f"⚠️ Could not scan: {', '.join(errors[:3])}")
+
+    except Exception as e:
+        await ctx.send(f"❌ Error scanning CHoCH: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
 # EVENT HANDLERS
 # ====================
 @bot.event
@@ -3543,6 +3469,99 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     except Exception as e:
         print(f"⚠️ Unexpected error in send_symbol_with_chart for {symbol}: {e}")
         await ctx.send(embed=embed)
+
+# ====================
+# TRUMP / TACO FUNCTIONS (preserved)
+# ====================
+async def fetch_latest_trump_post():
+    try:
+        url = "https://truthsocial.rss.simple-web.org/feed.xml"
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    print(f"Trump RSS fetch failed: {resp.status}")
+                    return None
+                text = await resp.text()
+                root = ET.fromstring(text)
+                item = root.find('.//item')
+                if item is not None:
+                    title = item.find('title').text
+                    pub_date = item.find('pubDate').text
+                    link = item.find('link').text
+                    return {
+                        'text': title,
+                        'timestamp': pub_date,
+                        'url': link
+                    }
+                entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
+                if entry is not None:
+                    title = entry.find('{http://www.w3.org/2005/Atom}title').text
+                    pub_date = entry.find('{http://www.w3.org/2005/Atom}updated').text
+                    link = entry.find('{http://www.w3.org/2005/Atom}link').get('href')
+                    return {
+                        'text': title,
+                        'timestamp': pub_date,
+                        'url': link
+                    }
+        return None
+    except Exception as e:
+        print(f"Error fetching Trump post: {e}")
+        return None
+
+def analyze_trump_post(post_text):
+    text_lower = post_text.lower()
+    threat_keywords = ['tariff', 'sanction', 'war', 'military', 'bomb', 'strike', 'deadline', 'penalty', 'tax', 'duty', 'ban', 'restrict', 'withdraw']
+    backtrack_keywords = ['exemption', 'delay', 'postpone', 'review', 'negotiate', 'deal', 'agreement', 'temporary', 'exception', 'reconsider']
+
+    has_threat = any(kw in text_lower for kw in threat_keywords)
+    has_backtrack = any(kw in text_lower for kw in backtrack_keywords)
+
+    if has_threat and not has_backtrack:
+        sentiment = "🔴 Bearish"
+        taco_prob = "High (expected market dip & reversal)"
+        advice = "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
+    elif has_threat and has_backtrack:
+        sentiment = "🟡 Mixed (threat with caveats)"
+        taco_prob = "Medium – possible backtrack"
+        advice = "Monitor for clarification. Could swing either way."
+    elif any(word in text_lower for word in ['good', 'great', 'deal', 'agreement']):
+        sentiment = "🟢 Bullish"
+        taco_prob = "Low – positive news"
+        advice = "Potential rally. Check related sectors."
+    else:
+        sentiment = "⚪ Neutral"
+        taco_prob = "Low – no clear threat or positive"
+        advice = "No immediate TACO signal."
+
+    sectors = []
+    stocks = []
+    if 'tariff' in text_lower or 'trade' in text_lower:
+        sectors.extend(['Industrials', 'Consumer Goods'])
+        stocks.extend(['CAT', 'DE', 'F', 'GM', 'WMT', 'TGT'])
+    if 'china' in text_lower:
+        sectors.append('China exposure')
+        stocks.extend(['BABA', 'JD', 'NIO', 'FXI', 'KWEB'])
+    if 'oil' in text_lower or 'energy' in text_lower:
+        sectors.append('Energy')
+        stocks.extend(['XOM', 'CVX', 'OXY', 'USO'])
+    if 'military' in text_lower or 'defense' in text_lower:
+        sectors.append('Defense')
+        stocks.extend(['LMT', 'NOC', 'GD', 'RTX'])
+    if 'iran' in text_lower or 'middle east' in text_lower:
+        sectors.append('Geopolitical risk')
+        stocks.extend(['XOM', 'CVX', 'LMT', 'NOC'])
+
+    sectors = list(dict.fromkeys(sectors))
+    stocks = list(dict.fromkeys(stocks))[:5]
+
+    return {
+        'sentiment': sentiment,
+        'taco_probability': taco_prob,
+        'affected_sectors': ', '.join(sectors) if sectors else 'General market',
+        'suggested_stocks': ', '.join([f"${s}" for s in stocks]) if stocks else '$SPY, $QQQ',
+        'advice': advice
+    }
 
 # ====================
 # MAIN ENTRY POINT
