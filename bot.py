@@ -574,97 +574,89 @@ async def fetch_analyst_ratings(symbol, limit=3):
         return []
 
 async def fetch_earnings_upcoming(symbol, days=14):
-    url = "https://finnhub.io/api/v1/calendar/earnings"
-    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
-    timeout = aiohttp.ClientTimeout(total=10)
+    """Fetch upcoming earnings dates using yfinance."""
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                earnings = data.get('earningsCalendar', [])
-                today = datetime.now().date()
-                cutoff = today + timedelta(days=days)
-                upcoming = []
-                for e in earnings:
-                    date_str = e.get('date')
-                    if not date_str:
-                        continue
-                    try:
-                        e_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-                        if today <= e_date <= cutoff:
-                            upcoming.append(e)
-                    except:
-                        continue
-                return upcoming
+        stock = yf.Ticker(symbol)
+        earnings_dates = stock.earnings_dates
+        if earnings_dates is None or earnings_dates.empty:
+            return []
+        today = datetime.now().date()
+        cutoff = today + timedelta(days=days)
+        upcoming = []
+        for date, row in earnings_dates.iterrows():
+            # date is Timestamp, convert to date
+            if hasattr(date, 'date'):
+                e_date = date.date()
+            else:
+                e_date = datetime.strptime(str(date), '%Y-%m-%d').date()
+            if today <= e_date <= cutoff:
+                # Get EPS estimate
+                eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                if eps_est is None or pd.isna(eps_est):
+                    eps_est = 'N/A'
+                else:
+                    eps_est = f"{eps_est:.2f}"
+                upcoming.append({
+                    'date': e_date.strftime('%Y-%m-%d'),
+                    'epsEstimate': eps_est,
+                    'hour': 'AMC'  # default, yfinance doesn't provide hour
+                })
+        return upcoming
     except Exception as e:
-        print(f"Error fetching earnings for {symbol}: {e}")
+        print(f"Error fetching earnings for {symbol} via yfinance: {e}")
         return []
 
 async def fetch_dividends_upcoming(symbol, days=14):
-    url = "https://finnhub.io/api/v1/stock/dividend"
-    today = datetime.now().strftime('%Y-%m-%d')
-    future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
-    params = {
-        'symbol': symbol,
-        'from': today,
-        'to': future,
-        'token': FINNHUB_API_KEY
-    }
-    timeout = aiohttp.ClientTimeout(total=10)
+    """Fetch upcoming dividend ex-dates using yfinance."""
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data if isinstance(data, list) else []
+        stock = yf.Ticker(symbol)
+        dividends = stock.dividends
+        if dividends.empty:
+            return []
+        today = datetime.now().date()
+        cutoff = today + timedelta(days=days)
+        upcoming = []
+        for date, amount in dividends.items():
+            if hasattr(date, 'date'):
+                d_date = date.date()
+            else:
+                d_date = datetime.strptime(str(date), '%Y-%m-%d').date()
+            if today <= d_date <= cutoff:
+                upcoming.append({
+                    'exDate': d_date.strftime('%Y-%m-%d'),
+                    'amount': f"{amount:.2f}",
+                    'payDate': ''  # yfinance doesn't provide pay date easily
+                })
+        return upcoming
     except Exception as e:
-        print(f"Error fetching dividends for {symbol}: {e}")
+        print(f"Error fetching dividends for {symbol} via yfinance: {e}")
         return []
 
 async def fetch_splits_upcoming(symbol, days=14):
-    url = "https://finnhub.io/api/v1/stock/split"
-    today = datetime.now().strftime('%Y-%m-%d')
-    future = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
-    params = {
-        'symbol': symbol,
-        'from': today,
-        'to': future,
-        'token': FINNHUB_API_KEY
-    }
-    timeout = aiohttp.ClientTimeout(total=10)
+    """Fetch upcoming stock splits using yfinance."""
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data if isinstance(data, list) else []
+        stock = yf.Ticker(symbol)
+        splits = stock.splits
+        if splits.empty:
+            return []
+        today = datetime.now().date()
+        cutoff = today + timedelta(days=days)
+        upcoming = []
+        for date, ratio in splits.items():
+            if hasattr(date, 'date'):
+                s_date = date.date()
+            else:
+                s_date = datetime.strptime(str(date), '%Y-%m-%d').date()
+            if today <= s_date <= cutoff:
+                # ratio is like 2 for 2:1 split
+                ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
+                upcoming.append({
+                    'date': s_date.strftime('%Y-%m-%d'),
+                    'splitRatio': ratio_str
+                })
+        return upcoming
     except Exception as e:
-        print(f"Error fetching splits for {symbol}: {e}")
-        return []
-
-async def fetch_economic_events(days=14):
-    url = "https://finnhub.io/api/v1/calendar/economic"
-    start = datetime.now().strftime('%Y-%m-%d')
-    end = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
-    params = {
-        'from': start,
-        'to': end,
-        'token': FINNHUB_API_KEY
-    }
-    timeout = aiohttp.ClientTimeout(total=10)
-    try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data.get('economicCalendar', [])
-    except Exception as e:
-        print(f"Error fetching economic calendar: {e}")
+        print(f"Error fetching splits for {symbol} via yfinance: {e}")
         return []
 
 # ====================
