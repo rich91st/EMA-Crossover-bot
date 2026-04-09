@@ -1376,17 +1376,24 @@ async def stock_news_enhanced(ctx, ticker: str):
         symbol = ticker.upper()
         await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
 
-        price_task = fetch_stock_price_quick(symbol)
+        # Use your existing get_stock_price function
+        current_price = await get_stock_price(symbol)
+        prev_close = None
+        if current_price:
+            try:
+                stock = yf.Ticker(symbol)
+                hist = stock.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[-2]
+            except:
+                pass
+
         ratings_task = fetch_analyst_ratings(symbol, limit=3)
         news_task = fetch_finnhub_news(symbol)
 
-        price_result, ratings_data, finnhub_data = await asyncio.gather(
-            price_task, ratings_task, news_task, return_exceptions=True
+        ratings_data, finnhub_data = await asyncio.gather(
+            ratings_task, news_task, return_exceptions=True
         )
-
-        current_price, prev_close = (None, None)
-        if not isinstance(price_result, Exception) and price_result:
-            current_price, prev_close = price_result
 
         if isinstance(ratings_data, Exception):
             ratings_data = None
@@ -1394,7 +1401,7 @@ async def stock_news_enhanced(ctx, ticker: str):
             finnhub_data = None
 
         if not finnhub_data:
-            await ctx.send(f"❌ Could not fetch news data for {symbol}.")
+            await ctx.send(f"❌ Could not fetch news data for {symbol}. (Finnhub key may be invalid or no news found)")
             return
 
         web_url = get_tradingview_web_link(symbol)
@@ -1408,7 +1415,13 @@ async def stock_news_enhanced(ctx, ticker: str):
 
         if current_price:
             embed.description = f"Current Price: **${current_price:.2f}**"
+            if prev_close:
+                change = current_price - prev_close
+                change_pct = (change / prev_close) * 100
+                arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
+                embed.description += f" | {arrow} {change:+.2f} ({change_pct:+.2f}%)"
 
+        # Analyst ratings (unchanged – keep using Finnhub)
         if ratings_data:
             ratings_text = ""
             for r in ratings_data[:3]:
@@ -1430,7 +1443,14 @@ async def stock_news_enhanced(ctx, ticker: str):
         for article in finnhub_data[:5]:
             headline = article.get('headline', 'No Headline')
             source = article.get('source', 'Unknown')
-            date = datetime.fromtimestamp(article.get('datetime', 0)).strftime('%Y-%m-%d %H:%M') if article.get('datetime') else 'Unknown'
+            dt = article.get('datetime')
+            if dt:
+                if isinstance(dt, (int, float)):
+                    date = datetime.fromtimestamp(dt).strftime('%Y-%m-%d %H:%M')
+                else:
+                    date = str(dt)[:16]
+            else:
+                date = 'Unknown'
             url = article.get('url', '')
             if len(headline) > 256:
                 headline = headline[:253] + "..."
