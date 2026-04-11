@@ -16,7 +16,7 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
-# Alpaca imports - FIXED
+# Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -1862,7 +1862,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# MARKET STRUCTURE ANALYSIS - CORRECTED VERSION (NO CONTRADICTIONS)
+# MARKET STRUCTURE ANALYSIS - CORRECTED VERSION
 # ====================
 def find_swings(df, window=5):
     """
@@ -1981,6 +1981,55 @@ def analyze_structure(df, window=5):
         'description': description,
         'event_points': event_points
     }
+
+def generate_structure_chart(df, symbol, structure):
+    if len(df) < 50:
+        return None
+    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close']
+    swing_highs, swing_lows = find_swings(df)
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
+    dates = chart_data.index
+    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
+    for i, (idx, row) in enumerate(chart_data.iterrows()):
+        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
+        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
+        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
+    for idx, price in swing_highs:
+        if idx in chart_data.index:
+            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
+    for idx, price in swing_lows:
+        if idx in chart_data.index:
+            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
+    if structure.get('event_points'):
+        ev = structure['event_points']
+        points = ev['points']
+        if len(points) == 2:
+            idx1, price1 = points[0]
+            idx2, price2 = points[1]
+            if idx1 in chart_data.index and idx2 in chart_data.index:
+                ax.plot([idx1, idx2], [price1, price2], 'w--', linewidth=2, alpha=0.8)
+                mid_x = idx1 + (idx2 - idx1) / 2
+                mid_y = (price1 + price2) / 2
+                ax.text(mid_x, mid_y, ev['type'], color='yellow', fontsize=12, weight='bold',
+                        ha='center', va='center', bbox=dict(facecolor='black', alpha=0.7, pad=2))
+    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
+    ax.set_xlabel('Date', color='white')
+    ax.set_ylabel('Price', color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    plt.xticks(rotation=45)
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+        plt.tight_layout()
+        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
+        tmpfile.flush()
+        with open(tmpfile.name, 'rb') as f:
+            img_data = f.read()
+    os.unlink(tmpfile.name)
+    plt.close(fig)
+    return io.BytesIO(img_data)
 
 # ====================
 # STRUCTURE COMMAND – supports both single symbol and 'all' scan
