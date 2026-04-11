@@ -1864,6 +1864,31 @@ async def scan_options_flow(ctx):
 # ====================
 # MARKET STRUCTURE ANALYSIS - CORRECTED VERSION (NO CONTRADICTIONS)
 # ====================
+def find_swings(df, window=5):
+    """
+    Identify swing highs and lows using a rolling window.
+    Returns two lists: (swing_highs, swing_lows) where each is a list of (index, price).
+    """
+    if len(df) < window * 2 + 1:
+        return [], []
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    idx = df.index
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(window, len(df) - window):
+        # Swing high: central high is higher than window on both sides
+        if highs[i] == max(highs[i-window:i+window+1]):
+            swing_highs.append((idx[i], highs[i]))
+        # Swing low: central low is lower than window on both sides
+        if lows[i] == min(lows[i-window:i+window+1]):
+            swing_lows.append((idx[i], lows[i]))
+    
+    return swing_highs, swing_lows
+
 def analyze_structure(df, window=5):
     """
     Returns a dictionary with:
