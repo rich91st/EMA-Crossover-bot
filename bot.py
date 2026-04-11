@@ -1864,21 +1864,6 @@ async def scan_options_flow(ctx):
 # ====================
 # MARKET STRUCTURE ANALYSIS - CORRECTED VERSION (NO CONTRADICTIONS)
 # ====================
-def find_swings(df, window=5):
-    if len(df) < window * 2 + 1:
-        return [], []
-    highs = df['high'].values
-    lows = df['low'].values
-    idx = df.index
-    swing_highs = []
-    swing_lows = []
-    for i in range(window, len(df) - window):
-        if highs[i] == max(highs[i-window:i+window+1]):
-            swing_highs.append((idx[i], highs[i]))
-        if lows[i] == min(lows[i-window:i+window+1]):
-            swing_lows.append((idx[i], lows[i]))
-    return swing_highs, swing_lows
-
 def analyze_structure(df, window=5):
     """
     Returns a dictionary with:
@@ -1898,26 +1883,31 @@ def analyze_structure(df, window=5):
     
     highs, lows = find_swings(df, window)
     
-    if len(highs) < 2 or len(lows) < 2:
-        return {
-            'trend': 'sideways',
-            'last_event': None,
-            'last_event_direction': None,
-            'description': 'Not enough swing points detected.',
-            'event_points': None
-        }
+    # PRIMARY TREND DETECTION: Compare current price to 40 candles ago
+    current_price = df['close'].iloc[-1]
+    price_40_ago = df['close'].iloc[-40] if len(df) >= 40 else df['close'].iloc[0]
     
-    # Determine current trend using last two swings
+    # Calculate percentage change over 40 periods
+    pct_change = (current_price - price_40_ago) / price_40_ago * 100
+    
+    if pct_change > 3:  # Up more than 3%
+        trend = 'uptrend'
+    elif pct_change < -3:  # Down more than 3%
+        trend = 'downtrend'
+    else:
+        # Secondary: check swing structure
+        if len(highs) >= 2 and highs[-1][1] > highs[-2][1]:
+            trend = 'uptrend'
+        elif len(lows) >= 2 and lows[-1][1] < lows[-2][1]:
+            trend = 'downtrend'
+        else:
+            trend = 'sideways'
+    
+    # Get last two swing highs and lows for event detection
     last_high = highs[-1][1] if highs else None
     prev_high = highs[-2][1] if len(highs) >= 2 else None
     last_low = lows[-1][1] if lows else None
     prev_low = lows[-2][1] if len(lows) >= 2 else None
-    
-    trend = 'sideways'
-    if prev_high and last_high and last_high > prev_high:
-        trend = 'uptrend'
-    elif prev_low and last_low and last_low < prev_low:
-        trend = 'downtrend'
     
     # Detect BOS and CHoCH (mutually exclusive)
     last_event = None
@@ -1966,55 +1956,6 @@ def analyze_structure(df, window=5):
         'description': description,
         'event_points': event_points
     }
-
-def generate_structure_chart(df, symbol, structure):
-    if len(df) < 50:
-        return None
-    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
-    chart_data.columns = ['Open', 'High', 'Low', 'Close']
-    swing_highs, swing_lows = find_swings(df)
-    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
-    ax.set_facecolor('#1e1e1e')
-    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
-    dates = chart_data.index
-    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
-    for i, (idx, row) in enumerate(chart_data.iterrows()):
-        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
-        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
-        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
-    for idx, price in swing_highs:
-        if idx in chart_data.index:
-            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
-    for idx, price in swing_lows:
-        if idx in chart_data.index:
-            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
-    if structure.get('event_points'):
-        ev = structure['event_points']
-        points = ev['points']
-        if len(points) == 2:
-            idx1, price1 = points[0]
-            idx2, price2 = points[1]
-            if idx1 in chart_data.index and idx2 in chart_data.index:
-                ax.plot([idx1, idx2], [price1, price2], 'w--', linewidth=2, alpha=0.8)
-                mid_x = idx1 + (idx2 - idx1) / 2
-                mid_y = (price1 + price2) / 2
-                ax.text(mid_x, mid_y, ev['type'], color='yellow', fontsize=12, weight='bold',
-                        ha='center', va='center', bbox=dict(facecolor='black', alpha=0.7, pad=2))
-    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
-    ax.set_xlabel('Date', color='white')
-    ax.set_ylabel('Price', color='white')
-    ax.tick_params(colors='white')
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    plt.xticks(rotation=45)
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-        plt.tight_layout()
-        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
-        tmpfile.flush()
-        with open(tmpfile.name, 'rb') as f:
-            img_data = f.read()
-    os.unlink(tmpfile.name)
-    plt.close(fig)
-    return io.BytesIO(img_data)
 
 # ====================
 # STRUCTURE COMMAND – supports both single symbol and 'all' scan
