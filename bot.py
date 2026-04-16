@@ -2102,13 +2102,13 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
                 timestamp=datetime.now()
             )
             if bos_up:
-                embed.add_field(name="🟢 BOS UP (uptrend continuing)", value="\n".join(bos_up[:5]), inline=False)
+                embed.add_field(name="🟢 BOS UP (uptrend continuing – HOLD/ADD)", value="\n".join(bos_up[:5]), inline=False)
             if choch_up:
-                embed.add_field(name="🟠 CHoCH UP (reversal to uptrend – BUY SIGNAL)", value="\n".join(choch_up[:5]), inline=False)
+                embed.add_field(name="🟠 CHoCH UP (reversal to uptrend – BUY CALLS)", value="\n".join(choch_up[:5]), inline=False)
             if bos_down:
-                embed.add_field(name="🔴 BOS DOWN (downtrend continuing)", value="\n".join(bos_down[:5]), inline=False)
+                embed.add_field(name="🔴 BOS DOWN (downtrend continuing – BUY PUTS)", value="\n".join(bos_down[:5]), inline=False)
             if choch_down:
-                embed.add_field(name="🟣 CHoCH DOWN (reversal to downtrend – SELL SIGNAL)", value="\n".join(choch_down[:5]), inline=False)
+                embed.add_field(name="🟣 CHoCH DOWN (reversal to downtrend – SELL CALLS / BUY PUTS)", value="\n".join(choch_down[:5]), inline=False)
             if not (bos_up or choch_up or bos_down or choch_down):
                 embed.description = "No clear BOS or CHoCH events found."
             await ctx.send(embed=embed)
@@ -2136,18 +2136,18 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         structure = analyze_structure(df)
         current_price = df['close'].iloc[-1]
 
-        # Determine action recommendation
+        # Determine action recommendation - CORRECTED
         if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
-            action = "✅ BUY SIGNAL – Reversal to uptrend detected"
+            action = "✅ BUY CALLS – Reversal to uptrend detected"
             action_color = 0x00ff00
         elif structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'down':
-            action = "🔴 SELL SIGNAL – Reversal to downtrend detected"
+            action = "🔴 SELL CALLS / BUY PUTS – Reversal to downtrend detected"
             action_color = 0xff0000
         elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'up':
-            action = "📈 HOLD/ADD – Uptrend continuing"
+            action = "📈 HOLD/ADD CALLS – Uptrend continuing"
             action_color = 0x00cc00
         elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'down':
-            action = "📉 AVOID/PUTS – Downtrend continuing"
+            action = "📉 BUY PUTS – Downtrend continuing"  # FIXED: was "AVOID/PUTS"
             action_color = 0xcc0000
         else:
             action = "⏸️ WAIT – No clear signal"
@@ -2167,10 +2167,12 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         embed.add_field(
             name="📖 What this means",
             value=(
-                "**BOS (Break of Structure)**: Trend continues – hold or add.\n"
-                "**CHoCH (Change of Character)**: Trend reverses – enter new position.\n"
-                "• CHoCH up + downtrend = BUY\n"
-                "• CHoCH down + uptrend = SELL"
+                "**BOS (Break of Structure)**: Trend continues.\n"
+                "**CHoCH (Change of Character)**: Trend reverses.\n"
+                "• BOS up + uptrend = HOLD/ADD CALLS\n"
+                "• BOS down + downtrend = BUY PUTS\n"
+                "• CHoCH up + downtrend = BUY CALLS\n"
+                "• CHoCH down + uptrend = SELL CALLS / BUY PUTS"
             ),
             inline=False
         )
@@ -2185,6 +2187,134 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         else:
             await ctx.send(embed=embed)
 
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# TREND STRENGTH COMMAND
+# ====================
+@bot.command(name='strength')
+async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
+    """Check trend strength - RSI, ADX, volume, and divergence."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(ticker)
+        if '/' in symbol:
+            await ctx.send("Crypto not supported for strength analysis yet.")
+            return
+
+        valid_tfs = ['1h', '4h', 'daily']
+        if timeframe not in valid_tfs:
+            await ctx.send(f"Invalid timeframe. Use: 1h, 4h, daily")
+            return
+
+        await ctx.send(f"📊 Analyzing trend strength for **{symbol}** on {timeframe}...")
+        
+        df = await fetch_ohlcv(symbol, timeframe)
+        if df is None or df.empty:
+            await ctx.send(f"Could not fetch data for {symbol}")
+            return
+
+        df = calculate_indicators(df)
+        current_price = df['close'].iloc[-1]
+        
+        # RSI
+        rsi = df['rsi'].iloc[-1]
+        
+        # ADX (trend strength) - 25+ = strong trend
+        adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
+        
+        # Volume trend
+        avg_volume = df['volume'].tail(20).mean()
+        current_volume = df['volume'].iloc[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+        
+        # Price vs EMAs
+        ema13 = df['ema13'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        ema200 = df['ema200'].iloc[-1]
+        price_above_ema13 = current_price > ema13
+        price_above_ema50 = current_price > ema50
+        price_above_ema200 = current_price > ema200
+        
+        # Divergence detection (price higher but RSI lower = weakening)
+        price_last_5 = df['close'].tail(5).values
+        rsi_last_5 = df['rsi'].tail(5).values
+        
+        bearish_divergence = False
+        bullish_divergence = False
+        
+        if len(price_last_5) >= 2 and len(rsi_last_5) >= 2:
+            # Price made higher high but RSI made lower high = bearish divergence
+            if price_last_5[-1] > price_last_5[-2] and rsi_last_5[-1] < rsi_last_5[-2]:
+                bearish_divergence = True
+            # Price made lower low but RSI made higher low = bullish divergence
+            if price_last_5[-1] < price_last_5[-2] and rsi_last_5[-1] > rsi_last_5[-2]:
+                bullish_divergence = True
+        
+        # Determine trend strength message
+        if adx > 25:
+            trend_strength_msg = f"🟢 STRONG (ADX: {adx:.1f})"
+        elif adx > 20:
+            trend_strength_msg = f"🟡 MODERATE (ADX: {adx:.1f})"
+        else:
+            trend_strength_msg = f"🔴 WEAK / RANGING (ADX: {adx:.1f})"
+        
+        # RSI status
+        if rsi > 70:
+            rsi_status = "🔴 OVERBOUGHT (sell signal possible)"
+        elif rsi < 30:
+            rsi_status = "🟢 OVERSOLD (buy signal possible)"
+        else:
+            rsi_status = f"⚪ NEUTRAL ({rsi:.1f})"
+        
+        # Volume status
+        if volume_ratio > 1.5:
+            volume_status = f"🔊 HIGH volume ({volume_ratio:.1f}x average)"
+        elif volume_ratio < 0.5:
+            volume_status = f"🔇 LOW volume ({volume_ratio:.1f}x average)"
+        else:
+            volume_status = f"📊 NORMAL volume ({volume_ratio:.1f}x average)"
+        
+        embed = discord.Embed(
+            title=f"📊 Trend Strength: {symbol} ({timeframe.upper()})",
+            description=f"Current Price: **${current_price:.2f}**",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+        
+        embed.add_field(name="📈 ADX (Trend Strength)", value=trend_strength_msg, inline=True)
+        embed.add_field(name="📉 RSI (Momentum)", value=rsi_status, inline=True)
+        embed.add_field(name="🔊 Volume", value=volume_status, inline=True)
+        embed.add_field(name="📊 Price vs EMA13", value="🟢 Above" if price_above_ema13 else "🔴 Below", inline=True)
+        embed.add_field(name="📊 Price vs EMA50", value="🟢 Above" if price_above_ema50 else "🔴 Below", inline=True)
+        embed.add_field(name="📊 Price vs EMA200", value="🟢 Above" if price_above_ema200 else "🔴 Below", inline=True)
+        
+        if bearish_divergence:
+            embed.add_field(name="⚠️ Bearish Divergence", value="Price making higher highs but RSI making lower highs – potential reversal DOWN", inline=False)
+        if bullish_divergence:
+            embed.add_field(name="✅ Bullish Divergence", value="Price making lower lows but RSI making higher lows – potential reversal UP", inline=False)
+        
+        embed.add_field(
+            name="💡 Trading Advice",
+            value=(
+                "• **ADX > 25** = Strong trend (trade with trend)\n"
+                "• **ADX < 20** = Weak trend (avoid, wait for breakout)\n"
+                "• **RSI > 70** = Overbought (consider taking profits)\n"
+                "• **RSI < 30** = Oversold (look for buying opportunities)\n"
+                "• **Divergence** = Early reversal warning\n"
+                "Use `!structure` for exact BOS/CHoCH signals."
+            ),
+            inline=False
+        )
+        
+        embed.set_footer(text="ADX > 25 = strong trend • RSI extremes = caution")
+        await ctx.send(embed=embed)
+        
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
@@ -2328,19 +2458,19 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
             if structure and structure['last_event'] == 'BOS' and structure['trend'] == 'downtrend':
                 embed.add_field(
                     name="⚠️ Trading Advice",
-                    value="**Downtrend with BOS – do NOT buy the dip.** Wait for a Change of Character (CHoCH) before considering long positions.",
+                    value="**Downtrend with BOS – trend continuing DOWN.** Consider PUTS or stay away.",
                     inline=False
                 )
             elif structure and structure['last_event'] == 'CHoCH' and structure['trend'] == 'downtrend' and structure['last_event_direction'] == 'up':
                 embed.add_field(
                     name="📈 Trading Advice",
-                    value="**Change of Character (CHoCH) detected – potential reversal.** Consider watching for BOS to the upside before entering.",
+                    value="**Change of Character (CHoCH) detected – reversal to UPTREND.** Consider CALLS.",
                     inline=False
                 )
             elif structure and structure['trend'] == 'uptrend':
                 embed.add_field(
                     name="📈 Trading Advice",
-                    value="**Uptrend confirmed.** This demand zone is a potential bounce area. Use the suggested option or consider buying the dip with a stop below the zone.",
+                    value="**Uptrend confirmed.** This demand zone is a potential bounce area. Consider CALLS.",
                     inline=False
                 )
 
@@ -3290,6 +3420,9 @@ async def help_command(ctx):
                 "  Analyse market structure (BOS / CHoCH) on 1h, 4h, daily, or weekly. Includes chart with swing points and event lines.\n"
                 "`!structure all [timeframe]`\n"
                 "  Scan watchlist for BOS/CHoCH events.\n\n"
+                "**TREND STRENGTH**\n"
+                "`!strength SYMBOL [timeframe]`\n"
+                "  Check trend strength with ADX, RSI, volume, and divergence detection.\n\n"
                 "**TACO TRADE**\n"
                 "`!taco`\n"
                 "  Get actionable trade signal based on Trump's latest post (Trump Always Chickens Out).\n"
@@ -3337,7 +3470,7 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
