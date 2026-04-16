@@ -1864,37 +1864,14 @@ async def scan_options_flow(ctx):
 # ====================
 # MARKET STRUCTURE ANALYSIS - CORRECTED VERSION
 # ====================
-def find_swings(df, window=5):
-    """
-    Identify swing highs and lows using a rolling window.
-    Returns two lists: (swing_highs, swing_lows) where each is a list of (index, price).
-    """
-    if len(df) < window * 2 + 1:
-        return [], []
-    
-    highs = df['high'].values
-    lows = df['low'].values
-    idx = df.index
-    
-    swing_highs = []
-    swing_lows = []
-    
-    for i in range(window, len(df) - window):
-        # Swing high: central high is higher than window on both sides
-        if highs[i] == max(highs[i-window:i+window+1]):
-            swing_highs.append((idx[i], highs[i]))
-        # Swing low: central low is lower than window on both sides
-        if lows[i] == min(lows[i-window:i+window+1]):
-            swing_lows.append((idx[i], lows[i]))
-    
-    return swing_highs, swing_lows
-
 def analyze_structure(df, window=5):
     """
     Returns a dictionary with:
         trend: 'uptrend' / 'downtrend' / 'sideways'
-        last_event: 'BOS' or 'CHoCH' or None
+        last_event: most recent BOS or CHoCH
         last_event_direction: 'up' or 'down'
+        bos_events: list of recent BOS events (up to 3)
+        choch_events: list of recent CHoCH events (up to 3)
         description: readable summary
     """
     if len(df) < 50:
@@ -1902,6 +1879,8 @@ def analyze_structure(df, window=5):
             'trend': 'insufficient data',
             'last_event': None,
             'last_event_direction': None,
+            'bos_events': [],
+            'choch_events': [],
             'description': 'Not enough data to determine market structure.',
             'event_points': None
         }
@@ -1928,108 +1907,88 @@ def analyze_structure(df, window=5):
         else:
             trend = 'sideways'
     
-    # Get last two swing highs and lows for event detection
-    last_high = highs[-1][1] if highs else None
-    prev_high = highs[-2][1] if len(highs) >= 2 else None
-    last_low = lows[-1][1] if lows else None
-    prev_low = lows[-2][1] if len(lows) >= 2 else None
+    # Get all swing points for event detection
+    bos_events = []
+    choch_events = []
     
-    # Detect BOS and CHoCH (mutually exclusive)
-    last_event = None
-    last_event_direction = None
+    # Track BOS events (continuations)
+    for i in range(2, min(len(highs), 10)):  # Look at last 10 swings
+        if highs[i][1] > highs[i-1][1]:
+            bos_events.append({
+                'type': 'BOS',
+                'direction': 'up',
+                'price': highs[i][1],
+                'date': highs[i][0],
+                'index': i
+            })
+        if lows[i][1] < lows[i-1][1]:
+            bos_events.append({
+                'type': 'BOS',
+                'direction': 'down',
+                'price': lows[i][1],
+                'date': lows[i][0],
+                'index': i
+            })
+    
+    # Track CHoCH events (reversals)
+    if len(highs) >= 3:
+        for i in range(2, min(len(highs), 10)):
+            # In uptrend, a lower low signals CHoCH down
+            if len(lows) > i and lows[i][1] < lows[i-1][1]:
+                choch_events.append({
+                    'type': 'CHoCH',
+                    'direction': 'down',
+                    'price': lows[i][1],
+                    'date': lows[i][0],
+                    'index': i
+                })
+            # In downtrend, a higher high signals CHoCH up
+            if highs[i][1] > highs[i-1][1]:
+                choch_events.append({
+                    'type': 'CHoCH',
+                    'direction': 'up',
+                    'price': highs[i][1],
+                    'date': highs[i][0],
+                    'index': i
+                })
+    
+    # Keep only last 3 of each
+    bos_events = bos_events[-3:] if len(bos_events) > 3 else bos_events
+    choch_events = choch_events[-3:] if len(choch_events) > 3 else choch_events
+    
+    # Determine most recent event (combine both lists)
+    all_events = bos_events + choch_events
+    all_events.sort(key=lambda x: x['date'], reverse=True)
+    last_event = all_events[0] if all_events else None
+    
+    last_event_type = last_event['type'] if last_event else None
+    last_event_direction = last_event['direction'] if last_event else None
+    
     description = f"Trend: {trend}. "
     event_points = None
     
-    if trend == 'uptrend':
-        # Check for BOS (higher high)
-        if last_high and prev_high and last_high > prev_high:
-            last_event = 'BOS'
-            last_event_direction = 'up'
-            description += "Break of Structure (BOS) confirmed – uptrend continuing."
-            event_points = {'type': 'BOS', 'direction': 'up', 'points': [highs[-2], highs[-1]]}
-        # Check for CHoCH (lower low) - reversal to downtrend
-        elif last_low and prev_low and last_low < prev_low:
-            last_event = 'CHoCH'
-            last_event_direction = 'down'
-            description += "Change of Character (CHoCH) detected – reversal to DOWTREND."
-            event_points = {'type': 'CHoCH', 'direction': 'down', 'points': [lows[-2], lows[-1]]}
+    if last_event_type == 'BOS':
+        if last_event_direction == 'up':
+            description += f"Last event: BOS ↑ (uptrend continuing)."
         else:
-            description += "Uptrend continuing but no new BOS."
-            
-    elif trend == 'downtrend':
-        # Check for BOS (lower low)
-        if last_low and prev_low and last_low < prev_low:
-            last_event = 'BOS'
-            last_event_direction = 'down'
-            description += "Break of Structure (BOS) confirmed – downtrend continuing."
-            event_points = {'type': 'BOS', 'direction': 'down', 'points': [lows[-2], lows[-1]]}
-        # Check for CHoCH (higher high) - reversal to uptrend
-        elif last_high and prev_high and last_high > prev_high:
-            last_event = 'CHoCH'
-            last_event_direction = 'up'
-            description += "Change of Character (CHoCH) detected – reversal to UPTREND."
-            event_points = {'type': 'CHoCH', 'direction': 'up', 'points': [highs[-2], highs[-1]]}
+            description += f"Last event: BOS ↓ (downtrend continuing)."
+    elif last_event_type == 'CHoCH':
+        if last_event_direction == 'up':
+            description += f"Last event: CHoCH ↑ (reversal to uptrend)."
         else:
-            description += "Downtrend continuing but no new BOS."
+            description += f"Last event: CHoCH ↓ (reversal to downtrend)."
     else:
-        description += "Market is sideways. Wait for a clear BOS or CHoCH."
+        description += "No clear BOS or CHoCH events detected."
     
     return {
         'trend': trend,
-        'last_event': last_event,
+        'last_event': last_event_type,
         'last_event_direction': last_event_direction,
+        'bos_events': bos_events,
+        'choch_events': choch_events,
         'description': description,
-        'event_points': event_points
+        'event_points': None
     }
-
-def generate_structure_chart(df, symbol, structure):
-    if len(df) < 50:
-        return None
-    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
-    chart_data.columns = ['Open', 'High', 'Low', 'Close']
-    swing_highs, swing_lows = find_swings(df)
-    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
-    ax.set_facecolor('#1e1e1e')
-    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
-    dates = chart_data.index
-    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
-    for i, (idx, row) in enumerate(chart_data.iterrows()):
-        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
-        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
-        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
-    for idx, price in swing_highs:
-        if idx in chart_data.index:
-            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
-    for idx, price in swing_lows:
-        if idx in chart_data.index:
-            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
-    if structure.get('event_points'):
-        ev = structure['event_points']
-        points = ev['points']
-        if len(points) == 2:
-            idx1, price1 = points[0]
-            idx2, price2 = points[1]
-            if idx1 in chart_data.index and idx2 in chart_data.index:
-                ax.plot([idx1, idx2], [price1, price2], 'w--', linewidth=2, alpha=0.8)
-                mid_x = idx1 + (idx2 - idx1) / 2
-                mid_y = (price1 + price2) / 2
-                ax.text(mid_x, mid_y, ev['type'], color='yellow', fontsize=12, weight='bold',
-                        ha='center', va='center', bbox=dict(facecolor='black', alpha=0.7, pad=2))
-    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
-    ax.set_xlabel('Date', color='white')
-    ax.set_ylabel('Price', color='white')
-    ax.tick_params(colors='white')
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
-    plt.xticks(rotation=45)
-    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-        plt.tight_layout()
-        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
-        tmpfile.flush()
-        with open(tmpfile.name, 'rb') as f:
-            img_data = f.read()
-    os.unlink(tmpfile.name)
-    plt.close(fig)
-    return io.BytesIO(img_data)
 
 # ====================
 # STRUCTURE COMMAND – supports both single symbol and 'all' scan
@@ -2136,7 +2095,7 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         structure = analyze_structure(df)
         current_price = df['close'].iloc[-1]
 
-        # Determine action recommendation - CORRECTED
+        # Determine action recommendation based on last event
         if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
             action = "✅ BUY CALLS – Reversal to uptrend detected"
             action_color = 0x00ff00
@@ -2147,7 +2106,7 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             action = "📈 HOLD/ADD CALLS – Uptrend continuing"
             action_color = 0x00cc00
         elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'down':
-            action = "📉 BUY PUTS – Downtrend continuing"  # FIXED: was "AVOID/PUTS"
+            action = "📉 BUY PUTS – Downtrend continuing"
             action_color = 0xcc0000
         else:
             action = "⏸️ WAIT – No clear signal"
@@ -2159,13 +2118,34 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
             color=action_color
         )
         embed.add_field(name="Trend", value=structure['trend'].capitalize(), inline=True)
+        
+        # Show most recent event
         if structure['last_event']:
             emoji = "🟢" if structure['last_event'] == 'BOS' else "🟠"
             direction = "🔼" if structure['last_event_direction'] == 'up' else "🔽"
-            embed.add_field(name="Last Event", value=f"{emoji} {structure['last_event']} {direction}", inline=True)
-        embed.add_field(name="Analysis", value=structure['description'], inline=False)
+            embed.add_field(name="📌 Most Recent Event", value=f"{emoji} {structure['last_event']} {direction}", inline=True)
+        
+        # Show recent BOS events
+        if structure['bos_events']:
+            bos_text = ""
+            for i, bos in enumerate(reversed(structure['bos_events'][-3:]), 1):
+                date_str = bos['date'].strftime('%m/%d %H:%M') if hasattr(bos['date'], 'strftime') else str(bos['date'])[:16]
+                arrow = "🔼" if bos['direction'] == 'up' else "🔽"
+                bos_text += f"{i}. {arrow} BOS {bos['direction'].upper()} at ${bos['price']:.2f} ({date_str})\n"
+            embed.add_field(name="📊 Recent BOS (Break of Structure)", value=bos_text, inline=False)
+        
+        # Show recent CHoCH events
+        if structure['choch_events']:
+            choch_text = ""
+            for i, choch in enumerate(reversed(structure['choch_events'][-3:]), 1):
+                date_str = choch['date'].strftime('%m/%d %H:%M') if hasattr(choch['date'], 'strftime') else str(choch['date'])[:16]
+                arrow = "🔼" if choch['direction'] == 'up' else "🔽"
+                choch_text += f"{i}. {arrow} CHoCH {choch['direction'].upper()} at ${choch['price']:.2f} ({date_str})\n"
+            embed.add_field(name="🔄 Recent CHoCH (Change of Character)", value=choch_text, inline=False)
+        
+        embed.add_field(name="📖 Analysis", value=structure['description'], inline=False)
         embed.add_field(
-            name="📖 What this means",
+            name="💡 What this means",
             value=(
                 "**BOS (Break of Structure)**: Trend continues.\n"
                 "**CHoCH (Change of Character)**: Trend reverses.\n"
