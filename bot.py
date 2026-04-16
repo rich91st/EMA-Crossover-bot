@@ -1862,8 +1862,33 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# MARKET STRUCTURE ANALYSIS - CORRECTED VERSION
+# MARKET STRUCTURE ANALYSIS - CORRECTED VERSION WITH MULTIPLE EVENTS
 # ====================
+def find_swings(df, window=5):
+    """
+    Identify swing highs and lows using a rolling window.
+    Returns two lists: (swing_highs, swing_lows) where each is a list of (index, price).
+    """
+    if len(df) < window * 2 + 1:
+        return [], []
+    
+    highs = df['high'].values
+    lows = df['low'].values
+    idx = df.index
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(window, len(df) - window):
+        # Swing high: central high is higher than window on both sides
+        if highs[i] == max(highs[i-window:i+window+1]):
+            swing_highs.append((idx[i], highs[i]))
+        # Swing low: central low is lower than window on both sides
+        if lows[i] == min(lows[i-window:i+window+1]):
+            swing_lows.append((idx[i], lows[i]))
+    
+    return swing_highs, swing_lows
+
 def analyze_structure(df, window=5):
     """
     Returns a dictionary with:
@@ -1907,12 +1932,12 @@ def analyze_structure(df, window=5):
         else:
             trend = 'sideways'
     
-    # Get all swing points for event detection
+    # Track BOS events (continuations)
     bos_events = []
     choch_events = []
     
-    # Track BOS events (continuations)
-    for i in range(2, min(len(highs), 10)):  # Look at last 10 swings
+    # BOS: higher high in uptrend, lower low in downtrend
+    for i in range(1, min(len(highs), 10)):
         if highs[i][1] > highs[i-1][1]:
             bos_events.append({
                 'type': 'BOS',
@@ -1921,6 +1946,7 @@ def analyze_structure(df, window=5):
                 'date': highs[i][0],
                 'index': i
             })
+    for i in range(1, min(len(lows), 10)):
         if lows[i][1] < lows[i-1][1]:
             bos_events.append({
                 'type': 'BOS',
@@ -1930,11 +1956,11 @@ def analyze_structure(df, window=5):
                 'index': i
             })
     
-    # Track CHoCH events (reversals)
-    if len(highs) >= 3:
-        for i in range(2, min(len(highs), 10)):
-            # In uptrend, a lower low signals CHoCH down
-            if len(lows) > i and lows[i][1] < lows[i-1][1]:
+    # CHoCH: lower low in uptrend (reversal down), higher high in downtrend (reversal up)
+    if len(highs) >= 3 and len(lows) >= 3:
+        # Check for CHoCH down (lower low during uptrend)
+        for i in range(2, min(len(lows), 10)):
+            if lows[i][1] < lows[i-1][1]:
                 choch_events.append({
                     'type': 'CHoCH',
                     'direction': 'down',
@@ -1942,7 +1968,8 @@ def analyze_structure(df, window=5):
                     'date': lows[i][0],
                     'index': i
                 })
-            # In downtrend, a higher high signals CHoCH up
+        # Check for CHoCH up (higher high during downtrend)
+        for i in range(2, min(len(highs), 10)):
             if highs[i][1] > highs[i-1][1]:
                 choch_events.append({
                     'type': 'CHoCH',
@@ -1965,7 +1992,6 @@ def analyze_structure(df, window=5):
     last_event_direction = last_event['direction'] if last_event else None
     
     description = f"Trend: {trend}. "
-    event_points = None
     
     if last_event_type == 'BOS':
         if last_event_direction == 'up':
@@ -1989,6 +2015,43 @@ def analyze_structure(df, window=5):
         'description': description,
         'event_points': None
     }
+
+def generate_structure_chart(df, symbol, structure):
+    if len(df) < 50:
+        return None
+    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close']
+    swing_highs, swing_lows = find_swings(df)
+    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
+    dates = chart_data.index
+    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
+    for i, (idx, row) in enumerate(chart_data.iterrows()):
+        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
+        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
+        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
+    for idx, price in swing_highs:
+        if idx in chart_data.index:
+            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
+    for idx, price in swing_lows:
+        if idx in chart_data.index:
+            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
+    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
+    ax.set_xlabel('Date', color='white')
+    ax.set_ylabel('Price', color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    plt.xticks(rotation=45)
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+        plt.tight_layout()
+        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
+        tmpfile.flush()
+        with open(tmpfile.name, 'rb') as f:
+            img_data = f.read()
+    os.unlink(tmpfile.name)
+    plt.close(fig)
+    return io.BytesIO(img_data)
 
 # ====================
 # STRUCTURE COMMAND – supports both single symbol and 'all' scan
@@ -2221,7 +2284,7 @@ async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
         price_above_ema50 = current_price > ema50
         price_above_ema200 = current_price > ema200
         
-        # Divergence detection (price higher but RSI lower = weakening)
+        # Divergence detection
         price_last_5 = df['close'].tail(5).values
         rsi_last_5 = df['rsi'].tail(5).values
         
@@ -2229,14 +2292,11 @@ async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
         bullish_divergence = False
         
         if len(price_last_5) >= 2 and len(rsi_last_5) >= 2:
-            # Price made higher high but RSI made lower high = bearish divergence
             if price_last_5[-1] > price_last_5[-2] and rsi_last_5[-1] < rsi_last_5[-2]:
                 bearish_divergence = True
-            # Price made lower low but RSI made higher low = bullish divergence
             if price_last_5[-1] < price_last_5[-2] and rsi_last_5[-1] > rsi_last_5[-2]:
                 bullish_divergence = True
         
-        # Determine trend strength message
         if adx > 25:
             trend_strength_msg = f"🟢 STRONG (ADX: {adx:.1f})"
         elif adx > 20:
@@ -2244,7 +2304,6 @@ async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
         else:
             trend_strength_msg = f"🔴 WEAK / RANGING (ADX: {adx:.1f})"
         
-        # RSI status
         if rsi > 70:
             rsi_status = "🔴 OVERBOUGHT (sell signal possible)"
         elif rsi < 30:
@@ -2252,7 +2311,6 @@ async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
         else:
             rsi_status = f"⚪ NEUTRAL ({rsi:.1f})"
         
-        # Volume status
         if volume_ratio > 1.5:
             volume_status = f"🔊 HIGH volume ({volume_ratio:.1f}x average)"
         elif volume_ratio < 0.5:
