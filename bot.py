@@ -2022,30 +2022,107 @@ def generate_structure_chart(df, symbol, structure):
     chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
     chart_data.columns = ['Open', 'High', 'Low', 'Close']
     swing_highs, swing_lows = find_swings(df)
-    fig, ax = plt.subplots(figsize=(12, 6), facecolor='#1e1e1e')
+    fig, ax = plt.subplots(figsize=(14, 8), facecolor='#1e1e1e')
     ax.set_facecolor('#1e1e1e')
     ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
     dates = chart_data.index
     width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
+    
+    # Plot candlesticks
     for i, (idx, row) in enumerate(chart_data.iterrows()):
         color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
         ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
         ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
+    
+    # Mark swing highs (green triangles)
     for idx, price in swing_highs:
         if idx in chart_data.index:
-            ax.plot(idx, price, '^', color='green', markersize=8, zorder=5)
+            ax.plot(idx, price, '^', color='lime', markersize=10, zorder=5, linewidth=2)
+    
+    # Mark swing lows (red triangles)
     for idx, price in swing_lows:
         if idx in chart_data.index:
-            ax.plot(idx, price, 'v', color='red', markersize=8, zorder=5)
-    ax.set_title(f'{symbol} Market Structure', color='white', fontsize=14)
+            ax.plot(idx, price, 'v', color='red', markersize=10, zorder=5, linewidth=2)
+    
+    # Draw BOS events (blue dashed lines)
+    if structure.get('bos_events'):
+        for i, bos in enumerate(structure['bos_events'][-3:]):  # Last 3 BOS events
+            # Find the swing point for this BOS
+            direction = bos['direction']
+            price = bos['price']
+            date = bos['date']
+            if date in chart_data.index:
+                # Draw a horizontal line at the BOS level
+                line_style = '--'
+                line_color = '#00aaff' if direction == 'up' else '#ff8800'
+                line_width = 1.5
+                alpha = 0.7
+                ax.axhline(y=price, color=line_color, linestyle=line_style, linewidth=line_width, alpha=alpha)
+                # Add label
+                label = f"BOS {direction.upper()}"
+                ax.text(date, price, label, fontsize=8, color=line_color,
+                        ha='left', va='bottom', bbox=dict(facecolor='#1e1e1e', alpha=0.7, pad=1))
+    
+    # Draw CHoCH events (red dashed lines)
+    if structure.get('choch_events'):
+        for i, choch in enumerate(structure['choch_events'][-3:]):  # Last 3 CHoCH events
+            direction = choch['direction']
+            price = choch['price']
+            date = choch['date']
+            if date in chart_data.index:
+                # Draw a horizontal line at the CHoCH level
+                line_color = '#ff00ff' if direction == 'up' else '#ff4444'
+                line_width = 2
+                alpha = 0.8
+                ax.axhline(y=price, color=line_color, linestyle='--', linewidth=line_width, alpha=alpha)
+                # Add label
+                label = f"CHoCH {direction.upper()}"
+                ax.text(date, price, label, fontsize=9, color=line_color,
+                        ha='left', va='top', weight='bold',
+                        bbox=dict(facecolor='#1e1e1e', alpha=0.8, pad=2))
+    
+    # Highlight the most recent event with a thicker line
+    if structure.get('last_event'):
+        last_event_type = structure['last_event']
+        last_event_direction = structure['last_event_direction']
+        # Find the most recent event in the lists
+        all_events = (structure.get('bos_events', []) + structure.get('choch_events', []))
+        all_events.sort(key=lambda x: x['date'], reverse=True)
+        if all_events:
+            last = all_events[0]
+            price = last['price']
+            date = last['date']
+            if date in chart_data.index:
+                line_color = '#ffffff'  # White for most recent
+                ax.axhline(y=price, color=line_color, linestyle='-', linewidth=3, alpha=0.9)
+                label = f"★ MOST RECENT: {last['type']} {last['direction'].upper()}"
+                ax.text(date, price, label, fontsize=10, color='yellow',
+                        ha='left', va='bottom', weight='bold',
+                        bbox=dict(facecolor='#1e1e1e', alpha=0.9, pad=3))
+    
+    # Add legend
+    legend_elements = [
+        plt.Line2D([0], [0], marker='^', color='w', label='Swing High', markerfacecolor='lime', markersize=8),
+        plt.Line2D([0], [0], marker='v', color='w', label='Swing Low', markerfacecolor='red', markersize=8),
+        plt.Line2D([0], [0], color='#00aaff', linestyle='--', linewidth=2, label='BOS Up'),
+        plt.Line2D([0], [0], color='#ff8800', linestyle='--', linewidth=2, label='BOS Down'),
+        plt.Line2D([0], [0], color='#ff00ff', linestyle='--', linewidth=2, label='CHoCH Up'),
+        plt.Line2D([0], [0], color='#ff4444', linestyle='--', linewidth=2, label='CHoCH Down'),
+        plt.Line2D([0], [0], color='white', linestyle='-', linewidth=3, label='Most Recent Event'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=9,
+              facecolor='#333333', edgecolor='white', labelcolor='white', framealpha=0.8)
+    
+    ax.set_title(f'{symbol} Market Structure - BOS (blue/orange) & CHoCH (purple/red)', color='white', fontsize=14)
     ax.set_xlabel('Date', color='white')
     ax.set_ylabel('Price', color='white')
     ax.tick_params(colors='white')
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
     plt.xticks(rotation=45)
+    plt.tight_layout()
+    
     with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-        plt.tight_layout()
-        plt.savefig(tmpfile.name, format='png', dpi=100, facecolor='#1e1e1e')
+        plt.savefig(tmpfile.name, format='png', dpi=120, facecolor='#1e1e1e', bbox_inches='tight')
         tmpfile.flush()
         with open(tmpfile.name, 'rb') as f:
             img_data = f.read()
