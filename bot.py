@@ -53,6 +53,7 @@ ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client['trading_bot']
 watchlist_collection = db['watchlist']
+trades_collection = db['trades']  # New collection for trade tracking
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -2027,80 +2028,58 @@ def generate_structure_chart(df, symbol, structure):
     ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
     dates = chart_data.index
     width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600)
-    
-    # Plot candlesticks
     for i, (idx, row) in enumerate(chart_data.iterrows()):
         color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
         ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
         ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
-    
-    # Mark swing highs (green triangles)
     for idx, price in swing_highs:
         if idx in chart_data.index:
             ax.plot(idx, price, '^', color='lime', markersize=10, zorder=5, linewidth=2)
-    
-    # Mark swing lows (red triangles)
     for idx, price in swing_lows:
         if idx in chart_data.index:
             ax.plot(idx, price, 'v', color='red', markersize=10, zorder=5, linewidth=2)
     
-    # Draw BOS events (blue dashed lines)
+    # Draw BOS events
     if structure.get('bos_events'):
-        for i, bos in enumerate(structure['bos_events'][-3:]):  # Last 3 BOS events
-            # Find the swing point for this BOS
+        for bos in structure['bos_events'][-3:]:
             direction = bos['direction']
             price = bos['price']
             date = bos['date']
             if date in chart_data.index:
-                # Draw a horizontal line at the BOS level
-                line_style = '--'
                 line_color = '#00aaff' if direction == 'up' else '#ff8800'
-                line_width = 1.5
-                alpha = 0.7
-                ax.axhline(y=price, color=line_color, linestyle=line_style, linewidth=line_width, alpha=alpha)
-                # Add label
+                ax.axhline(y=price, color=line_color, linestyle='--', linewidth=1.5, alpha=0.7)
                 label = f"BOS {direction.upper()}"
                 ax.text(date, price, label, fontsize=8, color=line_color,
                         ha='left', va='bottom', bbox=dict(facecolor='#1e1e1e', alpha=0.7, pad=1))
     
-    # Draw CHoCH events (red dashed lines)
+    # Draw CHoCH events
     if structure.get('choch_events'):
-        for i, choch in enumerate(structure['choch_events'][-3:]):  # Last 3 CHoCH events
+        for choch in structure['choch_events'][-3:]:
             direction = choch['direction']
             price = choch['price']
             date = choch['date']
             if date in chart_data.index:
-                # Draw a horizontal line at the CHoCH level
                 line_color = '#ff00ff' if direction == 'up' else '#ff4444'
-                line_width = 2
-                alpha = 0.8
-                ax.axhline(y=price, color=line_color, linestyle='--', linewidth=line_width, alpha=alpha)
-                # Add label
+                ax.axhline(y=price, color=line_color, linestyle='--', linewidth=2, alpha=0.8)
                 label = f"CHoCH {direction.upper()}"
                 ax.text(date, price, label, fontsize=9, color=line_color,
                         ha='left', va='top', weight='bold',
                         bbox=dict(facecolor='#1e1e1e', alpha=0.8, pad=2))
     
-    # Highlight the most recent event with a thicker line
-    if structure.get('last_event'):
-        last_event_type = structure['last_event']
-        last_event_direction = structure['last_event_direction']
-        # Find the most recent event in the lists
-        all_events = (structure.get('bos_events', []) + structure.get('choch_events', []))
-        all_events.sort(key=lambda x: x['date'], reverse=True)
-        if all_events:
-            last = all_events[0]
-            price = last['price']
-            date = last['date']
-            if date in chart_data.index:
-                line_color = '#ffffff'  # White for most recent
-                ax.axhline(y=price, color=line_color, linestyle='-', linewidth=3, alpha=0.9)
-                label = f"★ MOST RECENT: {last['type']} {last['direction'].upper()}"
-                ax.text(date, price, label, fontsize=10, color='yellow',
-                        ha='left', va='bottom', weight='bold',
-                        bbox=dict(facecolor='#1e1e1e', alpha=0.9, pad=3))
+    # Highlight most recent event
+    all_events = (structure.get('bos_events', []) + structure.get('choch_events', []))
+    all_events.sort(key=lambda x: x['date'], reverse=True)
+    if all_events:
+        last = all_events[0]
+        price = last['price']
+        date = last['date']
+        if date in chart_data.index:
+            ax.axhline(y=price, color='white', linestyle='-', linewidth=3, alpha=0.9)
+            label = f"★ MOST RECENT: {last['type']} {last['direction'].upper()}"
+            ax.text(date, price, label, fontsize=10, color='yellow',
+                    ha='left', va='bottom', weight='bold',
+                    bbox=dict(facecolor='#1e1e1e', alpha=0.9, pad=3))
     
-    # Add legend
     legend_elements = [
         plt.Line2D([0], [0], marker='^', color='w', label='Swing High', markerfacecolor='lime', markersize=8),
         plt.Line2D([0], [0], marker='v', color='w', label='Swing Low', markerfacecolor='red', markersize=8),
@@ -3433,6 +3412,227 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
     return zones
 
 # ====================
+# TRADE TRACKING COMMANDS
+# ====================
+@bot.command(name='track')
+async def track_trade(ctx, action: str, symbol: str, *, details: str = None):
+    """Track your trades. Usage:
+    !track BUY NVDA CALL 200 strike 1.50
+    !track SELL NVDA 1.80
+    !track CLOSE NVDA profit 15%
+    """
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        action = action.upper()
+        symbol = symbol.upper()
+
+        if action in ['BUY', 'OPEN']:
+            # Parse details: e.g., "CALL 200 strike 1.50" or "PUT 180 2.00"
+            parts = details.split() if details else []
+            option_type = parts[0].upper() if parts and parts[0] in ['CALL', 'PUT'] else None
+            strike = float(parts[1]) if len(parts) > 1 else None
+            premium = float(parts[-1]) if parts else None
+            
+            trade = {
+                'user_id': str(ctx.author.id),
+                'symbol': symbol,
+                'action': 'BUY',
+                'option_type': option_type,
+                'strike': strike,
+                'premium': premium,
+                'entry_date': now,
+                'entry_price': premium,
+                'status': 'OPEN',
+                'strategy': None  # Optional: add strategy tag later
+            }
+            await trades_collection.insert_one(trade)
+            await ctx.send(f"✅ Tracked: **BUY {symbol} {option_type if option_type else ''} {f'${strike} strike ' if strike else ''}at ${premium:.2f}**" if premium else f"✅ Tracked: **BUY {symbol}**")
+            
+        elif action in ['SELL', 'CLOSE']:
+            # Find most recent open trade for this symbol
+            open_trade = await trades_collection.find_one(
+                {'user_id': str(ctx.author.id), 'symbol': symbol, 'status': 'OPEN'},
+                sort=[('entry_date', -1)]
+            )
+            if not open_trade:
+                await ctx.send(f"❌ No open trade found for {symbol}. Use `!track BUY {symbol}` first.")
+                return
+            
+            # Parse exit price or profit percentage
+            if details:
+                if details.endswith('%'):
+                    profit_pct = float(details[:-1])
+                    entry_premium = open_trade.get('premium', 0)
+                    if entry_premium > 0:
+                        exit_premium = entry_premium * (1 + profit_pct / 100)
+                    else:
+                        exit_premium = None
+                else:
+                    exit_premium = float(details)
+                    profit_pct = ((exit_premium - open_trade.get('premium', 0)) / open_trade.get('premium', 1)) * 100 if open_trade.get('premium') else None
+            else:
+                exit_premium = None
+                profit_pct = None
+            
+            # Update the trade
+            await trades_collection.update_one(
+                {'_id': open_trade['_id']},
+                {'$set': {
+                    'status': 'CLOSED',
+                    'exit_date': now,
+                    'exit_premium': exit_premium,
+                    'profit_pct': profit_pct,
+                    'profit_amount': (exit_premium - open_trade.get('premium', 0)) * 100 if exit_premium and open_trade.get('premium') else None
+                }}
+            )
+            
+            if profit_pct is not None:
+                emoji = "🟢" if profit_pct > 0 else "🔴" if profit_pct < 0 else "⚪"
+                await ctx.send(f"✅ Closed **{symbol}** trade: {emoji} {profit_pct:+.1f}%")
+            else:
+                await ctx.send(f"✅ Closed **{symbol}** trade.")
+                
+        else:
+            await ctx.send("❌ Invalid action. Use `!track BUY SYMBOL` or `!track CLOSE SYMBOL`")
+            
+    except Exception as e:
+        await ctx.send(f"❌ Error tracking trade: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='performance', aliases=['stats', 'perf'])
+async def performance(ctx, days: int = 30):
+    """Show your trading performance over the last N days (default 30)."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        cutoff = now - timedelta(days=days)
+        
+        # Get all closed trades for this user
+        trades = await trades_collection.find({
+            'user_id': str(ctx.author.id),
+            'status': 'CLOSED',
+            'exit_date': {'$gte': cutoff}
+        }).to_list(length=1000)
+        
+        if not trades:
+            await ctx.send(f"📭 No closed trades found in the last {days} days. Start tracking with `!track BUY SYMBOL`")
+            return
+        
+        # Calculate stats
+        total_trades = len(trades)
+        winning_trades = [t for t in trades if t.get('profit_pct', 0) > 0]
+        losing_trades = [t for t in trades if t.get('profit_pct', 0) < 0]
+        win_rate = len(winning_trades) / total_trades * 100 if total_trades > 0 else 0
+        
+        total_profit = sum(t.get('profit_pct', 0) for t in trades)
+        avg_win = sum(t.get('profit_pct', 0) for t in winning_trades) / len(winning_trades) if winning_trades else 0
+        avg_loss = abs(sum(t.get('profit_pct', 0) for t in losing_trades) / len(losing_trades)) if losing_trades else 0
+        
+        # Profit factor
+        gross_profit = sum(t.get('profit_pct', 0) for t in winning_trades)
+        gross_loss = abs(sum(t.get('profit_pct', 0) for t in losing_trades))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        
+        # Best/worst trade
+        best_trade = max(trades, key=lambda x: x.get('profit_pct', -999)) if trades else None
+        worst_trade = min(trades, key=lambda x: x.get('profit_pct', 999)) if trades else None
+        
+        # By symbol
+        symbol_stats = {}
+        for t in trades:
+            sym = t['symbol']
+            if sym not in symbol_stats:
+                symbol_stats[sym] = {'trades': 0, 'wins': 0, 'profit': 0}
+            symbol_stats[sym]['trades'] += 1
+            symbol_stats[sym]['profit'] += t.get('profit_pct', 0)
+            if t.get('profit_pct', 0) > 0:
+                symbol_stats[sym]['wins'] += 1
+        
+        # Build embed
+        embed = discord.Embed(
+            title=f"📊 Trading Performance (Last {days} days)",
+            color=0x00ff00 if total_profit > 0 else 0xff0000,
+            timestamp=now
+        )
+        
+        embed.add_field(name="Total Trades", value=str(total_trades), inline=True)
+        embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
+        embed.add_field(name="Total P&L", value=f"{total_profit:+.1f}%", inline=True)
+        embed.add_field(name="Avg Win", value=f"{avg_win:+.1f}%", inline=True)
+        embed.add_field(name="Avg Loss", value=f"{avg_loss:+.1f}%", inline=True)
+        embed.add_field(name="Profit Factor", value=f"{profit_factor:.2f}", inline=True)
+        
+        if best_trade:
+            embed.add_field(name="🏆 Best Trade", value=f"{best_trade['symbol']}: {best_trade.get('profit_pct', 0):+.1f}%", inline=True)
+        if worst_trade:
+            embed.add_field(name="📉 Worst Trade", value=f"{worst_trade['symbol']}: {worst_trade.get('profit_pct', 0):+.1f}%", inline=True)
+        
+        # Top 3 best symbols
+        top_symbols = sorted(symbol_stats.items(), key=lambda x: x[1]['profit'], reverse=True)[:3]
+        if top_symbols:
+            symbol_text = ""
+            for sym, stats in top_symbols:
+                win_pct = stats['wins'] / stats['trades'] * 100
+                symbol_text += f"**{sym}**: {stats['profit']:+.1f}% ({stats['wins']}/{stats['trades']} wins, {win_pct:.0f}%)\n"
+            embed.add_field(name="📈 Best Symbols", value=symbol_text, inline=False)
+        
+        embed.set_footer(text="Track trades with !track BUY SYMBOL and !track CLOSE SYMBOL")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='trades')
+async def list_trades(ctx, limit: int = 10):
+    """List your recent trades."""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        trades = await trades_collection.find({
+            'user_id': str(ctx.author.id)
+        }).sort('entry_date', -1).to_list(length=limit)
+        
+        if not trades:
+            await ctx.send("No trades found. Start tracking with `!track BUY SYMBOL`")
+            return
+        
+        embed = discord.Embed(
+            title=f"📋 Recent Trades (Last {len(trades)})",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+        
+        trade_list = ""
+        for t in trades:
+            status = "🟢 OPEN" if t.get('status') == 'OPEN' else "🔒 CLOSED"
+            profit_str = f"{t.get('profit_pct', 0):+.1f}%" if t.get('profit_pct') else "N/A"
+            entry_date = t['entry_date'].strftime('%m/%d') if hasattr(t['entry_date'], 'strftime') else str(t['entry_date'])[:10]
+            trade_list += f"**{t['symbol']}** {status} | Entry: ${t.get('premium', 0):.2f} | P&L: {profit_str} | {entry_date}\n"
+        
+        embed.add_field(name="Trades", value=trade_list or "None", inline=False)
+        embed.set_footer(text="Use !performance for detailed stats")
+        await ctx.send(embed=embed)
+        
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
 # WATCHLIST COMMANDS
 # ====================
 @bot.command(name='add')
@@ -3562,6 +3762,15 @@ async def help_command(ctx):
                 "  Preset: rel volume >2, up 5%, optionable, avg volume >500K\n"
                 "`!cheap_plays`\n"
                 "  Alias for `!cheap_options`\n\n"
+                "**TRADE TRACKING**\n"
+                "`!track BUY SYMBOL CALL/PUT STRIKE PREMIUM`\n"
+                "  Record a new trade entry\n"
+                "`!track CLOSE SYMBOL EXIT_PRICE`\n"
+                "  Close a trade and calculate profit/loss\n"
+                "`!performance [days]`\n"
+                "  Show win rate, total P&L, best/worst trades\n"
+                "`!trades [limit]`\n"
+                "  List your recent trades\n\n"
                 "**WATCHLIST**\n"
                 "`!add SYMBOL`\n"
                 "  Add stock or crypto (use BTC/USD for crypto)\n"
@@ -3585,7 +3794,7 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
