@@ -180,7 +180,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING FUNCTIONS (condensed for length)
+# DATA FETCHING FUNCTIONS
 # ====================
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
@@ -370,7 +370,7 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
-# NEWS FETCHING FUNCTIONS (condensed)
+# NEWS FETCHING FUNCTIONS
 # ====================
 async def fetch_finnhub_news(symbol):
     url = "https://finnhub.io/api/v1/company-news"
@@ -428,18 +428,17 @@ async def fetch_analyst_ratings(symbol, limit=3):
     except Exception:
         return []
 
-async def fetch_earnings_upcoming(symbol, days=14):
+async def fetch_earnings_upcoming(symbol, days=90):
     try:
         stock = yf.Ticker(symbol)
         earnings_dates = stock.earnings_dates
         if earnings_dates is None or earnings_dates.empty:
             return []
         today = datetime.now().date()
-        cutoff = today + timedelta(days=days)
         upcoming = []
         for date, row in earnings_dates.iterrows():
             e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if today <= e_date <= cutoff:
+            if e_date >= today:
                 eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
                 eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
                 upcoming.append({'date': e_date.strftime('%Y-%m-%d'), 'epsEstimate': eps_est, 'hour': 'AMC'})
@@ -447,35 +446,33 @@ async def fetch_earnings_upcoming(symbol, days=14):
     except Exception:
         return []
 
-async def fetch_dividends_upcoming(symbol, days=14):
+async def fetch_dividends_upcoming(symbol):
     try:
         stock = yf.Ticker(symbol)
         dividends = stock.dividends
         if dividends.empty:
             return []
         today = datetime.now().date()
-        cutoff = today + timedelta(days=days)
         upcoming = []
         for date, amount in dividends.items():
             d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if today <= d_date <= cutoff:
+            if d_date >= today:
                 upcoming.append({'exDate': d_date.strftime('%Y-%m-%d'), 'amount': f"{amount:.2f}", 'payDate': ''})
         return upcoming
     except Exception:
         return []
 
-async def fetch_splits_upcoming(symbol, days=14):
+async def fetch_splits_upcoming(symbol):
     try:
         stock = yf.Ticker(symbol)
         splits = stock.splits
         if splits.empty:
             return []
         today = datetime.now().date()
-        cutoff = today + timedelta(days=days)
         upcoming = []
         for date, ratio in splits.items():
             s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if today <= s_date <= cutoff:
+            if s_date >= today:
                 ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
                 upcoming.append({'date': s_date.strftime('%Y-%m-%d'), 'splitRatio': ratio_str})
         return upcoming
@@ -585,7 +582,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 # ====================
-# CHART GENERATION (condensed)
+# CHART GENERATION
 # ====================
 def generate_chart_image(df, symbol, timeframe):
     if len(df) < 20:
@@ -1943,7 +1940,7 @@ async def cheap_plays(ctx):
     await cheap_options(ctx)
 
 # ====================
-# UPCOMING COMMAND
+# UPCOMING COMMAND - FIXED
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -1955,8 +1952,8 @@ async def get_earnings_stats(symbol, earnings_date):
             return "N/A", "N/A"
         target_exp = None
         for exp in expirations:
-            exp_dt = datetime.strptime(exp, '%Y-%m-%d')
-            if exp_dt >= earn_dt:
+            exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
+            if exp_dt >= earn_dt.date():
                 target_exp = exp
                 break
         if not target_exp:
@@ -1966,8 +1963,10 @@ async def get_earnings_stats(symbol, earnings_date):
         current_price = stock.history(period="1d")['Close'].iloc[-1]
         if calls.empty or puts.empty:
             return "N/A", "N/A"
-        calls['diff'], puts['diff'] = abs(calls['strike'] - current_price), abs(puts['strike'] - current_price)
-        atm_call, atm_put = calls.loc[calls['diff'].idxmin()], puts.loc[puts['diff'].idxmin()]
+        calls['diff'] = abs(calls['strike'] - current_price)
+        puts['diff'] = abs(puts['strike'] - current_price)
+        atm_call = calls.loc[calls['diff'].idxmin()]
+        atm_put = puts.loc[puts['diff'].idxmin()]
         call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
         put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
         straddle = call_price + put_price
@@ -1979,7 +1978,6 @@ async def get_earnings_stats(symbol, earnings_date):
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str):
-    """Show ALL upcoming events for a stock: earnings, dividends, splits, and analyst ratings."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1993,10 +1991,9 @@ async def upcoming_events(ctx, ticker: str):
         symbol = ticker.upper()
         await ctx.send(f"🔍 Fetching upcoming events for **{symbol}**...")
 
-        # Fetch all data in parallel
         stock = yf.Ticker(symbol)
         
-        # 1. Get earnings dates (all upcoming)
+        # Get earnings
         earnings_list = []
         try:
             earnings_dates = stock.earnings_dates
@@ -2004,15 +2001,13 @@ async def upcoming_events(ctx, ticker: str):
                 today = datetime.now().date()
                 for date, row in earnings_dates.iterrows():
                     e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-                    if e_date >= today:  # Only future dates
+                    if e_date >= today:
                         eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
                         eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
-                        # Calculate expected move if options available
                         exp_move = "N/A"
                         try:
                             expirations = stock.options
                             if expirations:
-                                # Find closest expiration after earnings
                                 target_exp = None
                                 for exp in expirations:
                                     exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
@@ -2034,15 +2029,11 @@ async def upcoming_events(ctx, ticker: str):
                                         exp_move = f"{(straddle / current_price * 100):.1f}%"
                         except:
                             pass
-                        earnings_list.append({
-                            'date': e_date.strftime('%Y-%m-%d'),
-                            'eps_est': eps_est,
-                            'expected_move': exp_move
-                        })
+                        earnings_list.append({'date': e_date.strftime('%Y-%m-%d'), 'eps_est': eps_est, 'expected_move': exp_move})
         except Exception as e:
             print(f"Error fetching earnings: {e}")
 
-        # 2. Get dividends (upcoming)
+        # Get dividends
         dividends_list = []
         try:
             dividends = stock.dividends
@@ -2051,14 +2042,11 @@ async def upcoming_events(ctx, ticker: str):
                 for date, amount in dividends.items():
                     d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
                     if d_date >= today:
-                        dividends_list.append({
-                            'date': d_date.strftime('%Y-%m-%d'),
-                            'amount': f"${amount:.2f}"
-                        })
+                        dividends_list.append({'date': d_date.strftime('%Y-%m-%d'), 'amount': f"${amount:.2f}"})
         except Exception as e:
             print(f"Error fetching dividends: {e}")
 
-        # 3. Get splits (upcoming)
+        # Get splits
         splits_list = []
         try:
             splits = stock.splits
@@ -2068,49 +2056,37 @@ async def upcoming_events(ctx, ticker: str):
                     s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
                     if s_date >= today:
                         ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
-                        splits_list.append({
-                            'date': s_date.strftime('%Y-%m-%d'),
-                            'ratio': ratio_str
-                        })
+                        splits_list.append({'date': s_date.strftime('%Y-%m-%d'), 'ratio': ratio_str})
         except Exception as e:
             print(f"Error fetching splits: {e}")
 
-        # 4. Get analyst ratings
+        # Get analyst ratings
         ratings = await fetch_analyst_ratings(symbol, limit=3)
 
-        # Check if we found anything
         if not earnings_list and not dividends_list and not splits_list and not ratings:
             await ctx.send(f"📭 No upcoming events found for {symbol}.")
             return
 
-        embed = discord.Embed(
-            title=f"📅 Upcoming Catalysts for {symbol}",
-            color=0x00ff00,
-            timestamp=datetime.now()
-        )
+        embed = discord.Embed(title=f"📅 Upcoming Catalysts for {symbol}", color=0x00ff00, timestamp=datetime.now())
 
-        # Earnings section
         if earnings_list:
             earnings_text = ""
-            for e in earnings_list[:3]:  # Show next 3 earnings
+            for e in earnings_list[:3]:
                 earnings_text += f"**{e['date']}** – EPS Est: {e['eps_est']} | Expected Move: {e['expected_move']}\n"
             embed.add_field(name="📊 Earnings (Upcoming)", value=earnings_text, inline=False)
 
-        # Dividends section
         if dividends_list:
             div_text = ""
             for d in dividends_list[:2]:
                 div_text += f"**{d['date']}** – Amount: {d['amount']}\n"
             embed.add_field(name="💰 Dividends", value=div_text, inline=False)
 
-        # Splits section
         if splits_list:
             split_text = ""
             for s in splits_list[:2]:
                 split_text += f"**{s['date']}** – Ratio: {s['ratio']}\n"
             embed.add_field(name="🔄 Stock Splits", value=split_text, inline=False)
 
-        # Analyst Ratings
         if ratings:
             ratings_text = ""
             for r in ratings[:3]:
@@ -2126,8 +2102,6 @@ async def upcoming_events(ctx, ticker: str):
                 sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
                 if total > 0:
                     ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
-                else:
-                    ratings_text += f"**{period}** – No data\n"
             if ratings_text:
                 embed.add_field(name="📈 Analyst Ratings (Last 3 Months)", value=ratings_text, inline=False)
 
@@ -2566,15 +2540,200 @@ async def performance(ctx, symbol: str = None, days: int = 30):
         user_busy[ctx.author.id] = False
 
 # ====================
+# QUICK SCORE COMMAND - LIGHTWEIGHT SCANNER
+# ====================
+@bot.command(name='score')
+async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+
+        valid_timeframes = ['1h', '4h', 'daily', 'weekly']
+        if timeframe not in valid_timeframes:
+            await ctx.send(f"Invalid timeframe. Use: {', '.join(valid_timeframes)}")
+            return
+
+        # Single symbol mode
+        if target and target.lower() != 'all':
+            symbol = normalize_symbol(target)
+            if '/' in symbol:
+                await ctx.send("Score analysis currently only available for stocks.")
+                return
+            await ctx.send(f"📊 Calculating score for **{symbol}** ({timeframe})...")
+            df = await fetch_ohlcv(symbol, timeframe)
+            if df is None or df.empty:
+                await ctx.send(f"Could not fetch data for {symbol}.")
+                return
+            df = calculate_indicators(df)
+            score, details = await calculate_quick_score(df, symbol, timeframe)
+            embed = discord.Embed(title=f"📊 Score: {symbol} ({timeframe.upper()})",
+                                  description=f"**Score: {score}/100** – {get_score_rating(score)}",
+                                  color=get_score_color(score), timestamp=datetime.now())
+            embed.add_field(name="📈 Breakdown", value=details, inline=False)
+            embed.set_footer(text="Use !confirm SYMBOL for detailed analysis")
+            await ctx.send(embed=embed)
+            return
+
+        # Scan watchlist
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks']
+        if not symbols:
+            await ctx.send("No stocks in watchlist to scan.")
+            return
+        await ctx.send(f"🔍 Scanning {len(symbols)} stocks on {timeframe}...")
+        results = []
+        for sym in symbols:
+            if await check_cancel(ctx):
+                break
+            try:
+                df = await fetch_ohlcv(sym, timeframe)
+                if df is None or len(df) < 30:
+                    continue
+                df = calculate_indicators(df)
+                score, _ = await calculate_quick_score(df, sym, timeframe)
+                current_price = df['close'].iloc[-1]
+                results.append({'symbol': sym, 'price': current_price, 'score': score, 'rating': get_score_rating(score)})
+            except Exception as e:
+                print(f"Error scoring {sym}: {e}")
+            await asyncio.sleep(0.3)
+        if not results:
+            await ctx.send("No stocks could be scored.")
+            return
+        results.sort(key=lambda x: x['score'], reverse=True)
+        embed = discord.Embed(title=f"📊 Quick Score Scan – {timeframe.upper()}",
+                              description=f"Found {len(results)} stocks | Higher score = better setup",
+                              color=0x3498db, timestamp=datetime.now())
+        score_text = ""
+        for r in results[:15]:
+            emoji = "🟢" if r['score'] >= 70 else "🟡" if r['score'] >= 50 else "🔴"
+            score_text += f"{emoji} **{r['symbol']}** ${r['price']:.2f} – {r['score']}/100 ({r['rating']})\n"
+        if score_text:
+            embed.add_field(name="📈 Results (highest score first)", value=score_text, inline=False)
+        embed.set_footer(text="Use !score SYMBOL for details | !confirm SYMBOL for full analysis")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+async def calculate_quick_score(df, symbol, timeframe):
+    if df is None or df.empty:
+        return 0, "No data"
+    current_price = df['close'].iloc[-1]
+    rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
+    adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df) >= 20 else 20
+    ema13 = df['ema13'].iloc[-1] if 'ema13' in df.columns else current_price
+    ema50 = df['ema50'].iloc[-1] if 'ema50' in df.columns else current_price
+    ema200 = df['ema200'].iloc[-1] if 'ema200' in df.columns else current_price
+    above_ema13, above_ema50, above_ema200 = current_price > ema13, current_price > ema50, current_price > ema200
+    avg_volume = df['volume'].tail(20).mean()
+    current_volume = df['volume'].iloc[-1]
+    volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+    structure = analyze_structure(df)
+    score = 0
+    details = []
+    # Market structure (0-30)
+    if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
+        score += 30
+        details.append(f"✅ CHoCH UP: +30 (bullish reversal)")
+    elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'up':
+        score += 25
+        details.append(f"✅ BOS UP: +25 (uptrend continuing)")
+    elif structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'down':
+        score -= 25
+        details.append(f"🔴 CHoCH DOWN: -25 (bearish reversal)")
+    elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'down':
+        score -= 20
+        details.append(f"🔴 BOS DOWN: -20 (downtrend continuing)")
+    else:
+        details.append(f"⚪ No clear structure signal: 0")
+    # ADX (0-20)
+    if adx > 25:
+        score += 20
+        details.append(f"✅ Strong trend (ADX: {adx:.1f}): +20")
+    elif adx > 20:
+        score += 12
+        details.append(f"🟡 Moderate trend (ADX: {adx:.1f}): +12")
+    elif adx > 15:
+        score += 5
+        details.append(f"🟡 Weak trend (ADX: {adx:.1f}): +5")
+    else:
+        score -= 5
+        details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
+    # RSI (0-15)
+    if 30 <= rsi <= 70:
+        score += 15
+        details.append(f"✅ RSI neutral ({rsi:.1f}): +15")
+    elif rsi < 30:
+        score += 10
+        details.append(f"🟢 RSI oversold ({rsi:.1f}): +10 (potential bounce)")
+    elif rsi > 70:
+        score -= 10
+        details.append(f"🔴 RSI overbought ({rsi:.1f}): -10 (pullback risk)")
+    # EMA alignment (0-15)
+    ema_score = 0
+    if above_ema13:
+        ema_score += 4
+    if above_ema50:
+        ema_score += 5
+    if above_ema200:
+        ema_score += 6
+    if ema13 > ema50 > ema200:
+        ema_score += 5
+        details.append(f"✅ Perfect bullish EMA alignment: +{ema_score}")
+    else:
+        details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
+    score += ema_score
+    # Volume (0-20)
+    if volume_ratio > 1.5:
+        score += 20
+        details.append(f"✅ High volume ({volume_ratio:.1f}x avg): +20")
+    elif volume_ratio > 1.2:
+        score += 12
+        details.append(f"🟡 Above avg volume ({volume_ratio:.1f}x avg): +12")
+    elif volume_ratio > 0.8:
+        score += 5
+        details.append(f"🟡 Normal volume ({volume_ratio:.1f}x avg): +5")
+    elif volume_ratio > 0.5:
+        score -= 5
+        details.append(f"🔴 Below avg volume ({volume_ratio:.1f}x avg): -5")
+    else:
+        score -= 10
+        details.append(f"🔴 Very low volume ({volume_ratio:.1f}x avg): -10")
+    score = max(0, min(100, score))
+    return score, "\n".join(details[:8])
+
+def get_score_rating(score):
+    if score >= 80:
+        return "STRONG BUY"
+    elif score >= 65:
+        return "BUY"
+    elif score >= 50:
+        return "NEUTRAL"
+    elif score >= 35:
+        return "WEAK / AVOID"
+    else:
+        return "STRONG AVOID"
+
+def get_score_color(score):
+    if score >= 65:
+        return 0x00ff00
+    elif score >= 50:
+        return 0xffff00
+    else:
+        return 0xff0000
+
+# ====================
 # CONFIRMATION COMMAND - COMBINES ALL SIGNALS
 # ====================
 @bot.command(name='confirm')
 async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
-    """
-    Comprehensive trade confirmation combining all bot signals.
-    Returns a score from 0-100 and actionable recommendation.
-    Usage: !confirm NVDA 4h
-    """
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2592,7 +2751,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
 
         await ctx.send(f"🔍 Running comprehensive trade confirmation for **{symbol}** ({timeframe})...")
 
-        # Fetch all data
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
             await ctx.send(f"Could not fetch data for {symbol}.")
@@ -2601,32 +2759,21 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         df = calculate_indicators(df)
         current_price = df['close'].iloc[-1]
         
-        # 1. Market Structure Analysis
         structure = analyze_structure(df)
-        
-        # 2. Trend Strength
         rsi = df['rsi'].iloc[-1]
         adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
-        
-        # 3. Volume Analysis
         avg_volume = df['volume'].tail(20).mean()
         current_volume = df['volume'].iloc[-1]
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-        
-        # 4. Price vs EMAs
-        ema13 = df['ema13'].iloc[-1]
-        ema50 = df['ema50'].iloc[-1]
-        ema200 = df['ema200'].iloc[-1]
-        above_ema13 = current_price > ema13
-        above_ema50 = current_price > ema50
-        above_ema200 = current_price > ema200
-        
-        # 5. Demand Zones (30min)
+        ema13, ema50, ema200 = df['ema13'].iloc[-1], df['ema50'].iloc[-1], df['ema200'].iloc[-1]
+        above_ema13, above_ema50, above_ema200 = current_price > ema13, current_price > ema50, current_price > ema200
+
+        # Demand zones
         df_30 = await fetch_ohlcv(symbol, '30min')
         zones = find_demand_zones(df_30) if df_30 is not None else []
         near_zone = any(abs((current_price - z['level']) / current_price) < 0.02 for z in zones)
-        
-        # 6. Options Flow (check for unusual activity)
+
+        # Options flow
         unusual_flow = False
         try:
             expirations = get_key_expirations(symbol)
@@ -2643,36 +2790,31 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
                             break
         except:
             pass
-        
-        # 7. Earnings Proximity
+
+        # Earnings proximity
         earnings = await fetch_earnings_upcoming(symbol, days=7)
         earnings_soon = len(earnings) > 0
-        
-        # 8. Market Regime (SPY trend)
+
+        # Market regime (SPY trend)
         spy_df = await fetch_ohlcv('SPY', 'daily')
         spy_trend = "bullish"
         if spy_df is not None and len(spy_df) > 20:
             spy_close = spy_df['close'].iloc[-1]
             spy_20_ago = spy_df['close'].iloc[-20]
             spy_trend = "bullish" if spy_close > spy_20_ago else "bearish"
-        
-        # 9. Historical Win Rate from tracked trades
+
+        # Historical win rate
         historical_win_rate = 0
-        similar_trades = await trades_collection.find({
-            'user_id': str(ctx.author.id),
-            'status': 'CLOSED',
-            'symbol': symbol
-        }).to_list(length=100)
+        similar_trades = await trades_collection.find({'user_id': str(ctx.author.id), 'status': 'CLOSED', 'symbol': symbol}).to_list(length=100)
         if similar_trades:
             wins = sum(1 for t in similar_trades if t.get('profit_pct', 0) > 0)
             historical_win_rate = wins / len(similar_trades) * 100
-        
-        # Calculate confirmation score (0-100)
+
+        # Calculate score
         score = 0
         reasons_bullish = []
         reasons_bearish = []
-        
-        # Structure signal (25 points max)
+
         if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
             score += 25
             reasons_bullish.append("✅ CHoCH UP detected – bullish reversal signal")
@@ -2685,10 +2827,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'down':
             score -= 20
             reasons_bearish.append("🔴 BOS DOWN – downtrend continuing")
-        else:
-            reasons_bullish.append("⚪ No clear BOS/CHoCH signal")
-        
-        # ADX (15 points)
+
         if adx > 25:
             score += 15
             reasons_bullish.append(f"✅ Strong trend (ADX: {adx:.1f})")
@@ -2698,8 +2837,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         else:
             score -= 5
             reasons_bearish.append(f"🔴 Weak trend (ADX: {adx:.1f}) – ranging market")
-        
-        # RSI (10 points)
+
         if 30 < rsi < 70:
             score += 10
             reasons_bullish.append(f"✅ RSI neutral ({rsi:.1f}) – room to run")
@@ -2709,15 +2847,11 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif rsi > 70:
             score -= 5
             reasons_bearish.append(f"🔴 RSI overbought ({rsi:.1f}) – potential pullback")
-        
-        # EMA alignment (10 points)
+
         ema_score = 0
-        if above_ema13:
-            ema_score += 3
-        if above_ema50:
-            ema_score += 3
-        if above_ema200:
-            ema_score += 4
+        if above_ema13: ema_score += 3
+        if above_ema50: ema_score += 3
+        if above_ema200: ema_score += 4
         if ema13 > ema50 > ema200:
             ema_score += 5
             reasons_bullish.append("✅ EMAs in perfect bullish alignment (13 > 50 > 200)")
@@ -2727,8 +2861,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         score += ema_score
         if ema_score > 0 and "EMA" not in str(reasons_bullish):
             reasons_bullish.append(f"✅ Price above {sum([above_ema13, above_ema50, above_ema200])}/3 major EMAs")
-        
-        # Volume (10 points)
+
         if volume_ratio > 1.5:
             score += 10
             reasons_bullish.append(f"✅ High volume ({volume_ratio:.1f}x avg) – strong participation")
@@ -2738,107 +2871,65 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif volume_ratio < 0.7:
             score -= 5
             reasons_bearish.append(f"🔴 Low volume ({volume_ratio:.1f}x avg) – weak conviction")
-        
-        # Demand zone (5 points)
+
         if near_zone:
             score += 5
             reasons_bullish.append("✅ Price near demand zone support")
-        
-        # Options flow (10 points)
+
         if unusual_flow:
             score += 10
             reasons_bullish.append("✅ Unusual call options activity detected – whale watching")
-        
-        # Earnings warning (penalty)
+
         if earnings_soon:
             score -= 15
             reasons_bearish.append("⚠️ Earnings in next 7 days – consider waiting or hedging")
-        
-        # Market regime (5 points)
+
         if spy_trend == "bullish":
             score += 5
             reasons_bullish.append("✅ SPY in uptrend (bullish market regime)")
         else:
             score -= 5
             reasons_bearish.append("🔴 SPY in downtrend (bearish market regime)")
-        
-        # Historical win rate bonus (up to 10 points)
+
         if historical_win_rate > 0:
             hist_bonus = min(10, int(historical_win_rate / 10))
             score += hist_bonus
             reasons_bullish.append(f"📊 Historical win rate on {symbol}: {historical_win_rate:.0f}% ({hist_bonus} pt bonus)")
-        
-        # Cap score between 0 and 100
+
         score = max(0, min(100, score))
-        
-        # Determine recommendation
+
         if score >= 80:
-            recommendation = "🟢 HIGH PROBABILITY BUY"
-            rec_color = 0x00ff00
-            rec_action = "BUY CALLS (or stock) with confidence"
-            stop_loss = current_price * 0.95
-            take_profit = current_price * 1.10
+            recommendation, rec_color, rec_action = "🟢 HIGH PROBABILITY BUY", 0x00ff00, "BUY CALLS (or stock) with confidence"
+            stop_loss, take_profit = current_price * 0.95, current_price * 1.10
         elif score >= 65:
-            recommendation = "🟡 MODERATE PROBABILITY BUY"
-            rec_color = 0xffff00
-            rec_action = "Consider BUY with reduced size"
-            stop_loss = current_price * 0.93
-            take_profit = current_price * 1.07
+            recommendation, rec_color, rec_action = "🟡 MODERATE PROBABILITY BUY", 0xffff00, "Consider BUY with reduced size"
+            stop_loss, take_profit = current_price * 0.93, current_price * 1.07
         elif score >= 50:
-            recommendation = "⚪ NEUTRAL – WAIT FOR CONFIRMATION"
-            rec_color = 0x888888
-            rec_action = "No clear edge. Wait for better setup."
-            stop_loss = None
-            take_profit = None
+            recommendation, rec_color, rec_action = "⚪ NEUTRAL – WAIT FOR CONFIRMATION", 0x888888, "No clear edge. Wait for better setup."
+            stop_loss, take_profit = None, None
         elif score >= 35:
-            recommendation = "🟠 MODERATE PROBABILITY SELL / PUTS"
-            rec_color = 0xff8800
-            rec_action = "Consider PUTS with reduced size"
-            stop_loss = current_price * 1.07
-            take_profit = current_price * 0.90
+            recommendation, rec_color, rec_action = "🟠 MODERATE PROBABILITY SELL / PUTS", 0xff8800, "Consider PUTS with reduced size"
+            stop_loss, take_profit = current_price * 1.07, current_price * 0.90
         else:
-            recommendation = "🔴 HIGH PROBABILITY SELL / AVOID"
-            rec_color = 0xff0000
-            rec_action = "AVOID or buy PUTS"
-            stop_loss = current_price * 1.10
-            take_profit = current_price * 0.85
-        
-        # Build embed
-        embed = discord.Embed(
-            title=f"📊 TRADE CONFIRMATION: {symbol} ({timeframe.upper()})",
-            description=f"Current Price: **${current_price:.2f}**\n\n**{recommendation}** (Score: {score}/100)",
-            color=rec_color,
-            timestamp=datetime.now()
-        )
-        
-        # Bullish signals
+            recommendation, rec_color, rec_action = "🔴 HIGH PROBABILITY SELL / AVOID", 0xff0000, "AVOID or buy PUTS"
+            stop_loss, take_profit = current_price * 1.10, current_price * 0.85
+
+        embed = discord.Embed(title=f"📊 TRADE CONFIRMATION: {symbol} ({timeframe.upper()})",
+                              description=f"Current Price: **${current_price:.2f}**\n\n**{recommendation}** (Score: {score}/100)",
+                              color=rec_color, timestamp=datetime.now())
         if reasons_bullish:
             embed.add_field(name="🟢 Bullish Signals", value="\n".join(reasons_bullish[:8]), inline=False)
-        
-        # Bearish signals
         if reasons_bearish:
             embed.add_field(name="🔴 Bearish Signals / Warnings", value="\n".join(reasons_bearish[:5]), inline=False)
-        
-        # Trade parameters
         if stop_loss and take_profit:
-            embed.add_field(name="🎯 Suggested Trade Parameters", 
-                           value=f"**Action:** {rec_action}\n**Stop Loss:** ${stop_loss:.2f} ({((stop_loss - current_price)/current_price*100):+.1f}%)\n**Take Profit:** ${take_profit:.2f} ({((take_profit - current_price)/current_price*100):+.1f}%)\n**Risk/Reward:** {abs((take_profit - current_price)/(stop_loss - current_price)):.2f}", 
-                           inline=False)
+            embed.add_field(name="🎯 Suggested Trade Parameters",
+                           value=f"**Action:** {rec_action}\n**Stop Loss:** ${stop_loss:.2f} ({((stop_loss - current_price)/current_price*100):+.1f}%)\n**Take Profit:** ${take_profit:.2f} ({((take_profit - current_price)/current_price*100):+.1f}%)\n**Risk/Reward:** {abs((take_profit - current_price)/(stop_loss - current_price)):.2f}", inline=False)
         else:
             embed.add_field(name="🎯 Suggested Action", value=rec_action, inline=False)
-        
-        # Signal summary
         embed.add_field(name="📈 Signal Summary",
-                       value=f"• Structure: {structure['last_event'] or 'None'} {structure['last_event_direction'] or ''}\n"
-                             f"• ADX: {adx:.1f} | RSI: {rsi:.1f}\n"
-                             f"• Volume: {volume_ratio:.1f}x avg\n"
-                             f"• EMAs: {'Bullish' if above_ema13 and above_ema50 else 'Mixed/Bearish'}\n"
-                             f"• Market: SPY {spy_trend.upper()}",
-                       inline=False)
-        
+                       value=f"• Structure: {structure['last_event'] or 'None'} {structure['last_event_direction'] or ''}\n• ADX: {adx:.1f} | RSI: {rsi:.1f}\n• Volume: {volume_ratio:.1f}x avg\n• EMAs: {'Bullish' if above_ema13 and above_ema50 else 'Mixed/Bearish'}\n• Market: SPY {spy_trend.upper()}", inline=False)
         embed.set_footer(text="Use !structure, !strength, !zone for deeper analysis | Not financial advice")
         await ctx.send(embed=embed)
-        
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
@@ -2929,13 +3020,15 @@ async def help_command(ctx):
                 "`!scan SYMBOL [timeframe]` – Scan a single symbol\n"
                 "`!signals` – Scan ENTIRE watchlist across ALL 7 timeframes\n"
                 "`!signal SYMBOL` – Multi‑timeframe report for a single symbol\n\n"
-                "**CONFIRMATION (NEW!)**\n"
-                "`!confirm SYMBOL [timeframe]` – Comprehensive trade confirmation score (0-100)\n"
-                "  Combines structure, trend strength, volume, options flow, earnings, and market regime\n\n"
+                "**QUICK SCORE (NEW!)**\n"
+                "`!score` – Scan watchlist for high-probability setups (fast)\n"
+                "`!score NVDA` – Get quick score for a single symbol\n\n"
+                "**CONFIRMATION**\n"
+                "`!confirm SYMBOL [timeframe]` – Comprehensive trade confirmation score (0-100)\n\n"
                 "**NEWS & EVENTS**\n"
                 "`!news TICKER` – Company news with analyst ratings\n"
                 "`!worldnews` – Global headlines with AI sentiment analysis\n"
-                "`!upcoming [TICKER]` – Earnings, dividends, splits, expected move\n\n"
+                "`!upcoming TICKER` – Earnings, dividends, splits, expected move\n\n"
                 "**ZONES & STRUCTURE**\n"
                 "`!zone SYMBOL [timeframe]` – Demand zones with ITM option suggestions\n"
                 "`!structure SYMBOL [timeframe]` – BOS/CHoCH analysis with chart\n"
@@ -2969,14 +3062,14 @@ async def help_command(ctx):
                 "`!stopscan` / `!cancel` – Stop ongoing scan\n"
                 "`!help` – This message\n\n"
                 "**TIMEFRAMES:** 5min, 15min, 30min, 1h, 4h, daily, weekly\n\n"
-                "💡 **Pro tip:** Use `!confirm` before any trade for a complete signal analysis!"
+                "💡 **Pro tip:** Use `!score` first to find candidates, then `!confirm` for final decision!"
             ),
             color=0x3498db
         )
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
@@ -3131,7 +3224,7 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
         await ctx.send(embed=embed)
 
 # ====================
-# TRUMP / TACO FUNCTIONS
+# TRUMP / TACO FUNCTIONS - FIXED
 # ====================
 async def fetch_latest_trump_post():
     feeds = ["https://trumpstruth.org/feed", "https://truthsocial.rss.simple-web.org/feed.xml"]
@@ -3160,16 +3253,26 @@ def analyze_trump_post(post_text):
     text_lower = post_text.lower()
     threat_keywords = ['tariff', 'sanction', 'war', 'military', 'bomb', 'strike', 'deadline', 'penalty', 'tax', 'duty', 'ban', 'restrict', 'withdraw']
     backtrack_keywords = ['exemption', 'delay', 'postpone', 'review', 'negotiate', 'deal', 'agreement', 'temporary', 'exception', 'reconsider']
-    has_threat, has_backtrack = any(kw in text_lower for kw in threat_keywords), any(kw in text_lower for kw in backtrack_keywords)
+    has_threat = any(kw in text_lower for kw in threat_keywords)
+    has_backtrack = any(kw in text_lower for kw in backtrack_keywords)
     if has_threat and not has_backtrack:
-        sentiment, taco_prob, advice = "🔴 Bearish", "High (expected market dip & reversal)", "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
+        sentiment = "🔴 Bearish"
+        taco_prob = "High (expected market dip & reversal)"
+        advice = "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
     elif has_threat and has_backtrack:
-        sentiment, taco_prob, advice = "🟡 Mixed (threat with caveats)", "Medium – possible backtrack", "Monitor for clarification. Could swing either way."
+        sentiment = "🟡 Mixed (threat with caveats)"
+        taco_prob = "Medium – possible backtrack"
+        advice = "Monitor for clarification. Could swing either way."
     elif any(word in text_lower for word in ['good', 'great', 'deal', 'agreement']):
-        sentiment, taco_prob, advice = "🟢 Bullish", "Low – positive news", "Potential rally. Check related sectors."
+        sentiment = "🟢 Bullish"
+        taco_prob = "Low – positive news"
+        advice = "Potential rally. Check related sectors."
     else:
-        sentiment, taco_prob, advice = "⚪ Neutral", "Low – no clear threat or positive", "No immediate TACO signal."
-    sectors, stocks = [], []
+        sentiment = "⚪ Neutral"
+        taco_prob = "Low – no clear threat or positive"
+        advice = "No immediate TACO signal."
+    sectors = []
+    stocks = []
     if 'tariff' in text_lower or 'trade' in text_lower:
         sectors.extend(['Industrials', 'Consumer Goods'])
         stocks.extend(['CAT', 'DE', 'F', 'GM', 'WMT', 'TGT'])
@@ -3185,8 +3288,12 @@ def analyze_trump_post(post_text):
     if 'iran' in text_lower or 'middle east' in text_lower:
         sectors.append('Geopolitical risk')
         stocks.extend(['XOM', 'CVX', 'LMT', 'NOC'])
-    return {'sentiment': sentiment, 'taco_probability': taco_prob, 'affected_sectors': ', '.join(list(dict.fromkeys(sectors))) if sectors else 'General market',
-            'suggested_stocks': ', '.join([f"${s}" for s in list(dict.fromkeys(stocks))[:5]]) if stocks else '$SPY, $QQQ', 'advice': advice}
+    sectors = list(dict.fromkeys(sectors))
+    stocks = list(dict.fromkeys(stocks))[:5]
+    return {'sentiment': sentiment, 'taco_probability': taco_prob,
+            'affected_sectors': ', '.join(sectors) if sectors else 'General market',
+            'suggested_stocks': ', '.join([f"${s}" for s in stocks]) if stocks else '$SPY, $QQQ',
+            'advice': advice}
 
 # ====================
 # MAIN ENTRY POINT
