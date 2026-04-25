@@ -1978,7 +1978,8 @@ async def get_earnings_stats(symbol, earnings_date):
         return "N/A", "N/A"
 
 @bot.command(name='upcoming')
-async def upcoming_events(ctx, ticker: str = None):
+async def upcoming_events(ctx, ticker: str):
+    """Show ALL upcoming events for a stock: earnings, dividends, splits, and analyst ratings."""
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -1988,108 +1989,156 @@ async def upcoming_events(ctx, ticker: str = None):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-        if ticker is None:
-            watchlist = await load_watchlist()
-            stocks = watchlist['stocks']
-            if not stocks:
-                await ctx.send("No stocks in your watchlist to scan for events.")
-                return
-            await ctx.send(f"🔍 Scanning all stocks ({len(stocks)}) for upcoming events...")
-            econ_events = await fetch_economic_events(days=14)
-            if econ_events:
-                econ_embed = discord.Embed(title="📆 Upcoming Macroeconomic Events (next 14 days)", color=0x3498db)
-                for ev in econ_events:
-                    date, event, country = ev.get('date', 'N/A'), ev.get('event', 'N/A'), ev.get('country', '')
-                    importance = ev.get('importance', '')
-                    star = "★" if importance == "high" else "☆" if importance == "medium" else "·" if importance else ""
-                    econ_embed.add_field(name=f"{date} {country}", value=f"{event} {star}", inline=False)
-                await ctx.send(embed=econ_embed)
-            found_any = False
-            for sym in stocks:
-                if cancellation_flags.get(ctx.author.id, False):
-                    cancellation_flags[ctx.author.id] = False
-                    await ctx.send("🛑 Scan cancelled.")
-                    break
-                try:
-                    earnings, dividends, splits, ratings = await asyncio.wait_for(
-                        asyncio.gather(fetch_earnings_upcoming(sym), fetch_dividends_upcoming(sym),
-                                       fetch_splits_upcoming(sym), fetch_analyst_ratings(sym, limit=3),
-                                       return_exceptions=True), timeout=15.0)
-                except asyncio.TimeoutError:
-                    print(f"Timeout fetching data for {sym}, skipping.")
-                    continue
-                if isinstance(earnings, Exception): earnings = []
-                if isinstance(dividends, Exception): dividends = []
-                if isinstance(splits, Exception): splits = []
-                if isinstance(ratings, Exception): ratings = []
-                if earnings or dividends or splits or ratings:
-                    found_any = True
-                    web_url = get_tradingview_web_link(sym)
-                    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-                    embed = discord.Embed(title=f"📅 Upcoming Catalysts for {sym}", color=0x00ff00)
-                    if earnings:
-                        lines = []
-                        for e in earnings:
-                            date, eps_est, time_str = e.get('date', 'N/A'), e.get('epsEstimate', 'N/A'), e.get('hour', '')
-                            exp_move, hist_avg = await get_earnings_stats(sym, date)
-                            lines.append(f"**{date}** {time_str} – EPS Est: {eps_est}\n   • Expected Move: {exp_move}\n   • Historical Avg: {hist_avg}")
-                        embed.add_field(name="📊 Earnings", value="\n".join(lines), inline=False)
-                    if dividends:
-                        lines = [f"**{d.get('exDate', 'N/A')}** – Amount: ${d.get('amount', 'N/A')}" for d in dividends]
-                        embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
-                    if splits:
-                        lines = [f"**{s.get('date', 'N/A')}** – {s.get('splitRatio', '')}" for s in splits]
-                        embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
-                    if ratings:
-                        lines = []
-                        for r in ratings:
-                            period, sb, b, h, s, ss = r.get('period', ''), r.get('strongBuy', 0), r.get('buy', 0), r.get('hold', 0), r.get('sell', 0), r.get('strongSell', 0)
-                            total, buys, sells = sb + b + h + s + ss, sb + b, s + ss
-                            sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
-                            lines.append(f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}" if total > 0 else f"**{period}** – No data")
-                        embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
-                    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-                    await ctx.send(embed=embed)
-                await asyncio.sleep(2)
-            if not found_any:
-                await ctx.send("No upcoming events found for any stock in your watchlist.")
-            else:
-                await ctx.send("✅ Upcoming events scan complete.")
-        else:
-            await ctx.send(f"🔍 Fetching upcoming events for **{ticker.upper()}**...")
-            earnings = await fetch_earnings_upcoming(ticker.upper())
-            dividends = await fetch_dividends_upcoming(ticker.upper())
-            splits = await fetch_splits_upcoming(ticker.upper())
-            ratings = await fetch_analyst_ratings(ticker.upper(), limit=3)
-            if not (earnings or dividends or splits or ratings):
-                await ctx.send(f"No upcoming events found for {ticker.upper()} in the next 14 days.")
-                return
-            web_url = get_tradingview_web_link(ticker.upper())
-            tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-            embed = discord.Embed(title=f"📅 Upcoming Catalysts for {ticker.upper()}", color=0x00ff00)
-            if earnings:
-                lines = []
-                for e in earnings:
-                    date, eps_est, time_str = e.get('date', 'N/A'), e.get('epsEstimate', 'N/A'), e.get('hour', '')
-                    exp_move, hist_avg = await get_earnings_stats(ticker.upper(), date)
-                    lines.append(f"**{date}** {time_str} – EPS Est: {eps_est}\n   • Expected Move: {exp_move}\n   • Historical Avg: {hist_avg}")
-                embed.add_field(name="📊 Earnings", value="\n".join(lines), inline=False)
-            if dividends:
-                lines = [f"**{d.get('exDate', 'N/A')}** – Amount: ${d.get('amount', 'N/A')}" for d in dividends]
-                embed.add_field(name="💰 Dividends", value="\n".join(lines), inline=False)
-            if splits:
-                lines = [f"**{s.get('date', 'N/A')}** – {s.get('splitRatio', '')}" for s in splits]
-                embed.add_field(name="🔄 Stock Splits", value="\n".join(lines), inline=False)
-            if ratings:
-                lines = []
-                for r in ratings:
-                    period, sb, b, h, s, ss = r.get('period', ''), r.get('strongBuy', 0), r.get('buy', 0), r.get('hold', 0), r.get('sell', 0), r.get('strongSell', 0)
-                    total, buys, sells = sb + b + h + s + ss, sb + b, s + ss
-                    sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
-                    lines.append(f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}" if total > 0 else f"**{period}** – No data")
-                embed.add_field(name="📈 Analyst Ratings (last 3)", value="\n".join(lines), inline=False)
-            embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-            await ctx.send(embed=embed)
+
+        symbol = ticker.upper()
+        await ctx.send(f"🔍 Fetching upcoming events for **{symbol}**...")
+
+        # Fetch all data in parallel
+        stock = yf.Ticker(symbol)
+        
+        # 1. Get earnings dates (all upcoming)
+        earnings_list = []
+        try:
+            earnings_dates = stock.earnings_dates
+            if earnings_dates is not None and not earnings_dates.empty:
+                today = datetime.now().date()
+                for date, row in earnings_dates.iterrows():
+                    e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if e_date >= today:  # Only future dates
+                        eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                        eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
+                        # Calculate expected move if options available
+                        exp_move = "N/A"
+                        try:
+                            expirations = stock.options
+                            if expirations:
+                                # Find closest expiration after earnings
+                                target_exp = None
+                                for exp in expirations:
+                                    exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
+                                    if exp_dt >= e_date:
+                                        target_exp = exp
+                                        break
+                                if target_exp:
+                                    opt_chain = stock.option_chain(target_exp)
+                                    calls, puts = opt_chain.calls, opt_chain.puts
+                                    current_price = stock.history(period="1d")['Close'].iloc[-1]
+                                    if not calls.empty and not puts.empty:
+                                        calls['diff'] = abs(calls['strike'] - current_price)
+                                        puts['diff'] = abs(puts['strike'] - current_price)
+                                        atm_call = calls.loc[calls['diff'].idxmin()]
+                                        atm_put = puts.loc[puts['diff'].idxmin()]
+                                        call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
+                                        put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
+                                        straddle = call_price + put_price
+                                        exp_move = f"{(straddle / current_price * 100):.1f}%"
+                        except:
+                            pass
+                        earnings_list.append({
+                            'date': e_date.strftime('%Y-%m-%d'),
+                            'eps_est': eps_est,
+                            'expected_move': exp_move
+                        })
+        except Exception as e:
+            print(f"Error fetching earnings: {e}")
+
+        # 2. Get dividends (upcoming)
+        dividends_list = []
+        try:
+            dividends = stock.dividends
+            if not dividends.empty:
+                today = datetime.now().date()
+                for date, amount in dividends.items():
+                    d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if d_date >= today:
+                        dividends_list.append({
+                            'date': d_date.strftime('%Y-%m-%d'),
+                            'amount': f"${amount:.2f}"
+                        })
+        except Exception as e:
+            print(f"Error fetching dividends: {e}")
+
+        # 3. Get splits (upcoming)
+        splits_list = []
+        try:
+            splits = stock.splits
+            if not splits.empty:
+                today = datetime.now().date()
+                for date, ratio in splits.items():
+                    s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if s_date >= today:
+                        ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
+                        splits_list.append({
+                            'date': s_date.strftime('%Y-%m-%d'),
+                            'ratio': ratio_str
+                        })
+        except Exception as e:
+            print(f"Error fetching splits: {e}")
+
+        # 4. Get analyst ratings
+        ratings = await fetch_analyst_ratings(symbol, limit=3)
+
+        # Check if we found anything
+        if not earnings_list and not dividends_list and not splits_list and not ratings:
+            await ctx.send(f"📭 No upcoming events found for {symbol}.")
+            return
+
+        embed = discord.Embed(
+            title=f"📅 Upcoming Catalysts for {symbol}",
+            color=0x00ff00,
+            timestamp=datetime.now()
+        )
+
+        # Earnings section
+        if earnings_list:
+            earnings_text = ""
+            for e in earnings_list[:3]:  # Show next 3 earnings
+                earnings_text += f"**{e['date']}** – EPS Est: {e['eps_est']} | Expected Move: {e['expected_move']}\n"
+            embed.add_field(name="📊 Earnings (Upcoming)", value=earnings_text, inline=False)
+
+        # Dividends section
+        if dividends_list:
+            div_text = ""
+            for d in dividends_list[:2]:
+                div_text += f"**{d['date']}** – Amount: {d['amount']}\n"
+            embed.add_field(name="💰 Dividends", value=div_text, inline=False)
+
+        # Splits section
+        if splits_list:
+            split_text = ""
+            for s in splits_list[:2]:
+                split_text += f"**{s['date']}** – Ratio: {s['ratio']}\n"
+            embed.add_field(name="🔄 Stock Splits", value=split_text, inline=False)
+
+        # Analyst Ratings
+        if ratings:
+            ratings_text = ""
+            for r in ratings[:3]:
+                period = r.get('period', '')
+                sb = r.get('strongBuy', 0)
+                b = r.get('buy', 0)
+                h = r.get('hold', 0)
+                s = r.get('sell', 0)
+                ss = r.get('strongSell', 0)
+                total = sb + b + h + s + ss
+                buys = sb + b
+                sells = s + ss
+                sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
+                if total > 0:
+                    ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
+                else:
+                    ratings_text += f"**{period}** – No data\n"
+            if ratings_text:
+                embed.add_field(name="📈 Analyst Ratings (Last 3 Months)", value=ratings_text, inline=False)
+
+        web_url = get_tradingview_web_link(symbol)
+        embed.add_field(name="📊 TradingView", value=f"[Click here for charts]({web_url})", inline=False)
+        embed.set_footer(text="Expected move = implied volatility from options")
+
+        await ctx.send(embed=embed)
+
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
