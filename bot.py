@@ -2542,8 +2542,19 @@ async def performance(ctx, symbol: str = None, days: int = 30):
 # ====================
 # QUICK SCORE COMMAND - LIGHTWEIGHT SCANNER
 # ====================
+# ====================
+# QUICK SCORE COMMAND - WITH TREND ALIGNMENT
+# ====================
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
+    """
+    Quick score (0-100) for a single symbol or entire watchlist.
+    Shows trend alignment across 4h and daily timeframes.
+    Usage: !score                 - scan watchlist (default 4h)
+           !score all 4h          - scan watchlist on 4h
+           !score NVDA            - single symbol on 4h
+           !score NVDA daily      - single symbol on daily
+    """
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2571,10 +2582,22 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
                 await ctx.send(f"Could not fetch data for {symbol}.")
                 return
             df = calculate_indicators(df)
-            score, details = await calculate_quick_score(df, symbol, timeframe)
-            embed = discord.Embed(title=f"📊 Score: {symbol} ({timeframe.upper()})",
-                                  description=f"**Score: {score}/100** – {get_score_rating(score)}",
-                                  color=get_score_color(score), timestamp=datetime.now())
+            score, details, trend_4h, trend_daily = await calculate_quick_score_with_trends(df, symbol, timeframe)
+            
+            # Build trend alignment display
+            trend_emoji_4h = "🟢" if trend_4h == "uptrend" else "🔴" if trend_4h == "downtrend" else "🟡"
+            trend_emoji_daily = "🟢" if trend_daily == "uptrend" else "🔴" if trend_daily == "downtrend" else "🟡"
+            
+            embed = discord.Embed(
+                title=f"📊 Score: {symbol} ({timeframe.upper()})",
+                description=f"**Score: {score}/100** – {get_score_rating(score)}\n\n"
+                           f"📈 Trend Alignment:\n"
+                           f"  • {trend_emoji_4h} 4h: {trend_4h.upper()}\n"
+                           f"  • {trend_emoji_daily} Daily: {trend_daily.upper()}\n"
+                           f"  • {'✅ ALIGNED' if trend_4h == trend_daily else '⚠️ CONFLICT (wait for alignment)'}",
+                color=get_score_color(score),
+                timestamp=datetime.now()
+            )
             embed.add_field(name="📈 Breakdown", value=details, inline=False)
             embed.set_footer(text="Use !confirm SYMBOL for detailed analysis")
             await ctx.send(embed=embed)
@@ -2596,35 +2619,65 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
                 if df is None or len(df) < 30:
                     continue
                 df = calculate_indicators(df)
-                score, _ = await calculate_quick_score(df, sym, timeframe)
+                score, _, trend_4h, trend_daily = await calculate_quick_score_with_trends(df, sym, timeframe)
                 current_price = df['close'].iloc[-1]
-                results.append({'symbol': sym, 'price': current_price, 'score': score, 'rating': get_score_rating(score)})
+                
+                # Determine alignment status
+                aligned = trend_4h == trend_daily
+                alignment_emoji = "✅" if aligned else "⚠️"
+                
+                results.append({
+                    'symbol': sym,
+                    'price': current_price,
+                    'score': score,
+                    'rating': get_score_rating(score),
+                    'trend_4h': trend_4h,
+                    'trend_daily': trend_daily,
+                    'aligned': aligned
+                })
             except Exception as e:
                 print(f"Error scoring {sym}: {e}")
             await asyncio.sleep(0.3)
+        
         if not results:
             await ctx.send("No stocks could be scored.")
             return
+        
+        # Sort by score (highest first)
         results.sort(key=lambda x: x['score'], reverse=True)
-        embed = discord.Embed(title=f"📊 Quick Score Scan – {timeframe.upper()}",
-                              description=f"Found {len(results)} stocks | Higher score = better setup",
-                              color=0x3498db, timestamp=datetime.now())
+
+        # Build embed
+        embed = discord.Embed(
+            title=f"📊 Quick Score Scan – {timeframe.upper()}",
+            description=f"Found {len(results)} stocks | Higher score = better setup\n✅ = 4h & Daily aligned | ⚠️ = Conflict (avoid)",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+
         score_text = ""
         for r in results[:15]:
             emoji = "🟢" if r['score'] >= 70 else "🟡" if r['score'] >= 50 else "🔴"
-            score_text += f"{emoji} **{r['symbol']}** ${r['price']:.2f} – {r['score']}/100 ({r['rating']})\n"
+            trend_4h_emoji = "🔼" if r['trend_4h'] == "uptrend" else "🔽" if r['trend_4h'] == "downtrend" else "➡️"
+            trend_daily_emoji = "🔼" if r['trend_daily'] == "uptrend" else "🔽" if r['trend_daily'] == "downtrend" else "➡️"
+            alignment = "✅" if r['aligned'] else "⚠️"
+            score_text += f"{emoji} **{r['symbol']}** ${r['price']:.2f} – {r['score']}/100 ({r['rating']}) | {alignment} | 4h:{trend_4h_emoji} Daily:{trend_daily_emoji}\n"
+        
         if score_text:
             embed.add_field(name="📈 Results (highest score first)", value=score_text, inline=False)
-        embed.set_footer(text="Use !score SYMBOL for details | !confirm SYMBOL for full analysis")
+        
+        embed.set_footer(text="⚠️ = 4h & Daily conflict – wait for alignment | Use !score SYMBOL for details | !confirm SYMBOL for full analysis")
         await ctx.send(embed=embed)
+
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
-async def calculate_quick_score(df, symbol, timeframe):
+async def calculate_quick_score_with_trends(df, symbol, timeframe):
+    """Calculate quick score and also fetch trend for 4h and daily timeframes."""
     if df is None or df.empty:
-        return 0, "No data"
+        return 0, "No data", "sideways", "sideways"
+    
     current_price = df['close'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df) >= 20 else 20
@@ -2636,8 +2689,50 @@ async def calculate_quick_score(df, symbol, timeframe):
     current_volume = df['volume'].iloc[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
     structure = analyze_structure(df)
+    
+    # Get trend for current timeframe
+    if timeframe == '4h' or timeframe == 'daily' or timeframe == 'weekly':
+        current_trend = structure['trend']
+    else:
+        # For other timeframes, calculate simple trend
+        price_20_ago = df['close'].iloc[-20] if len(df) >= 20 else df['close'].iloc[0]
+        pct_change = (current_price - price_20_ago) / price_20_ago * 100
+        current_trend = "uptrend" if pct_change > 2 else "downtrend" if pct_change < -2 else "sideways"
+    
+    # Get 4h and daily trends for alignment check
+    trend_4h = "sideways"
+    trend_daily = "sideways"
+    
+    try:
+        # Fetch 4h data for trend
+        df_4h = await fetch_ohlcv(symbol, '4h')
+        if df_4h is not None and len(df_4h) >= 30:
+            df_4h = calculate_indicators(df_4h)
+            struct_4h = analyze_structure(df_4h)
+            trend_4h = struct_4h['trend']
+            if trend_4h == "insufficient data":
+                # Fallback to price comparison
+                price_20_ago_4h = df_4h['close'].iloc[-20] if len(df_4h) >= 20 else df_4h['close'].iloc[0]
+                pct_4h = (df_4h['close'].iloc[-1] - price_20_ago_4h) / price_20_ago_4h * 100
+                trend_4h = "uptrend" if pct_4h > 2 else "downtrend" if pct_4h < -2 else "sideways"
+        
+        # Fetch daily data for trend
+        df_daily = await fetch_ohlcv(symbol, 'daily')
+        if df_daily is not None and len(df_daily) >= 30:
+            df_daily = calculate_indicators(df_daily)
+            struct_daily = analyze_structure(df_daily)
+            trend_daily = struct_daily['trend']
+            if trend_daily == "insufficient data":
+                price_20_ago_daily = df_daily['close'].iloc[-20] if len(df_daily) >= 20 else df_daily['close'].iloc[0]
+                pct_daily = (df_daily['close'].iloc[-1] - price_20_ago_daily) / price_20_ago_daily * 100
+                trend_daily = "uptrend" if pct_daily > 2 else "downtrend" if pct_daily < -2 else "sideways"
+    except Exception as e:
+        print(f"Error fetching trends for {symbol}: {e}")
+    
+    # Calculate score (same as before)
     score = 0
     details = []
+    
     # Market structure (0-30)
     if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
         score += 30
@@ -2653,6 +2748,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         details.append(f"🔴 BOS DOWN: -20 (downtrend continuing)")
     else:
         details.append(f"⚪ No clear structure signal: 0")
+    
     # ADX (0-20)
     if adx > 25:
         score += 20
@@ -2666,6 +2762,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 5
         details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
+    
     # RSI (0-15)
     if 30 <= rsi <= 70:
         score += 15
@@ -2676,6 +2773,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     elif rsi > 70:
         score -= 10
         details.append(f"🔴 RSI overbought ({rsi:.1f}): -10 (pullback risk)")
+    
     # EMA alignment (0-15)
     ema_score = 0
     if above_ema13:
@@ -2690,6 +2788,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
     score += ema_score
+    
     # Volume (0-20)
     if volume_ratio > 1.5:
         score += 20
@@ -2706,28 +2805,14 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 10
         details.append(f"🔴 Very low volume ({volume_ratio:.1f}x avg): -10")
+    
+    # Penalty if 4h and daily conflict
+    if trend_4h != trend_daily and trend_4h != "sideways" and trend_daily != "sideways":
+        score -= 15
+        details.append(f"⚠️ Trend conflict (4h:{trend_4h} vs Daily:{trend_daily}): -15")
+    
     score = max(0, min(100, score))
-    return score, "\n".join(details[:8])
-
-def get_score_rating(score):
-    if score >= 80:
-        return "STRONG BUY"
-    elif score >= 65:
-        return "BUY"
-    elif score >= 50:
-        return "NEUTRAL"
-    elif score >= 35:
-        return "WEAK / AVOID"
-    else:
-        return "STRONG AVOID"
-
-def get_score_color(score):
-    if score >= 65:
-        return 0x00ff00
-    elif score >= 50:
-        return 0xffff00
-    else:
-        return 0xff0000
+    return score, "\n".join(details[:8]), trend_4h, trend_daily
 
 # ====================
 # CONFIRMATION COMMAND - COMBINES ALL SIGNALS
