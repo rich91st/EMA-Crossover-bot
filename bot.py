@@ -1777,96 +1777,6 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# LEAPS COMMAND
-# ====================
-@bot.command(name='leaps')
-async def leaps_candidates(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-        watchlist = await load_watchlist()
-        symbols = watchlist['stocks']
-        if not symbols:
-            await ctx.send("No stocks in watchlist to scan.")
-            return
-        await ctx.send(f"🔍 **SCANNING {len(symbols)} SYMBOLS FOR LEAPS CANDIDATES**")
-        await ctx.send("Looking for stocks with recent Change of Character (CHoCH) on the weekly chart...\n")
-        candidates = []
-        for symbol in symbols:
-            if await check_cancel(ctx):
-                break
-            try:
-                df = await fetch_ohlcv(symbol, 'weekly')
-                if df is None or len(df) < 30:
-                    continue
-                structure = analyze_structure(df)
-                if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up' and structure['trend'] == 'downtrend':
-                    fin_data = await fetch_analyst_ratings(symbol, limit=1)
-                    rating_info = ""
-                    if fin_data and len(fin_data) > 0:
-                        r = fin_data[0]
-                        total = r.get('strongBuy',0) + r.get('buy',0) + r.get('hold',0) + r.get('sell',0) + r.get('strongSell',0)
-                        if total > 0:
-                            buys = r.get('strongBuy',0) + r.get('buy',0)
-                            rating_info = f"Analyst consensus: {buys} Buy / {r.get('hold',0)} Hold / {r.get('sell',0)+r.get('strongSell',0)} Sell"
-                    candidates.append((symbol, structure, rating_info))
-            except Exception as e:
-                print(f"Error scanning {symbol}: {e}")
-                continue
-        if not candidates:
-            await ctx.send("No LEAPS candidates found with a clear Change of Character.")
-            return
-        embed = discord.Embed(title="📈 LEAPS CANDIDATES", description="Stocks showing Change of Character (CHoCH) on the weekly chart – potential long-term reversal setups.", color=0x00ff00)
-        for symbol, structure, rating_info in candidates[:8]:
-            price = await get_stock_price(symbol)
-            if price is None:
-                continue
-            try:
-                stock = yf.Ticker(symbol)
-                expirations = stock.options
-                if expirations:
-                    exp_dates = [datetime.strptime(e, '%Y-%m-%d').date() for e in expirations]
-                    today = datetime.now().date()
-                    leaps_exp = None
-                    for exp_date, exp_str in sorted(zip(exp_dates, expirations), key=lambda x: x[0]):
-                        dte = (exp_date - today).days
-                        if dte >= 365:
-                            leaps_exp = exp_str
-                            break
-                    if leaps_exp:
-                        opt_chain = stock.option_chain(leaps_exp)
-                        calls = opt_chain.calls
-                        if not calls.empty:
-                            calls['diff'] = abs(calls['strike'] - price)
-                            best_call = calls.loc[calls['diff'].idxmin()]
-                            strike = best_call['strike']
-                            last = best_call.get('lastPrice', 'N/A')
-                            bid, ask = best_call.get('bid', 'N/A'), best_call.get('ask', 'N/A')
-                            premium = (bid + ask) / 2 if bid > 0 and ask > 0 else last
-                            option_text = f"**{strike:.2f} Call**\nExp: {leaps_exp}\nPremium: ${premium:.2f} (if available)"
-                        else:
-                            option_text = "No calls available for this expiration."
-                    else:
-                        option_text = "No LEAPS expiration found (1+ year)."
-                else:
-                    option_text = "No options available."
-            except Exception as e:
-                option_text = f"Error fetching options: {str(e)}"
-            embed.add_field(name=f"{symbol} – ${price:.2f}", value=f"{structure['description']}\n{rating_info}\n\n💡 Suggested LEAPS: {option_text}", inline=False)
-        embed.set_footer(text="LEAPS are long-term options (1-3 years). Use after a confirmed CHoCH to catch major reversals.")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error scanning LEAPS: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-# ====================
 # FINVIZ SCANNER
 # ====================
 @bot.command(name='finviz_scan')
@@ -2540,7 +2450,7 @@ async def performance(ctx, symbol: str = None, days: int = 30):
         user_busy[ctx.author.id] = False
 
 # ====================
-# QUICK SCORE COMMAND - LIGHTWEIGHT SCANNER
+# QUICK SCORE COMMAND - UPDATED WITH FULL SCORING SYSTEM
 # ====================
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
@@ -2623,28 +2533,36 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
         user_busy[ctx.author.id] = False
 
 async def calculate_quick_score(df, symbol, timeframe):
+    """Quick score based on market structure, ADX, RSI, EMA, and volume"""
     if df is None or df.empty:
         return 0, "No data"
+    
     current_price = df['close'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df) >= 20 else 20
     ema13 = df['ema13'].iloc[-1] if 'ema13' in df.columns else current_price
     ema50 = df['ema50'].iloc[-1] if 'ema50' in df.columns else current_price
     ema200 = df['ema200'].iloc[-1] if 'ema200' in df.columns else current_price
-    above_ema13, above_ema50, above_ema200 = current_price > ema13, current_price > ema50, current_price > ema200
+    above_ema13 = current_price > ema13
+    above_ema50 = current_price > ema50
+    above_ema200 = current_price > ema200
     avg_volume = df['volume'].tail(20).mean()
     current_volume = df['volume'].iloc[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
+    
+    # Market structure analysis
     structure = analyze_structure(df)
+    
     score = 0
     details = []
-    # Market structure (0-30)
+    
+    # 1. Market structure (0-25 points)
     if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
-        score += 30
-        details.append(f"✅ CHoCH UP: +30 (bullish reversal)")
-    elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'up':
         score += 25
-        details.append(f"✅ BOS UP: +25 (uptrend continuing)")
+        details.append(f"✅ CHoCH UP: +25 (bullish reversal)")
+    elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'up':
+        score += 20
+        details.append(f"✅ BOS UP: +20 (uptrend continuing)")
     elif structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'down':
         score -= 25
         details.append(f"🔴 CHoCH DOWN: -25 (bearish reversal)")
@@ -2653,61 +2571,64 @@ async def calculate_quick_score(df, symbol, timeframe):
         details.append(f"🔴 BOS DOWN: -20 (downtrend continuing)")
     else:
         details.append(f"⚪ No clear structure signal: 0")
-    # ADX (0-20)
+    
+    # 2. ADX trend strength (0-15 points)
     if adx > 25:
-        score += 20
-        details.append(f"✅ Strong trend (ADX: {adx:.1f}): +20")
+        score += 15
+        details.append(f"✅ Strong trend (ADX: {adx:.1f}): +15")
     elif adx > 20:
-        score += 12
-        details.append(f"🟡 Moderate trend (ADX: {adx:.1f}): +12")
+        score += 8
+        details.append(f"🟡 Moderate trend (ADX: {adx:.1f}): +8")
     elif adx > 15:
-        score += 5
-        details.append(f"🟡 Weak trend (ADX: {adx:.1f}): +5")
+        score += 3
+        details.append(f"🟡 Weak trend (ADX: {adx:.1f}): +3")
     else:
         score -= 5
         details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
-    # RSI (0-15)
+    
+    # 3. RSI momentum (0-10 points)
     if 30 <= rsi <= 70:
-        score += 15
-        details.append(f"✅ RSI neutral ({rsi:.1f}): +15")
-    elif rsi < 30:
         score += 10
-        details.append(f"🟢 RSI oversold ({rsi:.1f}): +10 (potential bounce)")
+        details.append(f"✅ RSI neutral ({rsi:.1f}): +10")
+    elif rsi < 30:
+        score += 8
+        details.append(f"🟢 RSI oversold ({rsi:.1f}): +8 (potential bounce)")
     elif rsi > 70:
-        score -= 10
-        details.append(f"🔴 RSI overbought ({rsi:.1f}): -10 (pullback risk)")
-    # EMA alignment (0-15)
+        score -= 8
+        details.append(f"🔴 RSI overbought ({rsi:.1f}): -8 (pullback risk)")
+    
+    # 4. EMA alignment (0-10 points)
     ema_score = 0
     if above_ema13:
-        ema_score += 4
+        ema_score += 3
     if above_ema50:
-        ema_score += 5
+        ema_score += 3
     if above_ema200:
-        ema_score += 6
+        ema_score += 4
     if ema13 > ema50 > ema200:
         ema_score += 5
-        details.append(f"✅ Perfect bullish EMA alignment: +{ema_score}")
-    else:
-        details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
     score += ema_score
-    # Volume (0-20)
+    details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
+    
+    # 5. Volume (0-10 points)
     if volume_ratio > 1.5:
-        score += 20
-        details.append(f"✅ High volume ({volume_ratio:.1f}x avg): +20")
+        score += 10
+        details.append(f"✅ High volume ({volume_ratio:.1f}x avg): +10")
     elif volume_ratio > 1.2:
-        score += 12
-        details.append(f"🟡 Above avg volume ({volume_ratio:.1f}x avg): +12")
+        score += 6
+        details.append(f"🟡 Above avg volume ({volume_ratio:.1f}x avg): +6")
     elif volume_ratio > 0.8:
-        score += 5
-        details.append(f"🟡 Normal volume ({volume_ratio:.1f}x avg): +5")
+        score += 3
+        details.append(f"🟡 Normal volume ({volume_ratio:.1f}x avg): +3")
     elif volume_ratio > 0.5:
         score -= 5
         details.append(f"🔴 Below avg volume ({volume_ratio:.1f}x avg): -5")
     else:
         score -= 10
         details.append(f"🔴 Very low volume ({volume_ratio:.1f}x avg): -10")
+    
     score = max(0, min(100, score))
-    return score, "\n".join(details[:8])
+    return score, "\n".join(details[:10])
 
 def get_score_rating(score):
     if score >= 80:
@@ -2715,7 +2636,7 @@ def get_score_rating(score):
     elif score >= 65:
         return "BUY"
     elif score >= 50:
-        return "NEUTRAL"
+        return "NEUTRAL (WAIT)"
     elif score >= 35:
         return "WEAK / AVOID"
     else:
@@ -3020,7 +2941,7 @@ async def help_command(ctx):
                 "`!scan SYMBOL [timeframe]` – Scan a single symbol\n"
                 "`!signals` – Scan ENTIRE watchlist across ALL 7 timeframes\n"
                 "`!signal SYMBOL` – Multi‑timeframe report for a single symbol\n\n"
-                "**QUICK SCORE (NEW!)**\n"
+                "**QUICK SCORE**\n"
                 "`!score` – Scan watchlist for high-probability setups (fast)\n"
                 "`!score NVDA` – Get quick score for a single symbol\n\n"
                 "**CONFIRMATION**\n"
@@ -3036,14 +2957,12 @@ async def help_command(ctx):
                 "**TREND STRENGTH**\n"
                 "`!strength SYMBOL [timeframe]` – ADX, RSI, volume, divergence\n\n"
                 "**TACO TRADE**\n"
-                "`!taco` – Trump trade signal\n"
-                "`!pennant [timeframe]` – Bullish pennant (flag) scanner\n\n"
+                "`!taco` – Trump trade signal\n\n"
                 "**OPTIONS FLOW**\n"
                 "`!flow TICKER` – Unusual options activity\n"
                 "`!scanflow` – Scan watchlist for unusual options\n\n"
-                "**BACKTESTING & LEAPS**\n"
-                "`!backtest SYMBOL [days=365]` – EMA crossover backtest\n"
-                "`!leaps` – LEAPS candidates (weekly CHoCH)\n\n"
+                "**BACKTESTING**\n"
+                "`!backtest SYMBOL [days=365]` – EMA crossover backtest\n\n"
                 "**FINVIZ SCANNER**\n"
                 "`!finviz_scan [filters]` – Custom Finviz scan\n"
                 "`!cheap_options` – Preset: $10-20, optionable, high volume\n"
@@ -3069,64 +2988,8 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !pennant, !leaps, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
-
-# ====================
-# SCAN FOR PENNANT
-# ====================
-@bot.command(name='pennant')
-async def scan_pennant(ctx, timeframe: str = '4h'):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-        valid_tfs = ['1h', '4h', 'daily', 'weekly']
-        if timeframe not in valid_tfs:
-            await ctx.send(f"❌ Invalid timeframe. Use: {', '.join(valid_tfs)}")
-            return
-        watchlist = await load_watchlist()
-        symbols = watchlist['stocks']
-        if not symbols:
-            await ctx.send("No stocks in watchlist.")
-            return
-        await ctx.send(f"🔍 Scanning {len(symbols)} stocks for bullish pennants on {timeframe}...")
-        found = []
-        for symbol in symbols:
-            if await check_cancel(ctx):
-                break
-            try:
-                df = await fetch_ohlcv(symbol, timeframe)
-                if df is None or len(df) < 30:
-                    continue
-                recent_low = df['low'].tail(20).min()
-                highs_last10 = df['high'].tail(10)
-                lows_last10 = df['low'].tail(10)
-                descending = highs_last10.iloc[0] > highs_last10.iloc[-1] * 1.01
-                flat_bottom = (lows_last10.max() - lows_last10.min()) / lows_last10.min() < 0.02
-                if descending and flat_bottom:
-                    current_price = df['close'].iloc[-1]
-                    if current_price <= recent_low * 1.02:
-                        found.append(f"{symbol} (${current_price:.2f}) – flat support near ${recent_low:.2f}")
-            except Exception as e:
-                print(f"Error scanning {symbol}: {e}")
-            await asyncio.sleep(0.3)
-        if not found:
-            await ctx.send(f"📭 No bullish pennants found on {timeframe}.")
-            return
-        embed = discord.Embed(title=f"🚩 Bullish Pennant (Flag) Scan – {timeframe.upper()}", description=f"Found {len(found)} stocks with flat-bottom pennants", color=0x00ff00, timestamp=datetime.now())
-        embed.add_field(name="📈 Potential Breakout Candidates", value="\n".join(found[:10]), inline=False)
-        embed.add_field(name="💡 Trading Advice", value="• Wait for price to break ABOVE the descending resistance line.\n• Entry on breakout + volume confirmation.\n• Stop loss just below the flat support.\n• Use `!structure SYMBOL` to see the chart.", inline=False)
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error scanning pennants: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
 
 # ====================
 # TACO TRADE COMMAND
@@ -3151,7 +3014,7 @@ async def taco_trade(ctx):
         embed.add_field(name="🎯 Affected Sectors", value=analysis['affected_sectors'], inline=True)
         embed.add_field(name="💎 Suggested Stocks", value=analysis['suggested_stocks'], inline=True)
         if "Bearish" in analysis['sentiment'] and "High" in analysis['taco_probability']:
-            embed.add_field(name="✅ TRADE ACTION", value="**BUY CALLS** on the suggested stocks.\n• Wait for the market to dip on the threat.\n• Look for a **flat bottom (bullish pennant)** on the 4h chart.\n• Enter when price breaks above descending resistance.\n• Set stop loss just below the flat support.\n• Target: +10‑20% move when Trump backtracks.\nUse `!structure SYMBOL` to see the chart and `!pennant` to find flat bottoms.", inline=False)
+            embed.add_field(name="✅ TRADE ACTION", value="**BUY CALLS** on the suggested stocks.\n• Wait for the market to dip on the threat.\n• Look for a **flat bottom (bullish pennant)** on the 4h chart.\n• Enter when price breaks above descending resistance.\n• Set stop loss just below the flat support.\n• Target: +10‑20% move when Trump backtracks.\nUse `!structure SYMBOL` to see the chart.", inline=False)
         elif "Bullish" in analysis['sentiment']:
             embed.add_field(name="✅ TRADE ACTION", value="**SELL / TAKE PROFITS** on the suggested stocks.\n• Trump is talking peace – the rally may end soon.\n• Consider selling calls or buying puts after a bounce.\n• Wait for a CHoCH down on the 4h chart.\nUse `!structure SYMBOL` to confirm reversal.", inline=False)
         else:
@@ -3224,7 +3087,7 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
         await ctx.send(embed=embed)
 
 # ====================
-# TRUMP / TACO FUNCTIONS - FIXED
+# TRUMP / TACO FUNCTIONS
 # ====================
 async def fetch_latest_trump_post():
     feeds = ["https://trumpstruth.org/feed", "https://truthsocial.rss.simple-web.org/feed.xml"]
