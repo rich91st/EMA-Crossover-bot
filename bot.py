@@ -180,7 +180,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING FUNCTIONS
+# DATA FETCHING FUNCTIONS - UPDATED
 # ====================
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
@@ -216,6 +216,7 @@ async def fetch_finnhub(symbol, timeframe):
         return None
 
 async def fetch_twelvedata(symbol, timeframe):
+    """UPDATED: Better volume handling"""
     interval_map = {
         '5min': '5min', '15min': '15min', '30min': '30min',
         '1h': '1h', '4h': '4h', 'daily': '1day', 'weekly': '1week'
@@ -239,9 +240,16 @@ async def fetch_twelvedata(symbol, timeframe):
                 df = df.rename(columns={'datetime': 'timestamp'})
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
-                df = df.astype(float).sort_index()
+                numeric_cols = ['open', 'high', 'low', 'close', 'volume'] if 'volume' in df.columns else ['open', 'high', 'low', 'close']
+                for col in numeric_cols:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                if 'volume' not in df.columns:
+                    df['volume'] = 0
+                df = df.sort_index()
+                print(f"📊 Twelve Data volume for {symbol} ({timeframe}): {df['volume'].iloc[-1] if len(df) > 0 else 'N/A'}")
                 return df
-    except Exception:
+    except Exception as e:
+        print(f"Twelve Data error: {e}")
         return None
 
 async def fetch_coingecko_ohlc(symbol, timeframe):
@@ -306,45 +314,46 @@ async def fetch_coingecko_price(symbol):
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
+    """UPDATED: Prioritizes Twelve Data for volume reliability"""
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
     if cache_key in data_cache and data_cache[cache_key][1] > now:
         return data_cache[cache_key][0]
     df = None
     is_crypto = '/' in symbol
-    if timeframe == '30min' and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        try:
-            client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-            request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
-                                       timeframe_multiplier=15, start=now - timedelta(days=60), end=now)
-            bars = await asyncio.to_thread(client.get_stock_bars, request)
-            if bars.data:
-                df_15 = bars.df.reset_index(level=0, drop=True)
-                df_15.index = pd.to_datetime(df_15.index)
-                df_30 = df_15.resample('30T').agg({'open': 'first', 'high': 'max', 'low': 'min',
-                                                   'close': 'last', 'volume': 'sum'}).dropna()
-                if not df_30.empty:
-                    df = df_30
-        except Exception as e:
-            print(f"Alpaca 15min fetch failed: {e}")
-    if df is None and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '1h': (TimeFrame.Hour, 1),
-                  '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
-        if timeframe in tf_map:
-            tf, mult = tf_map[timeframe]
-            try:
-                client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-                request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf, timeframe_multiplier=mult,
-                                           start=now - timedelta(days=60), end=now)
-                bars = await asyncio.to_thread(client.get_stock_bars, request)
-                if bars.data:
-                    df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
-            except Exception as e:
-                print(f"Alpaca fetch failed: {e}")
-    if df is None and not is_crypto:
-        df = await fetch_finnhub(symbol, timeframe)
-    if df is None and not is_crypto:
-        df = await fetch_twelvedata(symbol, timeframe)
+    
+    # FOR STOCKS - Prioritize Twelve Data for volume reliability
+    if not is_crypto:
+        # First try Twelve Data (best for volume on 4h/daily)
+        if timeframe in ['4h', 'daily', 'weekly', '1h']:
+            df = await fetch_twelvedata(symbol, timeframe)
+            if df is not None and not df.empty:
+                print(f"✅ Twelve Data volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
+        
+        # Fallback to Alpaca if Twelve Data fails
+        if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '1h': (TimeFrame.Hour, 1),
+                      '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
+            if timeframe in tf_map:
+                tf, mult = tf_map[timeframe]
+                try:
+                    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                    request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf, timeframe_multiplier=mult,
+                                               start=now - timedelta(days=60), end=now)
+                    bars = await asyncio.to_thread(client.get_stock_bars, request)
+                    if bars.data and not bars.df.empty:
+                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
+                        print(f"✅ Alpaca volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
+                except Exception as e:
+                    print(f"Alpaca fetch failed: {e}")
+        
+        # Final fallback to Finnhub
+        if df is None:
+            df = await fetch_finnhub(symbol, timeframe)
+            if df is not None and not df.empty:
+                print(f"✅ Finnhub volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
+    
+    # FOR CRYPTO - keep existing logic
     if is_crypto:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '1h': (TimeFrame.Hour, 1),
@@ -357,7 +366,7 @@ async def fetch_ohlcv(symbol, timeframe):
                     request = CryptoBarsRequest(symbol_or_symbols=alpaca_symbol, timeframe=tf,
                                                 timeframe_multiplier=mult, start=now - timedelta(days=60), end=now)
                     bars = await asyncio.to_thread(client.get_crypto_bars, request)
-                    if bars.data:
+                    if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
                 except Exception as e:
                     print(f"Alpaca crypto fetch failed: {e}")
@@ -365,8 +374,15 @@ async def fetch_ohlcv(symbol, timeframe):
             df = await fetch_coingecko_ohlc(symbol, timeframe)
         if df is None:
             df = await fetch_coingecko_price(symbol)
+    
     if df is not None and not df.empty:
+        # Ensure volume is never NaN - fill with 0 if missing
+        if 'volume' in df.columns:
+            df['volume'] = df['volume'].fillna(0)
+        else:
+            df['volume'] = 0
         data_cache[cache_key] = (df, now + CACHE_DURATION)
+    
     return df
 
 # ====================
@@ -2450,7 +2466,7 @@ async def performance(ctx, symbol: str = None, days: int = 30):
         user_busy[ctx.author.id] = False
 
 # ====================
-# QUICK SCORE COMMAND - UPDATED WITH FULL SCORING SYSTEM
+# QUICK SCORE COMMAND - UPDATED
 # ====================
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
@@ -2469,7 +2485,6 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
             await ctx.send(f"Invalid timeframe. Use: {', '.join(valid_timeframes)}")
             return
 
-        # Single symbol mode
         if target and target.lower() != 'all':
             symbol = normalize_symbol(target)
             if '/' in symbol:
@@ -2490,7 +2505,6 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
             await ctx.send(embed=embed)
             return
 
-        # Scan watchlist
         watchlist = await load_watchlist()
         symbols = watchlist['stocks']
         if not symbols:
@@ -2533,7 +2547,6 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
         user_busy[ctx.author.id] = False
 
 async def calculate_quick_score(df, symbol, timeframe):
-    """Quick score based on market structure, ADX, RSI, EMA, and volume"""
     if df is None or df.empty:
         return 0, "No data"
     
@@ -2550,13 +2563,12 @@ async def calculate_quick_score(df, symbol, timeframe):
     current_volume = df['volume'].iloc[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
     
-    # Market structure analysis
     structure = analyze_structure(df)
     
     score = 0
     details = []
     
-    # 1. Market structure (0-25 points)
+    # Market structure (0-25 points)
     if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
         score += 25
         details.append(f"✅ CHoCH UP: +25 (bullish reversal)")
@@ -2572,7 +2584,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         details.append(f"⚪ No clear structure signal: 0")
     
-    # 2. ADX trend strength (0-15 points)
+    # ADX trend strength (0-15 points)
     if adx > 25:
         score += 15
         details.append(f"✅ Strong trend (ADX: {adx:.1f}): +15")
@@ -2586,7 +2598,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         score -= 5
         details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
     
-    # 3. RSI momentum (0-10 points)
+    # RSI momentum (0-10 points)
     if 30 <= rsi <= 70:
         score += 10
         details.append(f"✅ RSI neutral ({rsi:.1f}): +10")
@@ -2597,7 +2609,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         score -= 8
         details.append(f"🔴 RSI overbought ({rsi:.1f}): -8 (pullback risk)")
     
-    # 4. EMA alignment (0-10 points)
+    # EMA alignment (0-10 points)
     ema_score = 0
     if above_ema13:
         ema_score += 3
@@ -2610,7 +2622,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     score += ema_score
     details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
     
-    # 5. Volume (0-10 points)
+    # Volume (0-10 points)
     if volume_ratio > 1.5:
         score += 10
         details.append(f"✅ High volume ({volume_ratio:.1f}x avg): +10")
@@ -2651,7 +2663,7 @@ def get_score_color(score):
         return 0xff0000
 
 # ====================
-# CONFIRMATION COMMAND - COMBINES ALL SIGNALS
+# CONFIRMATION COMMAND
 # ====================
 @bot.command(name='confirm')
 async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
@@ -2689,12 +2701,10 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         ema13, ema50, ema200 = df['ema13'].iloc[-1], df['ema50'].iloc[-1], df['ema200'].iloc[-1]
         above_ema13, above_ema50, above_ema200 = current_price > ema13, current_price > ema50, current_price > ema200
 
-        # Demand zones
         df_30 = await fetch_ohlcv(symbol, '30min')
         zones = find_demand_zones(df_30) if df_30 is not None else []
         near_zone = any(abs((current_price - z['level']) / current_price) < 0.02 for z in zones)
 
-        # Options flow
         unusual_flow = False
         try:
             expirations = get_key_expirations(symbol)
@@ -2712,11 +2722,9 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         except:
             pass
 
-        # Earnings proximity
         earnings = await fetch_earnings_upcoming(symbol, days=7)
         earnings_soon = len(earnings) > 0
 
-        # Market regime (SPY trend)
         spy_df = await fetch_ohlcv('SPY', 'daily')
         spy_trend = "bullish"
         if spy_df is not None and len(spy_df) > 20:
@@ -2724,14 +2732,12 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
             spy_20_ago = spy_df['close'].iloc[-20]
             spy_trend = "bullish" if spy_close > spy_20_ago else "bearish"
 
-        # Historical win rate
         historical_win_rate = 0
         similar_trades = await trades_collection.find({'user_id': str(ctx.author.id), 'status': 'CLOSED', 'symbol': symbol}).to_list(length=100)
         if similar_trades:
             wins = sum(1 for t in similar_trades if t.get('profit_pct', 0) > 0)
             historical_win_rate = wins / len(similar_trades) * 100
 
-        # Calculate score
         score = 0
         reasons_bullish = []
         reasons_bearish = []
