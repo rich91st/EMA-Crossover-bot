@@ -285,12 +285,12 @@ async def fetch_ohlcv(symbol, timeframe):
     now = datetime.now()
     if cache_key in data_cache and data_cache[cache_key][1] > now:
         return data_cache[cache_key][0]
-    
+
     df = None
     is_crypto = '/' in symbol
-    
+
     if not is_crypto:
-        # Daily and weekly: yfinance direct
+        # ----- DAILY and WEEKLY: yfinance directly -----
         if timeframe == 'daily':
             try:
                 ticker = yf.Ticker(symbol)
@@ -299,52 +299,43 @@ async def fetch_ohlcv(symbol, timeframe):
                     df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
                     print(f"✅ yfinance daily for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
             except Exception as e:
-                print(f"yfinance daily failed for {symbol}: {e}")
-        
+                print(f"yfinance daily failed: {e}")
+
         elif timeframe == 'weekly':
             try:
                 ticker = yf.Ticker(symbol)
                 df = ticker.history(period="1y", interval="1wk")
                 if not df.empty:
                     df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-                    print(f"✅ yfinance weekly for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
+                    print(f"✅ yfinance weekly for {symbol}: volume={df['volume'].iloc[-1]:.0f}")
             except Exception as e:
-                print(f"yfinance weekly failed for {symbol}: {e}")
-        
+                print(f"yfinance weekly failed: {e}")
+
+        # ----- 4h: use yfinance resample (no fallback to Alpaca) -----
         elif timeframe == '4h':
-            df = await fetch_yfinance_4h(symbol)
+            df = await fetch_yfinance_4h(symbol)   # uses the helper above
             if df is None:
+                # Optional fallback to Twelve Data – but volume may still be low
+                print(f"⚠️ yfinance 4h failed for {symbol}, trying Twelve Data (volume may be low)")
                 df = await fetch_twelvedata(symbol, '4h')
-            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-                try:
-                    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-                    request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Hour, timeframe_multiplier=4,
-                                               start=now - timedelta(days=60), end=now)
-                    bars = await asyncio.to_thread(client.get_stock_bars, request)
-                    if bars.data and not bars.df.empty:
-                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
-                        print(f"✅ Alpaca 4h for {symbol}: volume={df['volume'].iloc[-1] if not df.empty else 0}")
-                except Exception as e:
-                    print(f"Alpaca 4h failed for {symbol}: {e}")
-        
+
+        # ----- 1h: yfinance first, then Twelve Data -----
         elif timeframe == '1h':
-            df = await fetch_yfinance_1h(symbol)
+            try:
+                ticker = yf.Ticker(symbol)
+                data = ticker.history(period="5d", interval="1h")
+                if not data.empty:
+                    df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                    print(f"✅ yfinance 1h for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
+            except Exception as e:
+                print(f"yfinance 1h failed: {e}")
             if df is None:
                 df = await fetch_twelvedata(symbol, '1h')
-            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-                try:
-                    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-                    request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Hour, timeframe_multiplier=1,
-                                               start=now - timedelta(days=60), end=now)
-                    bars = await asyncio.to_thread(client.get_stock_bars, request)
-                    if bars.data and not bars.df.empty:
-                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
-                except Exception as e:
-                    print(f"Alpaca 1h failed for {symbol}: {e}")
-        
+
+        # ----- Lower timeframes: Twelve Data or Alpaca -----
         elif timeframe in ['30min', '15min', '5min']:
             df = await fetch_twelvedata(symbol, timeframe)
-            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+            if df is None and ALPACA_API_KEY:
                 tf_map = {'30min': (TimeFrame.Minute, 30), '15min': (TimeFrame.Minute, 15), '5min': (TimeFrame.Minute, 5)}
                 tf, mult = tf_map[timeframe]
                 try:
@@ -355,32 +346,12 @@ async def fetch_ohlcv(symbol, timeframe):
                     if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
                 except Exception as e:
-                    print(f"Alpaca {timeframe} failed for {symbol}: {e}")
-        
-        if df is None:
-            df = await fetch_finnhub(symbol, timeframe)
-    
-    # Crypto
-    if is_crypto:
-        if ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '30min': (TimeFrame.Minute, 30),
-                      '1h': (TimeFrame.Hour, 1), '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
-            if timeframe in tf_map:
-                tf, mult = tf_map[timeframe]
-                try:
-                    client = CryptoHistoricalDataClient()
-                    alpaca_symbol = symbol.replace('/', '')
-                    request = CryptoBarsRequest(symbol_or_symbols=alpaca_symbol, timeframe=tf,
-                                                timeframe_multiplier=mult, start=now - timedelta(days=60), end=now)
-                    bars = await asyncio.to_thread(client.get_crypto_bars, request)
-                    if bars.data and not bars.df.empty:
-                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
-                except Exception as e:
-                    print(f"Alpaca crypto failed: {e}")
-        if df is None:
-            # Simplified crypto fallback – you can expand if needed
-            return None
-    
+                    print(f"Alpaca {timeframe} failed: {e}")
+
+    # ----- Crypto (simple, keep as is) -----
+    if is_crypto and df is None:
+        return None
+
     if df is not None and not df.empty:
         if 'volume' not in df.columns:
             df['volume'] = 0
@@ -390,7 +361,7 @@ async def fetch_ohlcv(symbol, timeframe):
         data_cache[cache_key] = (df, now + CACHE_DURATION)
     else:
         print(f"❌ No data for {symbol} {timeframe}")
-    
+
     return df
 
 # ====================
