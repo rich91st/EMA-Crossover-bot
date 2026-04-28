@@ -2267,7 +2267,8 @@ async def verify_data(ctx, symbol: str, timeframe: str = '4h'):
         if timeframe == '4h':
             data = ticker.history(period="10d", interval="1h")
             if not data.empty:
-                df_live = data.resample('4H').agg({
+                # Use lowercase '4h' for resample
+                df_live = data.resample('4h').agg({
                     'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
                 }).dropna()
             else:
