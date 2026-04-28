@@ -180,7 +180,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING FUNCTIONS - UPDATED
+# DATA FETCHING FUNCTIONS - UPDATED WITH YFINANCE VOLUME FIX
 # ====================
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
@@ -216,7 +216,6 @@ async def fetch_finnhub(symbol, timeframe):
         return None
 
 async def fetch_twelvedata(symbol, timeframe):
-    """UPDATED: Better volume handling"""
     interval_map = {
         '5min': '5min', '15min': '15min', '30min': '30min',
         '1h': '1h', '4h': '4h', 'daily': '1day', 'weekly': '1week'
@@ -246,7 +245,6 @@ async def fetch_twelvedata(symbol, timeframe):
                 if 'volume' not in df.columns:
                     df['volume'] = 0
                 df = df.sort_index()
-                print(f"📊 Twelve Data volume for {symbol} ({timeframe}): {df['volume'].iloc[-1] if len(df) > 0 else 'N/A'}")
                 return df
     except Exception as e:
         print(f"Twelve Data error: {e}")
@@ -314,7 +312,7 @@ async def fetch_coingecko_price(symbol):
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    """UPDATED: Prioritizes Twelve Data for volume reliability"""
+    """UPDATED: Uses yfinance as primary source for volume on longer timeframes"""
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
     if cache_key in data_cache and data_cache[cache_key][1] > now:
@@ -322,18 +320,46 @@ async def fetch_ohlcv(symbol, timeframe):
     df = None
     is_crypto = '/' in symbol
     
-    # FOR STOCKS - Prioritize Twelve Data for volume reliability
+    # FOR STOCKS - Use yfinance for reliable volume on longer timeframes
     if not is_crypto:
-        # First try Twelve Data (best for volume on 4h/daily)
-        if timeframe in ['4h', 'daily', 'weekly', '1h']:
-            df = await fetch_twelvedata(symbol, timeframe)
-            if df is not None and not df.empty:
-                print(f"✅ Twelve Data volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
+        # yfinance works best for 4h, daily, weekly
+        if timeframe in ['4h', 'daily', 'weekly']:
+            try:
+                ticker = yf.Ticker(symbol)
+                if timeframe == '4h':
+                    # yfinance doesn't have native 4h, so get 1h and resample
+                    data = ticker.history(period="60d", interval="1h")
+                    if not data.empty:
+                        df = data.resample('4H').agg({
+                            'Open': 'first',
+                            'High': 'max', 
+                            'Low': 'min',
+                            'Close': 'last',
+                            'Volume': 'sum'
+                        }).dropna()
+                        df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                        print(f"✅ yfinance 4h volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
+                elif timeframe == 'daily':
+                    data = ticker.history(period="60d", interval="1d")
+                    if not data.empty:
+                        df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                        print(f"✅ yfinance daily volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
+                elif timeframe == 'weekly':
+                    data = ticker.history(period="1y", interval="1wk")
+                    if not data.empty:
+                        df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                        print(f"✅ yfinance weekly volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
+            except Exception as e:
+                print(f"yfinance fetch failed for {symbol}: {e}")
         
-        # Fallback to Alpaca if Twelve Data fails
+        # For smaller timeframes, try Twelve Data first
+        if df is None and timeframe in ['1h', '30min', '15min', '5min']:
+            df = await fetch_twelvedata(symbol, timeframe)
+            
+        # Fallback to Alpaca
         if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '1h': (TimeFrame.Hour, 1),
-                      '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
+            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '30min': (TimeFrame.Minute, 30),
+                      '1h': (TimeFrame.Hour, 1), '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
             if timeframe in tf_map:
                 tf, mult = tf_map[timeframe]
                 try:
@@ -343,21 +369,18 @@ async def fetch_ohlcv(symbol, timeframe):
                     bars = await asyncio.to_thread(client.get_stock_bars, request)
                     if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
-                        print(f"✅ Alpaca volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
                 except Exception as e:
                     print(f"Alpaca fetch failed: {e}")
         
         # Final fallback to Finnhub
         if df is None:
             df = await fetch_finnhub(symbol, timeframe)
-            if df is not None and not df.empty:
-                print(f"✅ Finnhub volume for {symbol}: {df['volume'].iloc[-1] if 'volume' in df.columns else 'N/A'}")
     
-    # FOR CRYPTO - keep existing logic
+    # FOR CRYPTO - existing logic
     if is_crypto:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '1h': (TimeFrame.Hour, 1),
-                      '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
+            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '30min': (TimeFrame.Minute, 30),
+                      '1h': (TimeFrame.Hour, 1), '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
             if timeframe in tf_map:
                 tf, mult = tf_map[timeframe]
                 try:
@@ -376,9 +399,9 @@ async def fetch_ohlcv(symbol, timeframe):
             df = await fetch_coingecko_price(symbol)
     
     if df is not None and not df.empty:
-        # Ensure volume is never NaN - fill with 0 if missing
+        # Ensure volume is never NaN
         if 'volume' in df.columns:
-            df['volume'] = df['volume'].fillna(0)
+            df['volume'] = df['volume'].fillna(0).astype(float)
         else:
             df['volume'] = 0
         data_cache[cache_key] = (df, now + CACHE_DURATION)
@@ -2373,6 +2396,51 @@ async def track_trade(ctx, action: str, symbol: str, *, details: str = None):
     finally:
         user_busy[ctx.author.id] = False
 
+# ====================
+# TRACK EDIT COMMAND - NEW! FIXES WRONG CLOSE ENTRIES
+# ====================
+@bot.command(name='track_edit')
+async def track_edit(ctx, trade_id: str, field: str, value: str):
+    """Edit a tracked trade - use !track_edit TRADE_ID field value"""
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        from bson.objectid import ObjectId
+        
+        # Find the trade
+        trade = await trades_collection.find_one({
+            '_id': ObjectId(trade_id),
+            'user_id': str(ctx.author.id)
+        })
+        
+        if not trade:
+            await ctx.send(f"❌ Trade not found or not owned by you.")
+            return
+        
+        # Update the field
+        if field == 'exit_premium':
+            new_value = float(value)
+            await trades_collection.update_one(
+                {'_id': ObjectId(trade_id)},
+                {'$set': {'exit_premium': new_value}}
+            )
+            await ctx.send(f"✅ Updated exit_premium to ${new_value:.2f}")
+        elif field == 'profit_pct':
+            new_value = float(value.rstrip('%'))
+            await trades_collection.update_one(
+                {'_id': ObjectId(trade_id)},
+                {'$set': {'profit_pct': new_value}}
+            )
+            await ctx.send(f"✅ Updated profit_pct to {new_value:+.1f}%")
+        else:
+            await ctx.send(f"❌ Can only edit exit_premium or profit_pct")
+            
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
 @bot.command(name='trades')
 async def list_trades(ctx, symbol: str = None, limit: int = 10):
     if user_busy.get(ctx.author.id):
@@ -2395,8 +2463,10 @@ async def list_trades(ctx, symbol: str = None, limit: int = 10):
             entry_date = t['entry_date'].strftime('%m/%d') if hasattr(t['entry_date'], 'strftime') else str(t['entry_date'])[:10]
             opt_info = f" {t['option_type']} ${t.get('strike', 0):.0f} strike" if t.get('option_type') else ""
             trade_list += f"**{t['symbol']}**{opt_info} {status} | Entry: ${t.get('premium', 0):.2f} | P&L: {profit_str} | {entry_date}\n"
+            # Also show the MongoDB _id for editing
+            trade_list += f"   `ID: {str(t['_id'])}`\n"
         embed.add_field(name="Trades", value=trade_list or "None", inline=False)
-        embed.set_footer(text="Use !performance for detailed stats | !performance NIO for symbol stats")
+        embed.set_footer(text="Use !performance for detailed stats | Use !track_edit ID field value to fix wrong closes")
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
@@ -2976,6 +3046,7 @@ async def help_command(ctx):
                 "**TRADE TRACKING**\n"
                 "`!track BUY SYMBOL [CALL/PUT strike] premium` – Record entry\n"
                 "`!track CLOSE SYMBOL price_or_percent` – Close trade\n"
+                "`!track_edit TRADE_ID field value` – Fix wrong close entries\n"
                 "`!trades [symbol] [limit]` – List recent trades\n"
                 "`!performance [symbol] [days]` – Win rate and P&L stats\n\n"
                 "**WATCHLIST**\n"
@@ -2994,7 +3065,7 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !track_edit, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
