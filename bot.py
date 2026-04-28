@@ -31,9 +31,6 @@ import matplotlib.colors as mcolors
 import mplfinance as mpf
 import io
 
-# Finviz integration
-from finvizfinance.screener.overview import Overview
-
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
 # === CONFIGURATION ===
@@ -42,18 +39,15 @@ TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
-NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
-MARKETAUX_API_KEY = os.getenv('MARKETAUX_API_KEY')
 
 # Alpaca keys
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
 ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
-# MongoDB setup
+# MongoDB setup – keep for watchlist only (trades removed)
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client['trading_bot']
 watchlist_collection = db['watchlist']
-trades_collection = db['trades']
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -69,8 +63,6 @@ cancellation_flags = {}
 # ====================
 data_cache = {}
 CACHE_DURATION = timedelta(minutes=10)
-
-world_news_cache = {"data": None, "expiry": datetime.min}
 
 # ====================
 # RATE LIMITERS
@@ -180,7 +172,7 @@ def get_tradingview_web_link(symbol):
     return web_url
 
 # ====================
-# DATA FETCHING FUNCTIONS - UPDATED WITH YFINANCE VOLUME FIX
+# DATA FETCHING FUNCTIONS - FIXED
 # ====================
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {
@@ -190,7 +182,6 @@ async def fetch_finnhub(symbol, timeframe):
     resolution = resolution_map.get(timeframe)
     if not resolution:
         return None
-
     url = "https://finnhub.io/api/v1/stock/candle"
     params = {
         'symbol': symbol, 'resolution': resolution,
@@ -239,128 +230,122 @@ async def fetch_twelvedata(symbol, timeframe):
                 df = df.rename(columns={'datetime': 'timestamp'})
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
-                numeric_cols = ['open', 'high', 'low', 'close', 'volume'] if 'volume' in df.columns else ['open', 'high', 'low', 'close']
-                for col in numeric_cols:
-                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
                 if 'volume' not in df.columns:
                     df['volume'] = 0
+                df['volume'] = df['volume'].fillna(0)
                 df = df.sort_index()
+                if len(df) > 100:
+                    df = df.tail(100)
+                print(f"📊 Twelve Data {timeframe} for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
                 return df
     except Exception as e:
-        print(f"Twelve Data error: {e}")
+        print(f"Twelve Data error for {symbol} {timeframe}: {e}")
         return None
 
-async def fetch_coingecko_ohlc(symbol, timeframe):
-    base = symbol.split('/')[0].lower()
-    coin_map = {'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana', 'xrp': 'ripple', 'doge': 'dogecoin',
-                'pepe': 'pepecoin', 'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'}
-    coin_id = coin_map.get(base)
-    if not coin_id:
-        return None
-    days_map = {'5min': 1, '15min': 2, '30min': 2, '1h': 7, '4h': 7, 'daily': 30, 'weekly': 90}
-    days = days_map.get(timeframe)
-    if not days:
-        return None
-    url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
-    params = {'vs_currency': 'usd', 'days': days}
-    await coingecko_limiter.wait_if_needed()
+async def fetch_yfinance_4h(symbol):
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df.set_index('timestamp', inplace=True)
-                df['volume'] = np.nan
-                return df
-    except Exception:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="30d", interval="1h")
+        if data.empty:
+            return None
+        df_4h = data.resample('4H').agg({
+            'Open': 'first',
+            'High': 'max',
+            'Low': 'min',
+            'Close': 'last',
+            'Volume': 'sum'
+        }).dropna()
+        if df_4h.empty:
+            return None
+        df_4h = df_4h.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+        print(f"✅ yfinance 4h for {symbol}: price={df_4h['close'].iloc[-1]:.2f}, volume={df_4h['volume'].iloc[-1]:.0f}")
+        return df_4h
+    except Exception as e:
+        print(f"yfinance 4h failed for {symbol}: {e}")
         return None
 
-async def fetch_coingecko_price(symbol):
-    base = symbol.split('/')[0].lower()
-    coin_map = {'btc': 'bitcoin', 'eth': 'ethereum', 'sol': 'solana', 'xrp': 'ripple', 'doge': 'dogecoin',
-                'pepe': 'pepecoin', 'ada': 'cardano', 'dot': 'polkadot', 'link': 'chainlink'}
-    coin_id = coin_map.get(base)
-    if not coin_id:
-        return None
-    url = "https://api.coingecko.com/api/v3/simple/price"
-    params = {'ids': coin_id, 'vs_currencies': 'usd'}
-    await coingecko_limiter.wait_if_needed()
+async def fetch_yfinance_1h(symbol):
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                price = data.get(coin_id, {}).get('usd')
-                if price is None:
-                    return None
-                np.random.seed(42)
-                dates = pd.date_range(end=datetime.now(), periods=200, freq='H')
-                close_prices = price * (1 + np.random.normal(0, 0.01, 200).cumsum() * 0.01)
-                open_prices = close_prices * 0.99
-                high_prices = close_prices * 1.02
-                low_prices = close_prices * 0.98
-                volumes = np.abs(np.random.normal(1e6, 2e5, 200))
-                df = pd.DataFrame({'timestamp': dates, 'open': open_prices, 'high': high_prices,
-                                   'low': low_prices, 'close': close_prices, 'volume': volumes})
-                df.set_index('timestamp', inplace=True)
-                return df
-    except Exception:
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="5d", interval="1h")
+        if data.empty:
+            return None
+        data = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+        print(f"✅ yfinance 1h for {symbol}: price={data['close'].iloc[-1]:.2f}, volume={data['volume'].iloc[-1]:.0f}")
+        return data
+    except Exception as e:
+        print(f"yfinance 1h failed for {symbol}: {e}")
         return None
 
 async def fetch_ohlcv(symbol, timeframe):
-    """UPDATED: Uses yfinance as primary source for volume on longer timeframes"""
     cache_key = f"{symbol}_{timeframe}"
     now = datetime.now()
     if cache_key in data_cache and data_cache[cache_key][1] > now:
         return data_cache[cache_key][0]
+    
     df = None
     is_crypto = '/' in symbol
     
-    # FOR STOCKS - Use yfinance for reliable volume on longer timeframes
     if not is_crypto:
-        # yfinance works best for 4h, daily, weekly
-        if timeframe in ['4h', 'daily', 'weekly']:
+        # Daily and weekly: yfinance direct
+        if timeframe == 'daily':
             try:
                 ticker = yf.Ticker(symbol)
-                if timeframe == '4h':
-                    # yfinance doesn't have native 4h, so get 1h and resample
-                    data = ticker.history(period="60d", interval="1h")
-                    if not data.empty:
-                        df = data.resample('4H').agg({
-                            'Open': 'first',
-                            'High': 'max', 
-                            'Low': 'min',
-                            'Close': 'last',
-                            'Volume': 'sum'
-                        }).dropna()
-                        df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-                        print(f"✅ yfinance 4h volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
-                elif timeframe == 'daily':
-                    data = ticker.history(period="60d", interval="1d")
-                    if not data.empty:
-                        df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-                        print(f"✅ yfinance daily volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
-                elif timeframe == 'weekly':
-                    data = ticker.history(period="1y", interval="1wk")
-                    if not data.empty:
-                        df = data.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
-                        print(f"✅ yfinance weekly volume for {symbol}: {df['volume'].iloc[-1] if not df.empty else 'N/A'}")
+                df = ticker.history(period="60d", interval="1d")
+                if not df.empty:
+                    df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                    print(f"✅ yfinance daily for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
             except Exception as e:
-                print(f"yfinance fetch failed for {symbol}: {e}")
+                print(f"yfinance daily failed for {symbol}: {e}")
         
-        # For smaller timeframes, try Twelve Data first
-        if df is None and timeframe in ['1h', '30min', '15min', '5min']:
+        elif timeframe == 'weekly':
+            try:
+                ticker = yf.Ticker(symbol)
+                df = ticker.history(period="1y", interval="1wk")
+                if not df.empty:
+                    df = df.rename(columns={'Open': 'open', 'High': 'high', 'Low': 'low', 'Close': 'close', 'Volume': 'volume'})
+                    print(f"✅ yfinance weekly for {symbol}: price={df['close'].iloc[-1]:.2f}, volume={df['volume'].iloc[-1]:.0f}")
+            except Exception as e:
+                print(f"yfinance weekly failed for {symbol}: {e}")
+        
+        elif timeframe == '4h':
+            df = await fetch_yfinance_4h(symbol)
+            if df is None:
+                df = await fetch_twelvedata(symbol, '4h')
+            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+                try:
+                    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                    request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Hour, timeframe_multiplier=4,
+                                               start=now - timedelta(days=60), end=now)
+                    bars = await asyncio.to_thread(client.get_stock_bars, request)
+                    if bars.data and not bars.df.empty:
+                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
+                        print(f"✅ Alpaca 4h for {symbol}: volume={df['volume'].iloc[-1] if not df.empty else 0}")
+                except Exception as e:
+                    print(f"Alpaca 4h failed for {symbol}: {e}")
+        
+        elif timeframe == '1h':
+            df = await fetch_yfinance_1h(symbol)
+            if df is None:
+                df = await fetch_twelvedata(symbol, '1h')
+            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+                try:
+                    client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
+                    request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Hour, timeframe_multiplier=1,
+                                               start=now - timedelta(days=60), end=now)
+                    bars = await asyncio.to_thread(client.get_stock_bars, request)
+                    if bars.data and not bars.df.empty:
+                        df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
+                except Exception as e:
+                    print(f"Alpaca 1h failed for {symbol}: {e}")
+        
+        elif timeframe in ['30min', '15min', '5min']:
             df = await fetch_twelvedata(symbol, timeframe)
-            
-        # Fallback to Alpaca
-        if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '30min': (TimeFrame.Minute, 30),
-                      '1h': (TimeFrame.Hour, 1), '4h': (TimeFrame.Hour, 4), 'daily': (TimeFrame.Day, 1), 'weekly': (TimeFrame.Week, 1)}
-            if timeframe in tf_map:
+            if df is None and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+                tf_map = {'30min': (TimeFrame.Minute, 30), '15min': (TimeFrame.Minute, 15), '5min': (TimeFrame.Minute, 5)}
                 tf, mult = tf_map[timeframe]
                 try:
                     client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
@@ -370,13 +355,12 @@ async def fetch_ohlcv(symbol, timeframe):
                     if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
                 except Exception as e:
-                    print(f"Alpaca fetch failed: {e}")
+                    print(f"Alpaca {timeframe} failed for {symbol}: {e}")
         
-        # Final fallback to Finnhub
         if df is None:
             df = await fetch_finnhub(symbol, timeframe)
     
-    # FOR CRYPTO - existing logic
+    # Crypto
     if is_crypto:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
             tf_map = {'5min': (TimeFrame.Minute, 5), '15min': (TimeFrame.Minute, 15), '30min': (TimeFrame.Minute, 30),
@@ -392,147 +376,22 @@ async def fetch_ohlcv(symbol, timeframe):
                     if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open', 'high', 'low', 'close', 'volume']]
                 except Exception as e:
-                    print(f"Alpaca crypto fetch failed: {e}")
+                    print(f"Alpaca crypto failed: {e}")
         if df is None:
-            df = await fetch_coingecko_ohlc(symbol, timeframe)
-        if df is None:
-            df = await fetch_coingecko_price(symbol)
+            # Simplified crypto fallback – you can expand if needed
+            return None
     
     if df is not None and not df.empty:
-        # Ensure volume is never NaN
-        if 'volume' in df.columns:
-            df['volume'] = df['volume'].fillna(0).astype(float)
-        else:
+        if 'volume' not in df.columns:
             df['volume'] = 0
+        df['volume'] = df['volume'].fillna(0).astype(float)
+        if len(df) < 20:
+            print(f"⚠️ Only {len(df)} candles for {symbol} {timeframe}")
         data_cache[cache_key] = (df, now + CACHE_DURATION)
+    else:
+        print(f"❌ No data for {symbol} {timeframe}")
     
     return df
-
-# ====================
-# NEWS FETCHING FUNCTIONS
-# ====================
-async def fetch_finnhub_news(symbol):
-    url = "https://finnhub.io/api/v1/company-news"
-    params = {'symbol': symbol,
-              'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
-              'to': datetime.now().strftime('%Y-%m-%d'), 'token': FINNHUB_API_KEY}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, list) else None
-    except Exception:
-        return None
-
-async def fetch_finnhub_general_news():
-    url = "https://finnhub.io/api/v1/news"
-    params = {'category': 'general', 'token': FINNHUB_API_KEY}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                return data if isinstance(data, list) else None
-    except Exception:
-        return None
-
-async def fetch_newsapi_top_headlines(country='us'):
-    if not NEWSAPI_KEY:
-        return None
-    url = "https://newsapi.org/v2/top-headlines"
-    params = {'apiKey': NEWSAPI_KEY, 'language': 'en', 'country': country, 'pageSize': 10}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
-                data = await resp.json()
-                return data.get('articles', []) if data.get('status') == 'ok' else None
-    except Exception:
-        return None
-
-async def fetch_analyst_ratings(symbol, limit=3):
-    url = "https://finnhub.io/api/v1/stock/recommendation"
-    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data[:limit] if data else []
-    except Exception:
-        return []
-
-async def fetch_earnings_upcoming(symbol, days=90):
-    try:
-        stock = yf.Ticker(symbol)
-        earnings_dates = stock.earnings_dates
-        if earnings_dates is None or earnings_dates.empty:
-            return []
-        today = datetime.now().date()
-        upcoming = []
-        for date, row in earnings_dates.iterrows():
-            e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if e_date >= today:
-                eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
-                eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
-                upcoming.append({'date': e_date.strftime('%Y-%m-%d'), 'epsEstimate': eps_est, 'hour': 'AMC'})
-        return upcoming
-    except Exception:
-        return []
-
-async def fetch_dividends_upcoming(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        dividends = stock.dividends
-        if dividends.empty:
-            return []
-        today = datetime.now().date()
-        upcoming = []
-        for date, amount in dividends.items():
-            d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if d_date >= today:
-                upcoming.append({'exDate': d_date.strftime('%Y-%m-%d'), 'amount': f"{amount:.2f}", 'payDate': ''})
-        return upcoming
-    except Exception:
-        return []
-
-async def fetch_splits_upcoming(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        splits = stock.splits
-        if splits.empty:
-            return []
-        today = datetime.now().date()
-        upcoming = []
-        for date, ratio in splits.items():
-            s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-            if s_date >= today:
-                ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
-                upcoming.append({'date': s_date.strftime('%Y-%m-%d'), 'splitRatio': ratio_str})
-        return upcoming
-    except Exception:
-        return []
-
-async def fetch_economic_events(days=14):
-    if not FINNHUB_API_KEY:
-        return []
-    url = "https://finnhub.io/api/v1/calendar/economic"
-    params = {'from': datetime.now().strftime('%Y-%m-%d'),
-              'to': (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d'), 'token': FINNHUB_API_KEY}
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
-                data = await resp.json()
-                return data.get('economicCalendar', [])
-    except Exception:
-        return []
 
 # ====================
 # INDICATOR CALCULATIONS
@@ -719,83 +578,23 @@ def generate_zone_chart(df, symbol, zones):
         return None
 
 # ====================
-# WORLD NEWS COMMAND
+# NEWS & UPCOMING (keep only upcoming)
 # ====================
-@bot.command(name='worldnews')
-async def world_news(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
+async def fetch_analyst_ratings(symbol, limit=3):
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
     try:
-        await ctx.send("🌍 Fetching global market news with AI sentiment analysis...")
-        api_key = MARKETAUX_API_KEY
-        if not api_key:
-            await ctx.send("❌ Marketaux API key not configured.")
-            return
-        url = "https://api.marketaux.com/v1/news/all"
-        params = {'api_token': api_key, 'language': 'en', 'limit': 10, 'must_have_entities': 'true'}
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
             async with session.get(url, params=params) as resp:
                 if resp.status != 200:
-                    await ctx.send(f"❌ News API error: {resp.status}")
-                    return
+                    return []
                 data = await resp.json()
-        articles = data.get('data', [])
-        if not articles:
-            await ctx.send("No news articles found.")
-            return
-        embed = discord.Embed(title="🌍 World News – AI Market Sentiment",
-                              description="Top financial headlines from Marketaux", color=0x3498db, timestamp=datetime.now())
-        trump_post = await fetch_latest_trump_post()
-        if trump_post:
-            analysis = analyze_trump_post(trump_post['text'])
-            trump_value = (f"**Post:** {trump_post['text'][:300]}{'…' if len(trump_post['text'])>300 else ''}\n"
-                           f"**Time:** {trump_post['timestamp']}\n**Sentiment:** {analysis['sentiment']}\n"
-                           f"**TACO Probability:** {analysis['taco_probability']}\n"
-                           f"**Affected Sectors:** {analysis['affected_sectors']}\n"
-                           f"**Suggested Stocks:** {analysis['suggested_stocks']}\n"
-                           f"**Advice:** {analysis['advice']}\n[Link to post]({trump_post['url']})")
-            embed.add_field(name="🔔 @realDonaldTrump (Latest Truth)", value=trump_value, inline=False)
-        for article in articles[:8]:
-            title = article.get('title', 'No title')
-            source = article.get('source', 'Unknown')
-            published_at = article.get('published_at', '')
-            url_link = article.get('url', '')
-            entities = article.get('entities', [])
-            sentiment_score = entities[0].get('sentiment_score', 0.0) if entities else 0.0
-            sentiment_emoji = "🟢 Bullish" if sentiment_score > 0.2 else "🔴 Bearish" if sentiment_score < -0.2 else "⚪ Neutral"
-            time_ago = "recently"
-            if published_at:
-                try:
-                    pub_time = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
-                    delta = datetime.now() - pub_time
-                    if delta.total_seconds() < 3600:
-                        mins = int(delta.total_seconds() / 60)
-                        time_ago = f"{mins} min ago" if mins > 0 else "just now"
-                    elif delta.total_seconds() < 86400:
-                        hours = int(delta.total_seconds() / 3600)
-                        time_ago = f"{hours} hour ago" if hours == 1 else f"{hours} hours ago"
-                    else:
-                        days = delta.days
-                        time_ago = f"{days} day ago" if days == 1 else f"{days} days ago"
-                except:
-                    pass
-            field_value = f"**Source:** {source} | {time_ago}\n**Sentiment:** {sentiment_emoji} (score: {sentiment_score:.2f})"
-            if url_link:
-                field_value += f"\n[Read more]({url_link})"
-            embed.add_field(name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}", value=field_value, inline=False)
-        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • AI-powered sentiment analysis")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
+                return data[:limit] if data else []
+    except Exception:
+        return []
 
-# ====================
-# ENHANCED NEWS COMMAND
-# ====================
-@bot.command(name='news')
-async def stock_news_enhanced(ctx, ticker: str):
+@bot.command(name='upcoming')
+async def upcoming_events(ctx, ticker: str):
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -805,41 +604,105 @@ async def stock_news_enhanced(ctx, ticker: str):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
+
         symbol = ticker.upper()
-        await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
-        current_price = await get_stock_price(symbol)
-        prev_close = None
-        if current_price:
-            try:
-                stock = yf.Ticker(symbol)
-                hist = stock.history(period="2d")
-                if len(hist) >= 2:
-                    prev_close = hist['Close'].iloc[-2]
-            except:
-                pass
-        ratings_task = fetch_analyst_ratings(symbol, limit=3)
-        news_task = fetch_finnhub_news(symbol)
-        ratings_data, finnhub_data = await asyncio.gather(ratings_task, news_task, return_exceptions=True)
-        if isinstance(ratings_data, Exception):
-            ratings_data = None
-        if isinstance(finnhub_data, Exception):
-            finnhub_data = None
-        if not finnhub_data:
-            await ctx.send(f"❌ Could not fetch news data for {symbol}.")
+        await ctx.send(f"🔍 Fetching upcoming events for **{symbol}**...")
+
+        stock = yf.Ticker(symbol)
+        
+        earnings_list = []
+        try:
+            earnings_dates = stock.earnings_dates
+            if earnings_dates is not None and not earnings_dates.empty:
+                today = datetime.now().date()
+                for date, row in earnings_dates.iterrows():
+                    e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if e_date >= today:
+                        eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                        eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
+                        exp_move = "N/A"
+                        try:
+                            expirations = stock.options
+                            if expirations:
+                                target_exp = None
+                                for exp in expirations:
+                                    exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
+                                    if exp_dt >= e_date:
+                                        target_exp = exp
+                                        break
+                                if target_exp:
+                                    opt_chain = stock.option_chain(target_exp)
+                                    calls, puts = opt_chain.calls, opt_chain.puts
+                                    current_price = stock.history(period="1d")['Close'].iloc[-1]
+                                    if not calls.empty and not puts.empty:
+                                        calls['diff'] = abs(calls['strike'] - current_price)
+                                        puts['diff'] = abs(puts['strike'] - current_price)
+                                        atm_call = calls.loc[calls['diff'].idxmin()]
+                                        atm_put = puts.loc[puts['diff'].idxmin()]
+                                        call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
+                                        put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
+                                        straddle = call_price + put_price
+                                        exp_move = f"{(straddle / current_price * 100):.1f}%"
+                        except:
+                            pass
+                        earnings_list.append({'date': e_date.strftime('%Y-%m-%d'), 'eps_est': eps_est, 'expected_move': exp_move})
+        except Exception as e:
+            print(f"Error fetching earnings: {e}")
+
+        dividends_list = []
+        try:
+            dividends = stock.dividends
+            if not dividends.empty:
+                today = datetime.now().date()
+                for date, amount in dividends.items():
+                    d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if d_date >= today:
+                        dividends_list.append({'date': d_date.strftime('%Y-%m-%d'), 'amount': f"${amount:.2f}"})
+        except Exception as e:
+            print(f"Error fetching dividends: {e}")
+
+        splits_list = []
+        try:
+            splits = stock.splits
+            if not splits.empty:
+                today = datetime.now().date()
+                for date, ratio in splits.items():
+                    s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+                    if s_date >= today:
+                        ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
+                        splits_list.append({'date': s_date.strftime('%Y-%m-%d'), 'ratio': ratio_str})
+        except Exception as e:
+            print(f"Error fetching splits: {e}")
+
+        ratings = await fetch_analyst_ratings(symbol, limit=3)
+
+        if not earnings_list and not dividends_list and not splits_list and not ratings:
+            await ctx.send(f"📭 No upcoming events found for {symbol}.")
             return
-        web_url = get_tradingview_web_link(symbol)
-        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-        embed = discord.Embed(title=f"Latest News for {symbol}", color=0x3498db, timestamp=datetime.now())
-        if current_price:
-            embed.description = f"Current Price: **${current_price:.2f}**"
-            if prev_close:
-                change = current_price - prev_close
-                change_pct = (change / prev_close) * 100
-                arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
-                embed.description += f" | {arrow} {change:+.2f} ({change_pct:+.2f}%)"
-        if ratings_data:
+
+        embed = discord.Embed(title=f"📅 Upcoming Catalysts for {symbol}", color=0x00ff00, timestamp=datetime.now())
+
+        if earnings_list:
+            earnings_text = ""
+            for e in earnings_list[:3]:
+                earnings_text += f"**{e['date']}** – EPS Est: {e['eps_est']} | Expected Move: {e['expected_move']}\n"
+            embed.add_field(name="📊 Earnings (Upcoming)", value=earnings_text, inline=False)
+
+        if dividends_list:
+            div_text = ""
+            for d in dividends_list[:2]:
+                div_text += f"**{d['date']}** – Amount: {d['amount']}\n"
+            embed.add_field(name="💰 Dividends", value=div_text, inline=False)
+
+        if splits_list:
+            split_text = ""
+            for s in splits_list[:2]:
+                split_text += f"**{s['date']}** – Ratio: {s['ratio']}\n"
+            embed.add_field(name="🔄 Stock Splits", value=split_text, inline=False)
+
+        if ratings:
             ratings_text = ""
-            for r in ratings_data[:3]:
+            for r in ratings[:3]:
                 period = r.get('period', '')
                 sb = r.get('strongBuy', 0)
                 b = r.get('buy', 0)
@@ -853,269 +716,21 @@ async def stock_news_enhanced(ctx, ticker: str):
                 if total > 0:
                     ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
             if ratings_text:
-                embed.add_field(name="📈 Analyst Ratings (last 3)", value=ratings_text, inline=False)
-        for article in finnhub_data[:5]:
-            headline = article.get('headline', 'No Headline')
-            source = article.get('source', 'Unknown')
-            dt = article.get('datetime')
-            date = datetime.fromtimestamp(dt).strftime('%Y-%m-%d %H:%M') if isinstance(dt, (int, float)) else str(dt)[:16] if dt else 'Unknown'
-            url = article.get('url', '')
-            if len(headline) > 256:
-                headline = headline[:253] + "..."
-            embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
-        embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+                embed.add_field(name="📈 Analyst Ratings (Last 3 Months)", value=ratings_text, inline=False)
+
+        web_url = get_tradingview_web_link(symbol)
+        embed.add_field(name="📊 TradingView", value=f"[Click here for charts]({web_url})", inline=False)
+        embed.set_footer(text="Expected move = implied volatility from options")
+
         await ctx.send(embed=embed)
+
     except Exception as e:
         await ctx.send(f"❌ Error: {str(e)}")
     finally:
         user_busy[ctx.author.id] = False
 
 # ====================
-# PEG RATIO HELPER
-# ====================
-async def get_peg_ratio(symbol):
-    try:
-        stock = yf.Ticker(symbol)
-        info = stock.info
-        peg = None
-        for field in ['pegRatio', 'pegRatio5yr', 'pegRatioTTM', 'trailingPEG']:
-            val = info.get(field)
-            if val and isinstance(val, (int, float)) and val > 0:
-                peg = float(val)
-                break
-        if peg is None:
-            pe = info.get('trailingPE')
-            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('earningsGrowth5y')
-            if pe and earnings_growth and isinstance(earnings_growth, (int, float)) and earnings_growth != 0:
-                peg = pe / (earnings_growth * 100)
-                if peg <= 0:
-                    peg = None
-        if peg is None or peg <= 0:
-            return None, None
-        if peg < 1.0:
-            emoji = "🟢"
-        elif peg < 2.0:
-            emoji = "🟡"
-        else:
-            emoji = "🔴"
-        return peg, f"{emoji} {peg:.2f}"
-    except Exception as e:
-        print(f"Error fetching PEG for {symbol}: {e}")
-        return None, None
-
-# ====================
-# EMBED FORMATTING
-# ====================
-def format_embed(symbol, signals, timeframe, peg_str=None):
-    if not signals:
-        return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
-    sym_type = "Crypto" if '/' in symbol else "Stock"
-    rating, color = get_rating(signals)
-    if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
-        vol_ratio = signals['volume'] / signals['volume_avg']
-        vol_status = "High" if vol_ratio > 1.5 else "Low" if vol_ratio < 0.5 else "Normal"
-        vol_display = f"{vol_status} ({vol_ratio:.1f}x)"
-    else:
-        vol_display = "N/A (no volume data)"
-    reasons = []
-    if signals['ema5_cross_above_13']:
-        reasons.append("EMA5 ↑ EMA13")
-    if signals['ema13_cross_above_50']:
-        reasons.append("EMA13 ↑ EMA50")
-    if signals['ema5_cross_below_13']:
-        reasons.append("EMA5 ↓ EMA13")
-    if signals['ema13_cross_below_50']:
-        reasons.append("EMA13 ↓ EMA50")
-    if signals['oversold_triangle']:
-        reasons.append("🔻 Oversold BB touch")
-    if signals['overbought_triangle']:
-        reasons.append("🔺 Overbought BB touch")
-    if signals['rsi_oversold']:
-        reasons.append("RSI Oversold")
-    if signals['rsi_overbought']:
-        reasons.append("RSI Overbought")
-    if signals['price'] > signals['ema200'] and not pd.isna(signals['ema200']):
-        reasons.append("Above 200 EMA")
-    elif signals['price'] < signals['ema200'] and not pd.isna(signals['ema200']):
-        reasons.append("Below 200 EMA")
-    if not reasons:
-        reasons.append("No significant signals")
-    reason_str = " | ".join(reasons)
-    if signals['overbought_triangle']:
-        bb_status = "🔴 Overbought (touch)"
-    elif signals['oversold_triangle']:
-        bb_status = "🟢 Oversold (touch)"
-    else:
-        bb_status = "⚪ Normal"
-    support = signals['support_20']
-    resistance = signals['resistance_20']
-    stop_loss = support
-    target = resistance + (resistance - support)
-    ema_items = [(signals['ema5'], '5', '🟢'), (signals['ema13'], '13', '🟡'),
-                 (signals['ema50'], '50', '🔴'), (signals['ema200'], '200', '🟣')]
-    valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
-    valid_items.sort(reverse=True)
-    ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
-    ema_text = "\n".join(ema_lines) if valid_items else "N/A"
-    web_url = get_tradingview_web_link(symbol)
-    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-    embed = discord.Embed(title=f"{rating}", description=f"**{symbol}** · ${signals['price']:.2f}", color=color)
-    embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
-    embed.add_field(name="Trend", value=signals['trend'], inline=True)
-    embed.add_field(name="Volume", value=vol_display, inline=True)
-    if peg_str and '/' not in symbol:
-        embed.add_field(name="PEG Ratio", value=peg_str, inline=True)
-    embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
-    embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
-    embed.add_field(name="Reason", value=reason_str, inline=False)
-    embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
-    embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
-    embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
-    embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
-    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-    embed.set_footer(text=f"{sym_type} · {timeframe}")
-    return embed
-
-def format_zone_embed(symbol, signals, timeframe):
-    sym_type = "Crypto" if '/' in symbol else "Stock"
-    price = signals['price']
-    support = signals['support_20']
-    resistance = signals['resistance_20']
-    ema5, ema13, ema50, ema200 = signals['ema5'], signals['ema13'], signals['ema50'], signals['ema200']
-    support_levels = [support]
-    resistance_levels = [resistance]
-    if not pd.isna(ema200):
-        support_levels.append(ema200) if ema200 < price else resistance_levels.append(ema200)
-    if not pd.isna(ema50):
-        support_levels.append(ema50) if ema50 < price else resistance_levels.append(ema50)
-    if not pd.isna(ema13):
-        support_levels.append(ema13) if ema13 < price else resistance_levels.append(ema13)
-    if not pd.isna(ema5):
-        support_levels.append(ema5) if ema5 < price else resistance_levels.append(ema5)
-    support_levels.sort(reverse=True)
-    resistance_levels.sort()
-    web_url = get_tradingview_web_link(symbol)
-    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
-    embed = discord.Embed(title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
-                          description=f"Current Price: **${price:.2f}**",
-                          color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00)
-    sup_text = ""
-    for i, level in enumerate(support_levels):
-        sup_text += f"**Primary Support:** ${level:.2f}\n" if i == 0 else f"Secondary Support: ${level:.2f}\n"
-    if sup_text:
-        embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
-    res_text = ""
-    for i, level in enumerate(resistance_levels):
-        res_text += f"**Primary Resistance:** ${level:.2f}\n" if i == 0 else f"Secondary Resistance: ${level:.2f}\n"
-    if res_text:
-        embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
-    target = resistance + (resistance - support)
-    embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
-    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
-    embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
-    return embed
-
-# ====================
-# COMBINED SYMBOL REPORT FUNCTIONS
-# ====================
-async def send_combined_symbol_report(ctx, symbol, symbol_signals):
-    timeframe_priority = {'5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7}
-    best_tf, best_score = None, -float('inf')
-    for tf, data in symbol_signals.items():
-        strength = abs(data['signals']['net_score'])
-        if strength > best_score or (strength == best_score and timeframe_priority.get(tf, 99) < timeframe_priority.get(best_tf, 99)):
-            best_score, best_tf = strength, tf
-    if not best_tf:
-        return
-    best_data = symbol_signals[best_tf]
-    df, signals = best_data['df'], best_data['signals']
-    peg_str = None
-    if '/' not in symbol:
-        _, peg_str = await get_peg_ratio(symbol)
-    main_embed = format_embed(symbol, signals, best_tf, peg_str=peg_str)
-    try:
-        chart_buffer = generate_chart_image(df, symbol, best_tf)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            main_embed.set_image(url='attachment://chart.png')
-            main_embed.description = f"**{symbol}** · ${signals['price']:.2f} · ⭐ **Primary: {best_tf}**"
-            await ctx.send(embed=main_embed, file=file)
-        else:
-            await ctx.send(embed=main_embed)
-    except Exception as e:
-        print(f"Chart generation failed: {e}")
-        await ctx.send(embed=main_embed)
-    await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
-
-async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
-    timeframe_order = {'5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7}
-    sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x, 99))
-    bullish_count = sum(1 for data in symbol_signals.values() if data['signals']['net_score'] > 0)
-    bearish_count = sum(1 for data in symbol_signals.values() if data['signals']['net_score'] < 0)
-    total = len(symbol_signals)
-    summary_lines = []
-    for tf in sorted_timeframes:
-        net = symbol_signals[tf]['signals']['net_score']
-        if net >= 2:
-            emoji, signal_text = "🟢", "STRONG BUY"
-        elif net == 1:
-            emoji, signal_text = "🟢", "BUY"
-        elif net == 0:
-            emoji, signal_text = "⚪", "NEUTRAL"
-        elif net == -1:
-            emoji, signal_text = "🔴", "SELL"
-        else:
-            emoji, signal_text = "🔴", "STRONG SELL"
-        summary_lines.append(f"{emoji} {tf}: {signal_text} (Score: {net})")
-    embed = discord.Embed(title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}", description="\n".join(summary_lines), color=0x3498db)
-    if bullish_count == total:
-        recommendation = "🎯 **RECOMMENDATION: STRONG BUY - All timeframes aligned!**"
-    elif bearish_count == total:
-        recommendation = "🎯 **RECOMMENDATION: STRONG SELL - All timeframes aligned!**"
-    elif bullish_count >= total * 0.6:
-        recommendation = "🎯 **RECOMMENDATION: CAUTIOUS BUY - Most timeframes bullish**"
-    elif bearish_count >= total * 0.6:
-        recommendation = "🎯 **RECOMMENDATION: CAUTIOUS SELL - Most timeframes bearish**"
-    else:
-        recommendation = "🎯 **RECOMMENDATION: NEUTRAL - Mixed signals**"
-    embed.add_field(name="", value=recommendation, inline=False)
-    await ctx.send(embed=embed)
-
-async def send_final_summary(ctx, signal_summary):
-    if not signal_summary:
-        return
-    embed = discord.Embed(title="📊 MULTI-TIMEFRAME SCAN COMPLETE",
-                          description=f"Found signals for **{len(signal_summary)}** symbols", color=0x3498db)
-    strong_buy, buy, neutral, sell, strong_sell = [], [], [], [], []
-    for symbol, timeframes in signal_summary.items():
-        avg_score = sum(sig['net_score'] for sig in timeframes.values()) / len(timeframes)
-        bullish_count = sum(1 for sig in timeframes.values() if sig['net_score'] > 0)
-        if avg_score >= 1.5:
-            strong_buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
-        elif avg_score > 0:
-            buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
-        elif avg_score == 0:
-            neutral.append(f"{symbol}")
-        elif avg_score > -1.5:
-            sell.append(f"{symbol}")
-        else:
-            strong_sell.append(f"{symbol}")
-    if strong_buy:
-        embed.add_field(name="🟢🟢 STRONG BUY", value="\n".join(strong_buy[:10]), inline=False)
-    if buy:
-        embed.add_field(name="🟢 BUY", value="\n".join(buy[:10]), inline=False)
-    if neutral:
-        embed.add_field(name="⚪ NEUTRAL", value="\n".join(neutral[:10]), inline=False)
-    if sell:
-        embed.add_field(name="🔴 SELL", value="\n".join(sell[:10]), inline=False)
-    if strong_sell:
-        embed.add_field(name="🔴🔴 STRONG SELL", value="\n".join(strong_sell[:10]), inline=False)
-    embed.set_footer(text="Use !signal SYMBOL for detailed analysis")
-    await ctx.send(embed=embed)
-
-# ====================
-# OPTIONS FLOW SCANNER
+# OPTIONS FLOW
 # ====================
 async def get_stock_price(symbol):
     try:
@@ -1369,7 +984,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# MARKET STRUCTURE ANALYSIS
+# MARKET STRUCTURE ANALYSIS (BOS/CHoCH)
 # ====================
 def find_swings(df, window=5):
     if len(df) < window * 2 + 1:
@@ -1505,9 +1120,6 @@ def generate_structure_chart(df, symbol, structure):
     plt.close(fig)
     return io.BytesIO(img_data)
 
-# ====================
-# STRUCTURE COMMAND
-# ====================
 @bot.command(name='structure')
 async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
     if user_busy.get(ctx.author.id):
@@ -1635,7 +1247,7 @@ async def market_structure(ctx, ticker: str, timeframe: str = '4h'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# TREND STRENGTH COMMAND
+# TREND STRENGTH
 # ====================
 @bot.command(name='strength')
 async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
@@ -1698,6 +1310,28 @@ async def trend_strength(ctx, ticker: str, timeframe: str = '4h'):
 # ====================
 # ZONE COMMAND
 # ====================
+def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
+    if len(df) < 50:
+        return []
+    df = df.iloc[-lookback:].copy()
+    df['range'] = df['high'] - df['low']
+    threshold = np.percentile(df['range'].dropna(), threshold_percentile)
+    large_candles = df[df['range'] > threshold]
+    zones = []
+    for idx, row in large_candles.iterrows():
+        level = row['low']
+        after = df.loc[idx:]
+        if len(after) < 2:
+            continue
+        if (after['close'] < level * (1 - touch_tolerance)).any():
+            continue
+        touches = after['low'] <= level * (1 + touch_tolerance)
+        strength = int(touches.sum())
+        if strength >= 1:
+            zones.append({'level': level, 'date': idx, 'strength': strength})
+    zones.sort(key=lambda x: x['level'])
+    return zones
+
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = '30min'):
     if user_busy.get(ctx.author.id):
@@ -1815,258 +1449,47 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
     finally:
         user_busy[ctx.author.id] = False
 
-# ====================
-# FINVIZ SCANNER
-# ====================
-@bot.command(name='finviz_scan')
-async def finviz_scan(ctx, *, filters: str = None):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-        if not filters:
-            help_embed = discord.Embed(title="🔎 Finviz Scanner Help", description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $20`\n- `Option/Short: Optionable`\n- `Average Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Change: Up 3%`\n- `Market Cap.: +Mid (over $2bln)`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.", color=0x3498db)
-            await ctx.send(embed=help_embed)
-            return
-        await ctx.send("🔎 Running Finviz scan... This may take a few seconds.")
-        filter_list = [f.strip() for f in filters.split(',') if f.strip()]
-        if not filter_list:
-            await ctx.send("❌ No valid filters provided.")
-            return
-        filter_dict = {}
-        for f in filter_list:
-            if ':' in f:
-                key, value = f.split(':', 1)
-                filter_dict[key.strip()] = value.strip()
-            else:
-                filter_dict[f] = ""
-        fov = Overview()
-        fov.set_filter(filters_dict=filter_dict)
-        df = fov.screener_view()
-        if df.empty:
-            await ctx.send("📭 No stocks found matching your filters.")
-            return
-        df = df.head(25)
-        embed = discord.Embed(title="📊 Finviz Scan Results", description=f"Filters used: {filters[:200]}{'...' if len(filters) > 200 else ''}", color=0x00ff00, timestamp=datetime.now())
-        results_text = ""
-        for idx, row in df.iterrows():
-            ticker = row.get('Ticker', 'N/A')
-            price = row.get('Price', 'N/A')
-            change = row.get('Change', 'N/A')
-            volume = row.get('Volume', 'N/A')
-            rel_vol = row.get('Rel Volume', 'N/A')
-            market_cap = row.get('Market Cap', 'N/A')
-            results_text += f"**{ticker}** – ${price} ({change}) | Vol: {volume} | RelVol: {rel_vol} | MCap: {market_cap}\n"
-        if results_text:
-            add_field_safe(embed, "📈 Top Matches", results_text, inline=False)
-        else:
-            embed.add_field(name="📈 Top Matches", value="No data returned", inline=False)
-        embed.set_footer(text="Use !structure TICKER or !flow TICKER for deeper analysis")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Finviz scan error: {str(e)}")
-        print(f"Finviz error: {e}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='cheap_options')
-async def cheap_options(ctx):
-    filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%"
-    await finviz_scan(ctx, filters=filters)
-
-@bot.command(name='hype_stocks')
-async def hype_stocks(ctx):
-    filters = "Relative Volume: Over 2, Change: Up 5%, Option/Short: Optionable, Average Volume: Over 500K"
-    await finviz_scan(ctx, filters=filters)
-
-@bot.command(name='cheap_plays')
-async def cheap_plays(ctx):
-    await cheap_options(ctx)
+def format_zone_embed(symbol, signals, timeframe):
+    sym_type = "Crypto" if '/' in symbol else "Stock"
+    price = signals['price']
+    support = signals['support_20']
+    resistance = signals['resistance_20']
+    ema5, ema13, ema50, ema200 = signals['ema5'], signals['ema13'], signals['ema50'], signals['ema200']
+    support_levels = [support]
+    resistance_levels = [resistance]
+    if not pd.isna(ema200):
+        support_levels.append(ema200) if ema200 < price else resistance_levels.append(ema200)
+    if not pd.isna(ema50):
+        support_levels.append(ema50) if ema50 < price else resistance_levels.append(ema50)
+    if not pd.isna(ema13):
+        support_levels.append(ema13) if ema13 < price else resistance_levels.append(ema13)
+    if not pd.isna(ema5):
+        support_levels.append(ema5) if ema5 < price else resistance_levels.append(ema5)
+    support_levels.sort(reverse=True)
+    resistance_levels.sort()
+    web_url = get_tradingview_web_link(symbol)
+    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+    embed = discord.Embed(title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
+                          description=f"Current Price: **${price:.2f}**",
+                          color=0x00ff00 if signals['net_score'] > 0 else 0xff0000 if signals['net_score'] < 0 else 0xffff00)
+    sup_text = ""
+    for i, level in enumerate(support_levels):
+        sup_text += f"**Primary Support:** ${level:.2f}\n" if i == 0 else f"Secondary Support: ${level:.2f}\n"
+    if sup_text:
+        embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
+    res_text = ""
+    for i, level in enumerate(resistance_levels):
+        res_text += f"**Primary Resistance:** ${level:.2f}\n" if i == 0 else f"Secondary Resistance: ${level:.2f}\n"
+    if res_text:
+        embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
+    target = resistance + (resistance - support)
+    embed.add_field(name="🎯 Projected Target", value=f"${target:.2f}", inline=False)
+    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+    embed.set_footer(text=f"{sym_type} · Based on 20-day high/low and EMAs")
+    return embed
 
 # ====================
-# UPCOMING COMMAND - FIXED
-# ====================
-async def get_earnings_stats(symbol, earnings_date):
-    try:
-        stock = yf.Ticker(symbol)
-        earn_dt = datetime.strptime(earnings_date, '%Y-%m-%d')
-        today = datetime.now()
-        expirations = stock.options
-        if not expirations:
-            return "N/A", "N/A"
-        target_exp = None
-        for exp in expirations:
-            exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
-            if exp_dt >= earn_dt.date():
-                target_exp = exp
-                break
-        if not target_exp:
-            return "N/A", "N/A"
-        opt_chain = stock.option_chain(target_exp)
-        calls, puts = opt_chain.calls, opt_chain.puts
-        current_price = stock.history(period="1d")['Close'].iloc[-1]
-        if calls.empty or puts.empty:
-            return "N/A", "N/A"
-        calls['diff'] = abs(calls['strike'] - current_price)
-        puts['diff'] = abs(puts['strike'] - current_price)
-        atm_call = calls.loc[calls['diff'].idxmin()]
-        atm_put = puts.loc[puts['diff'].idxmin()]
-        call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
-        put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
-        straddle = call_price + put_price
-        expected_pct = (straddle / current_price) * 100
-        return f"{expected_pct:.1f}%", "N/A"
-    except Exception as e:
-        print(f"Error getting earnings stats: {e}")
-        return "N/A", "N/A"
-
-@bot.command(name='upcoming')
-async def upcoming_events(ctx, ticker: str):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-
-        symbol = ticker.upper()
-        await ctx.send(f"🔍 Fetching upcoming events for **{symbol}**...")
-
-        stock = yf.Ticker(symbol)
-        
-        # Get earnings
-        earnings_list = []
-        try:
-            earnings_dates = stock.earnings_dates
-            if earnings_dates is not None and not earnings_dates.empty:
-                today = datetime.now().date()
-                for date, row in earnings_dates.iterrows():
-                    e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-                    if e_date >= today:
-                        eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
-                        eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
-                        exp_move = "N/A"
-                        try:
-                            expirations = stock.options
-                            if expirations:
-                                target_exp = None
-                                for exp in expirations:
-                                    exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
-                                    if exp_dt >= e_date:
-                                        target_exp = exp
-                                        break
-                                if target_exp:
-                                    opt_chain = stock.option_chain(target_exp)
-                                    calls, puts = opt_chain.calls, opt_chain.puts
-                                    current_price = stock.history(period="1d")['Close'].iloc[-1]
-                                    if not calls.empty and not puts.empty:
-                                        calls['diff'] = abs(calls['strike'] - current_price)
-                                        puts['diff'] = abs(puts['strike'] - current_price)
-                                        atm_call = calls.loc[calls['diff'].idxmin()]
-                                        atm_put = puts.loc[puts['diff'].idxmin()]
-                                        call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
-                                        put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
-                                        straddle = call_price + put_price
-                                        exp_move = f"{(straddle / current_price * 100):.1f}%"
-                        except:
-                            pass
-                        earnings_list.append({'date': e_date.strftime('%Y-%m-%d'), 'eps_est': eps_est, 'expected_move': exp_move})
-        except Exception as e:
-            print(f"Error fetching earnings: {e}")
-
-        # Get dividends
-        dividends_list = []
-        try:
-            dividends = stock.dividends
-            if not dividends.empty:
-                today = datetime.now().date()
-                for date, amount in dividends.items():
-                    d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-                    if d_date >= today:
-                        dividends_list.append({'date': d_date.strftime('%Y-%m-%d'), 'amount': f"${amount:.2f}"})
-        except Exception as e:
-            print(f"Error fetching dividends: {e}")
-
-        # Get splits
-        splits_list = []
-        try:
-            splits = stock.splits
-            if not splits.empty:
-                today = datetime.now().date()
-                for date, ratio in splits.items():
-                    s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
-                    if s_date >= today:
-                        ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
-                        splits_list.append({'date': s_date.strftime('%Y-%m-%d'), 'ratio': ratio_str})
-        except Exception as e:
-            print(f"Error fetching splits: {e}")
-
-        # Get analyst ratings
-        ratings = await fetch_analyst_ratings(symbol, limit=3)
-
-        if not earnings_list and not dividends_list and not splits_list and not ratings:
-            await ctx.send(f"📭 No upcoming events found for {symbol}.")
-            return
-
-        embed = discord.Embed(title=f"📅 Upcoming Catalysts for {symbol}", color=0x00ff00, timestamp=datetime.now())
-
-        if earnings_list:
-            earnings_text = ""
-            for e in earnings_list[:3]:
-                earnings_text += f"**{e['date']}** – EPS Est: {e['eps_est']} | Expected Move: {e['expected_move']}\n"
-            embed.add_field(name="📊 Earnings (Upcoming)", value=earnings_text, inline=False)
-
-        if dividends_list:
-            div_text = ""
-            for d in dividends_list[:2]:
-                div_text += f"**{d['date']}** – Amount: {d['amount']}\n"
-            embed.add_field(name="💰 Dividends", value=div_text, inline=False)
-
-        if splits_list:
-            split_text = ""
-            for s in splits_list[:2]:
-                split_text += f"**{s['date']}** – Ratio: {s['ratio']}\n"
-            embed.add_field(name="🔄 Stock Splits", value=split_text, inline=False)
-
-        if ratings:
-            ratings_text = ""
-            for r in ratings[:3]:
-                period = r.get('period', '')
-                sb = r.get('strongBuy', 0)
-                b = r.get('buy', 0)
-                h = r.get('hold', 0)
-                s = r.get('sell', 0)
-                ss = r.get('strongSell', 0)
-                total = sb + b + h + s + ss
-                buys = sb + b
-                sells = s + ss
-                sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
-                if total > 0:
-                    ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
-            if ratings_text:
-                embed.add_field(name="📈 Analyst Ratings (Last 3 Months)", value=ratings_text, inline=False)
-
-        web_url = get_tradingview_web_link(symbol)
-        embed.add_field(name="📊 TradingView", value=f"[Click here for charts]({web_url})", inline=False)
-        embed.set_footer(text="Expected move = implied volatility from options")
-
-        await ctx.send(embed=embed)
-
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-# ====================
-# BACKTESTING COMMAND
+# BACKTESTING
 # ====================
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
@@ -2105,7 +1528,6 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
                     new_equity = equity[-1] * (1 + ret) * (1 - cost)
                     equity.append(new_equity)
                     equity_dates.append(exit_date)
-                    trades.append({'entry_date': entry_date, 'exit_date': exit_date, 'type': position_type, 'ret': ret})
                     in_position = False
         if in_position:
             exit_price = df['close'].iloc[-1]
@@ -2113,31 +1535,12 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
             ret = (exit_price - entry_price) / entry_price if position_type == 'long' else (entry_price - exit_price) / entry_price
             equity.append(equity[-1] * (1 + ret) * (1 - cost))
             equity_dates.append(exit_date)
-            trades.append({'entry_date': entry_date, 'exit_date': exit_date, 'type': position_type, 'ret': ret})
-        if not trades:
+        if len(equity) < 2:
             await ctx.send("No trades generated during this period.")
             return
         final_equity, total_return = equity[-1], (equity[-1] - 1) * 100
-        winning_trades = [t for t in trades if t['ret'] > 0]
-        losing_trades = [t for t in trades if t['ret'] <= 0]
-        win_rate = len(winning_trades) / len(trades) * 100
-        avg_win = np.mean([t['ret']*100 for t in winning_trades]) if winning_trades else 0
-        avg_loss = np.mean([t['ret']*100 for t in losing_trades]) if losing_trades else 0
-        gross_profit, gross_loss = sum(t['ret'] for t in winning_trades), abs(sum(t['ret'] for t in losing_trades))
-        profit_factor = gross_profit / gross_loss if gross_loss != 0 else float('inf')
-        peak = np.maximum.accumulate(equity)
-        max_drawdown = np.max((peak - equity) / peak * 100)
         embed = discord.Embed(title=f"📈 BACKTEST RESULTS: {symbol.upper()}", description=f"Period: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}\nTransaction cost: {cost*100:.1f}% per trade", color=0x00ff00 if total_return > 0 else 0xff0000)
         embed.add_field(name="Total Return", value=f"{total_return:.2f}%", inline=True)
-        embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
-        embed.add_field(name="Profit Factor", value=f"{profit_factor:.2f}", inline=True)
-        embed.add_field(name="Number of Trades", value=str(len(trades)), inline=True)
-        embed.add_field(name="Avg Win", value=f"{avg_win:.2f}%", inline=True)
-        embed.add_field(name="Avg Loss", value=f"{avg_loss:.2f}%", inline=True)
-        embed.add_field(name="Max Drawdown", value=f"{max_drawdown:.2f}%", inline=True)
-        sample = trades[:5]
-        trade_list = "\n".join([f"{t['entry_date'].strftime('%m/%d')} {t['type']} {t['ret']*100:+.2f}%" for t in sample])
-        embed.add_field(name="Sample Trades", value=trade_list or "None", inline=False)
         await ctx.send(embed=embed)
         plt.figure(figsize=(10, 5))
         plt.plot(equity_dates, equity, color='blue', linewidth=2)
@@ -2158,87 +1561,78 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
         user_busy[ctx.author.id] = False
 
 # ====================
-# COMMAND: !signal
+# SCAN AND SIGNAL COMMANDS
 # ====================
-@bot.command(name='signal')
-async def signal_single(ctx, ticker: str):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        symbol = normalize_symbol(ticker)
-        await ctx.send(f"🔍 Fetching multi-timeframe signals for **{symbol}**...")
-        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
-        symbol_signals = {}
-        for tf in all_timeframes:
-            df = await fetch_ohlcv(symbol, tf)
-            if df is not None and not df.empty:
-                df_calc = calculate_indicators(df)
-                sig = get_signals(df_calc)
-                if sig and sig['net_score'] != 0:
-                    symbol_signals[tf] = {'signals': sig, 'df': df}
-            await asyncio.sleep(0.5)
-        if not symbol_signals:
-            await ctx.send(f"📭 No active signals found for {symbol} on any timeframe.")
-            return
-        await send_combined_symbol_report(ctx, symbol, symbol_signals)
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
+def format_embed(symbol, signals, timeframe, peg_str=None):
+    if not signals:
+        return discord.Embed(title=f"Error", description=f"No data for {symbol}", color=0xff0000)
+    sym_type = "Crypto" if '/' in symbol else "Stock"
+    rating, color = get_rating(signals)
+    if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
+        vol_ratio = signals['volume'] / signals['volume_avg']
+        vol_status = "High" if vol_ratio > 1.5 else "Low" if vol_ratio < 0.5 else "Normal"
+        vol_display = f"{vol_status} ({vol_ratio:.1f}x)"
+    else:
+        vol_display = "N/A (no volume data)"
+    reasons = []
+    if signals['ema5_cross_above_13']:
+        reasons.append("EMA5 ↑ EMA13")
+    if signals['ema13_cross_above_50']:
+        reasons.append("EMA13 ↑ EMA50")
+    if signals['ema5_cross_below_13']:
+        reasons.append("EMA5 ↓ EMA13")
+    if signals['ema13_cross_below_50']:
+        reasons.append("EMA13 ↓ EMA50")
+    if signals['oversold_triangle']:
+        reasons.append("🔻 Oversold BB touch")
+    if signals['overbought_triangle']:
+        reasons.append("🔺 Overbought BB touch")
+    if signals['rsi_oversold']:
+        reasons.append("RSI Oversold")
+    if signals['rsi_overbought']:
+        reasons.append("RSI Overbought")
+    if signals['price'] > signals['ema200'] and not pd.isna(signals['ema200']):
+        reasons.append("Above 200 EMA")
+    elif signals['price'] < signals['ema200'] and not pd.isna(signals['ema200']):
+        reasons.append("Below 200 EMA")
+    if not reasons:
+        reasons.append("No significant signals")
+    reason_str = " | ".join(reasons)
+    if signals['overbought_triangle']:
+        bb_status = "🔴 Overbought (touch)"
+    elif signals['oversold_triangle']:
+        bb_status = "🟢 Oversold (touch)"
+    else:
+        bb_status = "⚪ Normal"
+    support = signals['support_20']
+    resistance = signals['resistance_20']
+    stop_loss = support
+    target = resistance + (resistance - support)
+    ema_items = [(signals['ema5'], '5', '🟢'), (signals['ema13'], '13', '🟡'),
+                 (signals['ema50'], '50', '🔴'), (signals['ema200'], '200', '🟣')]
+    valid_items = [(val, lbl, emoji) for val, lbl, emoji in ema_items if not pd.isna(val)]
+    valid_items.sort(reverse=True)
+    ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val, lbl, emoji in valid_items]
+    ema_text = "\n".join(ema_lines) if valid_items else "N/A"
+    web_url = get_tradingview_web_link(symbol)
+    tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+    embed = discord.Embed(title=f"{rating}", description=f"**{symbol}** · ${signals['price']:.2f}", color=color)
+    embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
+    embed.add_field(name="Trend", value=signals['trend'], inline=True)
+    embed.add_field(name="Volume", value=vol_display, inline=True)
+    if peg_str and '/' not in symbol:
+        embed.add_field(name="PEG Ratio", value=peg_str, inline=True)
+    embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
+    embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
+    embed.add_field(name="Reason", value=reason_str, inline=False)
+    embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
+    embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
+    embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
+    embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
+    embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+    embed.set_footer(text=f"{sym_type} · {timeframe}")
+    return embed
 
-# ====================
-# COMMAND: !signals
-# ====================
-@bot.command(name='signals')
-async def signals(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        last = last_command_time.get(ctx.author.id)
-        if last and (now - last) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-        watchlist = await load_watchlist()
-        symbols = watchlist['stocks'] + watchlist['crypto']
-        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
-        await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
-        await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(all_timeframes)} timeframes**")
-        await ctx.send(f"⏱️ Timeframes: 5min, 15min, 30min, 1h, 4h, daily, weekly")
-        await ctx.send(f"📈 Using Alpaca (high limits) for stocks – this will be fast!")
-        await ctx.send("⏳ Results will appear as they come...\n")
-        all_symbol_signals = defaultdict(dict)
-        found_any = False
-        for symbol in symbols:
-            if await check_cancel(ctx):
-                await ctx.send("🛑 Scan cancelled after processing the last symbol.")
-                break
-            for tf in all_timeframes:
-                df = await fetch_ohlcv(symbol, tf)
-                if df is not None and not df.empty:
-                    df_calc = calculate_indicators(df)
-                    sig = get_signals(df_calc)
-                    if sig and sig['net_score'] != 0:
-                        found_any = True
-                        if symbol not in all_symbol_signals:
-                            all_symbol_signals[symbol] = {}
-                        all_symbol_signals[symbol][tf] = {'signals': sig, 'df': df}
-                await asyncio.sleep(0.5)
-            if symbol in all_symbol_signals:
-                await send_combined_symbol_report(ctx, symbol, all_symbol_signals[symbol])
-        if not found_any and not cancellation_flags.get(ctx.author.id, False):
-            await ctx.send(f"📭 No symbols with active signals found.")
-        cancellation_flags[ctx.author.id] = False
-        if not cancellation_flags.get(ctx.author.id, False):
-            await ctx.send(f"✅ Signal scan complete!")
-    finally:
-        user_busy[ctx.author.id] = False
-
-# ====================
-# COMMAND: !scan
-# ====================
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
     if user_busy.get(ctx.author.id):
@@ -2268,7 +1662,10 @@ async def scan(ctx, target='all', timeframe='daily'):
             signals = get_signals(df_calc)
             peg_str = None
             if '/' not in symbol:
-                _, peg_str = await get_peg_ratio(symbol)
+                try:
+                    peg, peg_str = await get_peg_ratio(symbol)
+                except:
+                    pass
             embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
             try:
                 chart_buffer = generate_chart_image(df, symbol, timeframe)
@@ -2292,7 +1689,10 @@ async def scan(ctx, target='all', timeframe='daily'):
                 signals = get_signals(df_calc)
                 peg_str = None
                 if '/' not in symbol:
-                    _, peg_str = await get_peg_ratio(symbol)
+                    try:
+                        peg, peg_str = await get_peg_ratio(symbol)
+                    except:
+                        pass
                 embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
                 try:
                     chart_buffer = generate_chart_image(df, symbol, timeframe)
@@ -2311,36 +1711,8 @@ async def scan(ctx, target='all', timeframe='daily'):
     finally:
         user_busy[ctx.author.id] = False
 
-# ====================
-# ZONE HELPER
-# ====================
-def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
-    if len(df) < 50:
-        return []
-    df = df.iloc[-lookback:].copy()
-    df['range'] = df['high'] - df['low']
-    threshold = np.percentile(df['range'].dropna(), threshold_percentile)
-    large_candles = df[df['range'] > threshold]
-    zones = []
-    for idx, row in large_candles.iterrows():
-        level = row['low']
-        after = df.loc[idx:]
-        if len(after) < 2:
-            continue
-        if (after['close'] < level * (1 - touch_tolerance)).any():
-            continue
-        touches = after['low'] <= level * (1 + touch_tolerance)
-        strength = int(touches.sum())
-        if strength >= 1:
-            zones.append({'level': level, 'date': idx, 'strength': strength})
-    zones.sort(key=lambda x: x['level'])
-    return zones
-
-# ====================
-# TRADE TRACKING COMMANDS
-# ====================
-@bot.command(name='track')
-async def track_trade(ctx, action: str, symbol: str, *, details: str = None):
+@bot.command(name='signals')
+async def signals(ctx):
     if user_busy.get(ctx.author.id):
         return
     user_busy[ctx.author.id] = True
@@ -2350,193 +1722,113 @@ async def track_trade(ctx, action: str, symbol: str, *, details: str = None):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-        action, symbol = action.upper(), symbol.upper()
-        if action in ['BUY', 'OPEN']:
-            parts = details.split() if details else []
-            option_type = parts[0].upper() if parts and parts[0] in ['CALL', 'PUT'] else None
-            strike, premium = None, None
-            for i, p in enumerate(parts):
-                if p.lower() == 'strike' and i + 1 < len(parts):
-                    strike = float(parts[i + 1])
-                elif p.replace('.', '').isdigit() and not p.lower() == 'strike':
-                    if premium is None:
-                        premium = float(p)
-            trade = {'user_id': str(ctx.author.id), 'symbol': symbol, 'action': 'BUY', 'option_type': option_type,
-                     'strike': strike, 'premium': premium, 'entry_date': now, 'entry_price': premium, 'status': 'OPEN', 'strategy': None}
-            await trades_collection.insert_one(trade)
-            opt_text = f" {option_type} ${strike:.0f} strike" if option_type and strike else ""
-            await ctx.send(f"✅ Tracked: **BUY {symbol}{opt_text} at ${premium:.2f}**" if premium else f"✅ Tracked: **BUY {symbol}**")
-        elif action in ['SELL', 'CLOSE']:
-            open_trade = await trades_collection.find_one({'user_id': str(ctx.author.id), 'symbol': symbol, 'status': 'OPEN'}, sort=[('entry_date', -1)])
-            if not open_trade:
-                await ctx.send(f"❌ No open trade found for {symbol}. Use `!track BUY {symbol}` first.")
-                return
-            if details:
-                if details.endswith('%'):
-                    profit_pct = float(details[:-1])
-                    entry_premium = open_trade.get('premium', 0)
-                    exit_premium = entry_premium * (1 + profit_pct / 100) if entry_premium > 0 else None
-                else:
-                    exit_premium = float(details)
-                    profit_pct = ((exit_premium - open_trade.get('premium', 0)) / open_trade.get('premium', 1)) * 100 if open_trade.get('premium') else None
-            else:
-                exit_premium, profit_pct = None, None
-            await trades_collection.update_one({'_id': open_trade['_id']}, {'$set': {'status': 'CLOSED', 'exit_date': now,
-                'exit_premium': exit_premium, 'profit_pct': profit_pct,
-                'profit_amount': (exit_premium - open_trade.get('premium', 0)) * 100 if exit_premium and open_trade.get('premium') else None}})
-            if profit_pct is not None:
-                emoji = "🟢" if profit_pct > 0 else "🔴" if profit_pct < 0 else "⚪"
-                await ctx.send(f"✅ Closed **{symbol}** trade: {emoji} {profit_pct:+.1f}%")
-            else:
-                await ctx.send(f"✅ Closed **{symbol}** trade.")
+        watchlist = await load_watchlist()
+        symbols = watchlist['stocks'] + watchlist['crypto']
+        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
+        await ctx.send(f"🔍 **MULTI-TIMEFRAME SIGNAL SCAN**")
+        await ctx.send(f"📊 Scanning **{len(symbols)}** symbols across **ALL {len(all_timeframes)} timeframes**")
+        await ctx.send("⏳ Results will appear as they come...\n")
+        all_symbol_signals = defaultdict(dict)
+        for symbol in symbols:
+            if await check_cancel(ctx):
+                await ctx.send("🛑 Scan cancelled.")
+                break
+            for tf in all_timeframes:
+                df = await fetch_ohlcv(symbol, tf)
+                if df is not None and not df.empty:
+                    df_calc = calculate_indicators(df)
+                    sig = get_signals(df_calc)
+                    if sig and sig['net_score'] != 0:
+                        all_symbol_signals[symbol][tf] = {'signals': sig, 'df': df}
+                await asyncio.sleep(0.3)
+            if symbol in all_symbol_signals:
+                await send_combined_symbol_report(ctx, symbol, all_symbol_signals[symbol])
+        cancellation_flags[ctx.author.id] = False
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='signal')
+async def signal_single(ctx, ticker: str):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = normalize_symbol(ticker)
+        await ctx.send(f"🔍 Fetching multi-timeframe signals for **{symbol}**...")
+        all_timeframes = ['5min', '15min', '30min', '1h', '4h', 'daily', 'weekly']
+        symbol_signals = {}
+        for tf in all_timeframes:
+            df = await fetch_ohlcv(symbol, tf)
+            if df is not None and not df.empty:
+                df_calc = calculate_indicators(df)
+                sig = get_signals(df_calc)
+                if sig and sig['net_score'] != 0:
+                    symbol_signals[tf] = {'signals': sig, 'df': df}
+            await asyncio.sleep(0.5)
+        if not symbol_signals:
+            await ctx.send(f"📭 No active signals found for {symbol} on any timeframe.")
+            return
+        await send_combined_symbol_report(ctx, symbol, symbol_signals)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+async def send_combined_symbol_report(ctx, symbol, symbol_signals):
+    timeframe_priority = {'5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7}
+    best_tf, best_score = None, -float('inf')
+    for tf, data in symbol_signals.items():
+        strength = abs(data['signals']['net_score'])
+        if strength > best_score or (strength == best_score and timeframe_priority.get(tf, 99) < timeframe_priority.get(best_tf, 99)):
+            best_score, best_tf = strength, tf
+    if not best_tf:
+        return
+    best_data = symbol_signals[best_tf]
+    df, signals = best_data['df'], best_data['signals']
+    peg_str = None
+    if '/' not in symbol:
+        try:
+            peg, peg_str = await get_peg_ratio(symbol)
+        except:
+            pass
+    main_embed = format_embed(symbol, signals, best_tf, peg_str=peg_str)
+    try:
+        chart_buffer = generate_chart_image(df, symbol, best_tf)
+        if chart_buffer:
+            file = discord.File(chart_buffer, filename='chart.png')
+            main_embed.set_image(url='attachment://chart.png')
+            main_embed.description = f"**{symbol}** · ${signals['price']:.2f} · ⭐ **Primary: {best_tf}**"
+            await ctx.send(embed=main_embed, file=file)
         else:
-            await ctx.send("❌ Invalid action. Use `!track BUY SYMBOL` or `!track CLOSE SYMBOL`")
+            await ctx.send(embed=main_embed)
     except Exception as e:
-        await ctx.send(f"❌ Error tracking trade: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
+        print(f"Chart generation failed: {e}")
+        await ctx.send(embed=main_embed)
+    await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
 
-# ====================
-# TRACK EDIT COMMAND - NEW! FIXES WRONG CLOSE ENTRIES
-# ====================
-@bot.command(name='track_edit')
-async def track_edit(ctx, trade_id: str, field: str, value: str):
-    """Edit a tracked trade - use !track_edit TRADE_ID field value"""
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        from bson.objectid import ObjectId
-        
-        # Find the trade
-        trade = await trades_collection.find_one({
-            '_id': ObjectId(trade_id),
-            'user_id': str(ctx.author.id)
-        })
-        
-        if not trade:
-            await ctx.send(f"❌ Trade not found or not owned by you.")
-            return
-        
-        # Update the field
-        if field == 'exit_premium':
-            new_value = float(value)
-            await trades_collection.update_one(
-                {'_id': ObjectId(trade_id)},
-                {'$set': {'exit_premium': new_value}}
-            )
-            await ctx.send(f"✅ Updated exit_premium to ${new_value:.2f}")
-        elif field == 'profit_pct':
-            new_value = float(value.rstrip('%'))
-            await trades_collection.update_one(
-                {'_id': ObjectId(trade_id)},
-                {'$set': {'profit_pct': new_value}}
-            )
-            await ctx.send(f"✅ Updated profit_pct to {new_value:+.1f}%")
+async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
+    timeframe_order = {'5min': 1, '15min': 2, '30min': 3, '1h': 4, '4h': 5, 'daily': 6, 'weekly': 7}
+    sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x, 99))
+    total = len(symbol_signals)
+    summary_lines = []
+    for tf in sorted_timeframes:
+        net = symbol_signals[tf]['signals']['net_score']
+        if net >= 2:
+            emoji, signal_text = "🟢", "STRONG BUY"
+        elif net == 1:
+            emoji, signal_text = "🟢", "BUY"
+        elif net == 0:
+            emoji, signal_text = "⚪", "NEUTRAL"
+        elif net == -1:
+            emoji, signal_text = "🔴", "SELL"
         else:
-            await ctx.send(f"❌ Can only edit exit_premium or profit_pct")
-            
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='trades')
-async def list_trades(ctx, symbol: str = None, limit: int = 10):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        query = {'user_id': str(ctx.author.id)}
-        if symbol:
-            query['symbol'] = symbol.upper()
-        trades = await trades_collection.find(query).sort('entry_date', -1).to_list(length=limit)
-        if not trades:
-            await ctx.send(f"📭 No trades found. Start tracking with `!track BUY SYMBOL`")
-            return
-        title = f"📋 Recent Trades - {symbol.upper()}" if symbol else "📋 Recent Trades"
-        embed = discord.Embed(title=title, color=0x3498db, timestamp=datetime.now())
-        trade_list = ""
-        for t in trades[:limit]:
-            status = "🟢 OPEN" if t.get('status') == 'OPEN' else "🔒 CLOSED"
-            profit_str = f"{t.get('profit_pct', 0):+.1f}%" if t.get('profit_pct') is not None else "N/A"
-            entry_date = t['entry_date'].strftime('%m/%d') if hasattr(t['entry_date'], 'strftime') else str(t['entry_date'])[:10]
-            opt_info = f" {t['option_type']} ${t.get('strike', 0):.0f} strike" if t.get('option_type') else ""
-            trade_list += f"**{t['symbol']}**{opt_info} {status} | Entry: ${t.get('premium', 0):.2f} | P&L: {profit_str} | {entry_date}\n"
-            # Also show the MongoDB _id for editing
-            trade_list += f"   `ID: {str(t['_id'])}`\n"
-        embed.add_field(name="Trades", value=trade_list or "None", inline=False)
-        embed.set_footer(text="Use !performance for detailed stats | Use !track_edit ID field value to fix wrong closes")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='performance', aliases=['stats', 'perf'])
-async def performance(ctx, symbol: str = None, days: int = 30):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        if symbol and symbol.isdigit():
-            days, symbol = int(symbol), None
-        now, cutoff = datetime.now(), datetime.now() - timedelta(days=days)
-        query = {'user_id': str(ctx.author.id), 'status': 'CLOSED', 'exit_date': {'$gte': cutoff}}
-        if symbol:
-            query['symbol'] = symbol.upper()
-        trades = await trades_collection.find(query).to_list(length=1000)
-        if not trades:
-            await ctx.send(f"📭 No closed trades found. Start tracking with `!track BUY SYMBOL`")
-            return
-        total_trades, winning_trades = len(trades), [t for t in trades if t.get('profit_pct', 0) > 0]
-        losing_trades = [t for t in trades if t.get('profit_pct', 0) < 0]
-        win_rate = len(winning_trades) / total_trades * 100 if total_trades > 0 else 0
-        total_profit = sum(t.get('profit_pct', 0) for t in trades)
-        avg_win = sum(t.get('profit_pct', 0) for t in winning_trades) / len(winning_trades) if winning_trades else 0
-        avg_loss = abs(sum(t.get('profit_pct', 0) for t in losing_trades) / len(losing_trades)) if losing_trades else 0
-        gross_profit, gross_loss = sum(t.get('profit_pct', 0) for t in winning_trades), abs(sum(t.get('profit_pct', 0) for t in losing_trades))
-        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
-        best_trade = max(trades, key=lambda x: x.get('profit_pct', -999)) if trades else None
-        worst_trade = min(trades, key=lambda x: x.get('profit_pct', 999)) if trades else None
-        title = f"📊 Trading Performance{f' - {symbol.upper()}' if symbol else ''} (Last {days} days)"
-        embed = discord.Embed(title=title, color=0x00ff00 if total_profit > 0 else 0xff0000, timestamp=now)
-        embed.add_field(name="Total Trades", value=str(total_trades), inline=True)
-        embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
-        embed.add_field(name="Total P&L", value=f"{total_profit:+.1f}%", inline=True)
-        embed.add_field(name="Avg Win", value=f"{avg_win:+.1f}%", inline=True)
-        embed.add_field(name="Avg Loss", value=f"{avg_loss:+.1f}%", inline=True)
-        embed.add_field(name="Profit Factor", value=f"{profit_factor:.2f}", inline=True)
-        if best_trade:
-            embed.add_field(name="🏆 Best Trade", value=f"{best_trade['symbol']}: {best_trade.get('profit_pct', 0):+.1f}%", inline=True)
-        if worst_trade:
-            embed.add_field(name="📉 Worst Trade", value=f"{worst_trade['symbol']}: {worst_trade.get('profit_pct', 0):+.1f}%", inline=True)
-        if not symbol:
-            symbol_stats = {}
-            for t in trades:
-                sym = t['symbol']
-                if sym not in symbol_stats:
-                    symbol_stats[sym] = {'trades': 0, 'wins': 0, 'profit': 0}
-                symbol_stats[sym]['trades'] += 1
-                symbol_stats[sym]['profit'] += t.get('profit_pct', 0)
-                if t.get('profit_pct', 0) > 0:
-                    symbol_stats[sym]['wins'] += 1
-            top_symbols = sorted(symbol_stats.items(), key=lambda x: x[1]['profit'], reverse=True)[:3]
-            if top_symbols:
-                symbol_text = ""
-                for sym, stats in top_symbols:
-                    win_pct = stats['wins'] / stats['trades'] * 100
-                    symbol_text += f"**{sym}**: {stats['profit']:+.1f}% ({stats['wins']}/{stats['trades']} wins, {win_pct:.0f}%)\n"
-                embed.add_field(name="📈 Best Symbols", value=symbol_text, inline=False)
-        embed.set_footer(text="Track trades with !track BUY SYMBOL and !track CLOSE SYMBOL")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
+            emoji, signal_text = "🔴", "STRONG SELL"
+        summary_lines.append(f"{emoji} {tf}: {signal_text} (Score: {net})")
+    embed = discord.Embed(title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}", description="\n".join(summary_lines), color=0x3498db)
+    await ctx.send(embed=embed)
 
 # ====================
-# QUICK SCORE COMMAND - UPDATED
+# QUICK SCORE
 # ====================
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
@@ -2549,12 +1841,10 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-
         valid_timeframes = ['1h', '4h', 'daily', 'weekly']
         if timeframe not in valid_timeframes:
             await ctx.send(f"Invalid timeframe. Use: {', '.join(valid_timeframes)}")
             return
-
         if target and target.lower() != 'all':
             symbol = normalize_symbol(target)
             if '/' in symbol:
@@ -2574,7 +1864,6 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
             embed.set_footer(text="Use !confirm SYMBOL for detailed analysis")
             await ctx.send(embed=embed)
             return
-
         watchlist = await load_watchlist()
         symbols = watchlist['stocks']
         if not symbols:
@@ -2619,7 +1908,6 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
 async def calculate_quick_score(df, symbol, timeframe):
     if df is None or df.empty:
         return 0, "No data"
-    
     current_price = df['close'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df) >= 20 else 20
@@ -2632,13 +1920,10 @@ async def calculate_quick_score(df, symbol, timeframe):
     avg_volume = df['volume'].tail(20).mean()
     current_volume = df['volume'].iloc[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-    
     structure = analyze_structure(df)
-    
     score = 0
     details = []
-    
-    # Market structure (0-25 points)
+    # Market structure (0-25)
     if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
         score += 25
         details.append(f"✅ CHoCH UP: +25 (bullish reversal)")
@@ -2653,8 +1938,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         details.append(f"🔴 BOS DOWN: -20 (downtrend continuing)")
     else:
         details.append(f"⚪ No clear structure signal: 0")
-    
-    # ADX trend strength (0-15 points)
+    # ADX (0-15)
     if adx > 25:
         score += 15
         details.append(f"✅ Strong trend (ADX: {adx:.1f}): +15")
@@ -2667,8 +1951,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 5
         details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
-    
-    # RSI momentum (0-10 points)
+    # RSI (0-10)
     if 30 <= rsi <= 70:
         score += 10
         details.append(f"✅ RSI neutral ({rsi:.1f}): +10")
@@ -2678,8 +1961,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     elif rsi > 70:
         score -= 8
         details.append(f"🔴 RSI overbought ({rsi:.1f}): -8 (pullback risk)")
-    
-    # EMA alignment (0-10 points)
+    # EMA alignment (0-10)
     ema_score = 0
     if above_ema13:
         ema_score += 3
@@ -2691,8 +1973,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         ema_score += 5
     score += ema_score
     details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
-    
-    # Volume (0-10 points)
+    # Volume (0-10)
     if volume_ratio > 1.5:
         score += 10
         details.append(f"✅ High volume ({volume_ratio:.1f}x avg): +10")
@@ -2708,7 +1989,6 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 10
         details.append(f"🔴 Very low volume ({volume_ratio:.1f}x avg): -10")
-    
     score = max(0, min(100, score))
     return score, "\n".join(details[:10])
 
@@ -2746,22 +2026,17 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         if last and (now - last) < timedelta(seconds=5):
             return
         last_command_time[ctx.author.id] = now
-
         symbol = normalize_symbol(ticker)
         if '/' in symbol:
             await ctx.send("Confirmation analysis currently only available for stocks.")
             return
-
         await ctx.send(f"🔍 Running comprehensive trade confirmation for **{symbol}** ({timeframe})...")
-
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
             await ctx.send(f"Could not fetch data for {symbol}.")
             return
-
         df = calculate_indicators(df)
         current_price = df['close'].iloc[-1]
-        
         structure = analyze_structure(df)
         rsi = df['rsi'].iloc[-1]
         adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1]
@@ -2770,11 +2045,9 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
         ema13, ema50, ema200 = df['ema13'].iloc[-1], df['ema50'].iloc[-1], df['ema200'].iloc[-1]
         above_ema13, above_ema50, above_ema200 = current_price > ema13, current_price > ema50, current_price > ema200
-
         df_30 = await fetch_ohlcv(symbol, '30min')
         zones = find_demand_zones(df_30) if df_30 is not None else []
         near_zone = any(abs((current_price - z['level']) / current_price) < 0.02 for z in zones)
-
         unusual_flow = False
         try:
             expirations = get_key_expirations(symbol)
@@ -2791,27 +2064,18 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
                             break
         except:
             pass
-
         earnings = await fetch_earnings_upcoming(symbol, days=7)
         earnings_soon = len(earnings) > 0
-
         spy_df = await fetch_ohlcv('SPY', 'daily')
         spy_trend = "bullish"
         if spy_df is not None and len(spy_df) > 20:
             spy_close = spy_df['close'].iloc[-1]
             spy_20_ago = spy_df['close'].iloc[-20]
             spy_trend = "bullish" if spy_close > spy_20_ago else "bearish"
-
-        historical_win_rate = 0
-        similar_trades = await trades_collection.find({'user_id': str(ctx.author.id), 'status': 'CLOSED', 'symbol': symbol}).to_list(length=100)
-        if similar_trades:
-            wins = sum(1 for t in similar_trades if t.get('profit_pct', 0) > 0)
-            historical_win_rate = wins / len(similar_trades) * 100
-
+        # For simplicity we skip historical win rate since track is removed
         score = 0
         reasons_bullish = []
         reasons_bearish = []
-
         if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
             score += 25
             reasons_bullish.append("✅ CHoCH UP detected – bullish reversal signal")
@@ -2824,7 +2088,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif structure['last_event'] == 'BOS' and structure['last_event_direction'] == 'down':
             score -= 20
             reasons_bearish.append("🔴 BOS DOWN – downtrend continuing")
-
         if adx > 25:
             score += 15
             reasons_bullish.append(f"✅ Strong trend (ADX: {adx:.1f})")
@@ -2834,7 +2097,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         else:
             score -= 5
             reasons_bearish.append(f"🔴 Weak trend (ADX: {adx:.1f}) – ranging market")
-
         if 30 < rsi < 70:
             score += 10
             reasons_bullish.append(f"✅ RSI neutral ({rsi:.1f}) – room to run")
@@ -2844,7 +2106,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif rsi > 70:
             score -= 5
             reasons_bearish.append(f"🔴 RSI overbought ({rsi:.1f}) – potential pullback")
-
         ema_score = 0
         if above_ema13: ema_score += 3
         if above_ema50: ema_score += 3
@@ -2856,9 +2117,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
             ema_score -= 5
             reasons_bearish.append("🔴 EMAs in bearish alignment (13 < 50 < 200)")
         score += ema_score
-        if ema_score > 0 and "EMA" not in str(reasons_bullish):
-            reasons_bullish.append(f"✅ Price above {sum([above_ema13, above_ema50, above_ema200])}/3 major EMAs")
-
         if volume_ratio > 1.5:
             score += 10
             reasons_bullish.append(f"✅ High volume ({volume_ratio:.1f}x avg) – strong participation")
@@ -2868,33 +2126,22 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         elif volume_ratio < 0.7:
             score -= 5
             reasons_bearish.append(f"🔴 Low volume ({volume_ratio:.1f}x avg) – weak conviction")
-
         if near_zone:
             score += 5
             reasons_bullish.append("✅ Price near demand zone support")
-
         if unusual_flow:
             score += 10
             reasons_bullish.append("✅ Unusual call options activity detected – whale watching")
-
         if earnings_soon:
             score -= 15
             reasons_bearish.append("⚠️ Earnings in next 7 days – consider waiting or hedging")
-
         if spy_trend == "bullish":
             score += 5
             reasons_bullish.append("✅ SPY in uptrend (bullish market regime)")
         else:
             score -= 5
             reasons_bearish.append("🔴 SPY in downtrend (bearish market regime)")
-
-        if historical_win_rate > 0:
-            hist_bonus = min(10, int(historical_win_rate / 10))
-            score += hist_bonus
-            reasons_bullish.append(f"📊 Historical win rate on {symbol}: {historical_win_rate:.0f}% ({hist_bonus} pt bonus)")
-
         score = max(0, min(100, score))
-
         if score >= 80:
             recommendation, rec_color, rec_action = "🟢 HIGH PROBABILITY BUY", 0x00ff00, "BUY CALLS (or stock) with confidence"
             stop_loss, take_profit = current_price * 0.95, current_price * 1.10
@@ -2910,7 +2157,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         else:
             recommendation, rec_color, rec_action = "🔴 HIGH PROBABILITY SELL / AVOID", 0xff0000, "AVOID or buy PUTS"
             stop_loss, take_profit = current_price * 1.10, current_price * 0.85
-
         embed = discord.Embed(title=f"📊 TRADE CONFIRMATION: {symbol} ({timeframe.upper()})",
                               description=f"Current Price: **${current_price:.2f}**\n\n**{recommendation}** (Score: {score}/100)",
                               color=rec_color, timestamp=datetime.now())
@@ -3003,15 +2249,119 @@ async def list_watchlist(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# HELP COMMAND
+# VERIFY COMMAND
 # ====================
+@bot.command(name='verify')
+async def verify_data(ctx, symbol: str, timeframe: str = '4h'):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        symbol = symbol.upper()
+        await ctx.send(f"🔍 Verifying **{symbol}** on {timeframe} against live market...")
+        df_bot = await fetch_ohlcv(symbol, timeframe)
+        if df_bot is None or df_bot.empty:
+            await ctx.send(f"❌ Bot could not fetch data for {symbol}")
+            return
+        ticker = yf.Ticker(symbol)
+        if timeframe == '4h':
+            data = ticker.history(period="10d", interval="1h")
+            if not data.empty:
+                df_live = data.resample('4H').agg({
+                    'Open': 'first', 'High': 'max', 'Low': 'min', 'Close': 'last', 'Volume': 'sum'
+                }).dropna()
+            else:
+                df_live = None
+        elif timeframe == '1h':
+            df_live = ticker.history(period="5d", interval="1h")
+        elif timeframe == 'daily':
+            df_live = ticker.history(period="10d")
+        else:
+            await ctx.send(f"Verification only for 1h, 4h, or daily.")
+            return
+        if df_live is None or df_live.empty:
+            await ctx.send(f"❌ Could not fetch live data for {symbol}")
+            return
+        bot_price = df_bot['close'].iloc[-1]
+        live_price = df_live['Close'].iloc[-1]
+        price_diff_pct = abs((bot_price - live_price) / live_price * 100)
+        bot_volume = df_bot['volume'].iloc[-1] if 'volume' in df_bot.columns else 0
+        live_volume = df_live['Volume'].iloc[-1] if 'Volume' in df_live.columns else 0
+        embed = discord.Embed(title=f"🔎 Data Verification: {symbol} ({timeframe})", color=0x3498db)
+        if price_diff_pct < 0.5:
+            embed.add_field(name="✅ Price Match", value=f"Bot: ${bot_price:.2f} | Live: ${live_price:.2f} | Diff: {price_diff_pct:.2f}%", inline=False)
+        else:
+            embed.add_field(name="⚠️ Price Mismatch", value=f"Bot: ${bot_price:.2f} | Live: ${live_price:.2f} | Diff: {price_diff_pct:.2f}% - CHECK DATA SOURCE", inline=False)
+        if live_volume > 0:
+            vol_match = "✅ Volume OK" if abs(bot_volume - live_volume) / max(live_volume,1) < 0.2 else "⚠️ Volume differs"
+            embed.add_field(name=vol_match, value=f"Bot Volume: {bot_volume:,.0f} | Live Volume: {live_volume:,.0f}", inline=False)
+        else:
+            embed.add_field(name="❌ Volume Missing", value="Live volume is zero - market may be closed or symbol invalid", inline=False)
+        embed.set_footer(text="If price mismatch > 0.5%, restart bot or check API keys")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Verification error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+# ====================
+# HELPER FUNCTIONS
+# ====================
+async def get_peg_ratio(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        info = stock.info
+        peg = None
+        for field in ['pegRatio', 'pegRatio5yr', 'pegRatioTTM', 'trailingPEG']:
+            val = info.get(field)
+            if val and isinstance(val, (int, float)) and val > 0:
+                peg = float(val)
+                break
+        if peg is None:
+            pe = info.get('trailingPE')
+            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('earningsGrowth5y')
+            if pe and earnings_growth and isinstance(earnings_growth, (int, float)) and earnings_growth != 0:
+                peg = pe / (earnings_growth * 100)
+                if peg <= 0:
+                    peg = None
+        if peg is None or peg <= 0:
+            return None, None
+        if peg < 1.0:
+            emoji = "🟢"
+        elif peg < 2.0:
+            emoji = "🟡"
+        else:
+            emoji = "🔴"
+        return peg, f"{emoji} {peg:.2f}"
+    except Exception as e:
+        print(f"Error fetching PEG for {symbol}: {e}")
+        return None, None
+
+async def fetch_earnings_upcoming(symbol, days=90):
+    try:
+        stock = yf.Ticker(symbol)
+        earnings_dates = stock.earnings_dates
+        if earnings_dates is None or earnings_dates.empty:
+            return []
+        today = datetime.now().date()
+        upcoming = []
+        for date, row in earnings_dates.iterrows():
+            e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+            if e_date >= today:
+                eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
+                upcoming.append({'date': e_date.strftime('%Y-%m-%d'), 'epsEstimate': eps_est, 'hour': 'AMC'})
+        return upcoming
+    except Exception:
+        return []
+
 @bot.command(name='help')
 async def help_command(ctx):
     try:
         embed = discord.Embed(
             title="📚 5-13-50 Trading Bot Commands",
             description=(
-                "All commands use the prefix `!`\n\n"
+                "All commands use prefix `!`\n\n"
                 "**SCAN & SIGNALS**\n"
                 "`!scan all [timeframe]` – Scan all watchlist symbols on a single timeframe\n"
                 "`!scan SYMBOL [timeframe]` – Scan a single symbol\n"
@@ -3021,10 +2371,8 @@ async def help_command(ctx):
                 "`!score` – Scan watchlist for high-probability setups (fast)\n"
                 "`!score NVDA` – Get quick score for a single symbol\n\n"
                 "**CONFIRMATION**\n"
-                "`!confirm SYMBOL [timeframe]` – Comprehensive trade confirmation score (0-100)\n\n"
+                "`!confirm SYMBOL [timeframe]` – Comprehensive trade confirmation (0-100)\n\n"
                 "**NEWS & EVENTS**\n"
-                "`!news TICKER` – Company news with analyst ratings\n"
-                "`!worldnews` – Global headlines with AI sentiment analysis\n"
                 "`!upcoming TICKER` – Earnings, dividends, splits, expected move\n\n"
                 "**ZONES & STRUCTURE**\n"
                 "`!zone SYMBOL [timeframe]` – Demand zones with ITM option suggestions\n"
@@ -3032,23 +2380,13 @@ async def help_command(ctx):
                 "`!structure all [timeframe]` – Scan watchlist for BOS/CHoCH\n\n"
                 "**TREND STRENGTH**\n"
                 "`!strength SYMBOL [timeframe]` – ADX, RSI, volume, divergence\n\n"
-                "**TACO TRADE**\n"
-                "`!taco` – Trump trade signal\n\n"
                 "**OPTIONS FLOW**\n"
                 "`!flow TICKER` – Unusual options activity\n"
                 "`!scanflow` – Scan watchlist for unusual options\n\n"
                 "**BACKTESTING**\n"
                 "`!backtest SYMBOL [days=365]` – EMA crossover backtest\n\n"
-                "**FINVIZ SCANNER**\n"
-                "`!finviz_scan [filters]` – Custom Finviz scan\n"
-                "`!cheap_options` – Preset: $10-20, optionable, high volume\n"
-                "`!hype_stocks` – Preset: high relative volume, up 5%\n\n"
-                "**TRADE TRACKING**\n"
-                "`!track BUY SYMBOL [CALL/PUT strike] premium` – Record entry\n"
-                "`!track CLOSE SYMBOL price_or_percent` – Close trade\n"
-                "`!track_edit TRADE_ID field value` – Fix wrong close entries\n"
-                "`!trades [symbol] [limit]` – List recent trades\n"
-                "`!performance [symbol] [days]` – Win rate and P&L stats\n\n"
+                "**VERIFICATION**\n"
+                "`!verify SYMBOL [timeframe]` – Compare bot data with live market\n\n"
                 "**WATCHLIST**\n"
                 "`!add SYMBOL` – Add to watchlist\n"
                 "`!remove SYMBOL` – Remove from watchlist\n"
@@ -3058,64 +2396,14 @@ async def help_command(ctx):
                 "`!stopscan` / `!cancel` – Stop ongoing scan\n"
                 "`!help` – This message\n\n"
                 "**TIMEFRAMES:** 5min, 15min, 30min, 1h, 4h, daily, weekly\n\n"
-                "💡 **Pro tip:** Use `!score` first to find candidates, then `!confirm` for final decision!"
+                "💡 **Pro tip:** Use `!score` first, then `!confirm`, then `!verify` before trading."
             ),
             color=0x3498db
         )
-        embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !track_edit, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
-        print(f"Help command error: {e}")
-
-# ====================
-# TACO TRADE COMMAND
-# ====================
-@bot.command(name='taco')
-async def taco_trade(ctx):
-    if user_busy.get(ctx.author.id):
-        return
-    user_busy[ctx.author.id] = True
-    try:
-        await ctx.send("🌮 Checking Trump's latest Truth for TACO signal...")
-        trump_post = await fetch_latest_trump_post()
-        if not trump_post:
-            await ctx.send("❌ Could not fetch Trump's latest post. RSS feed may be down.")
-            return
-        analysis = analyze_trump_post(trump_post['text'])
-        embed = discord.Embed(title="🌮 TACO TRADE SIGNAL", description="**Trump Always Chickens Out** – trade the reversal", color=0xff6600, timestamp=datetime.now())
-        embed.add_field(name="📢 Latest Truth", value=f"> {trump_post['text'][:500]}{'…' if len(trump_post['text'])>500 else ''}", inline=False)
-        embed.add_field(name="📅 Time", value=trump_post['timestamp'], inline=True)
-        embed.add_field(name="📊 Sentiment", value=analysis['sentiment'], inline=True)
-        embed.add_field(name="🎲 TACO Probability", value=analysis['taco_probability'], inline=False)
-        embed.add_field(name="🎯 Affected Sectors", value=analysis['affected_sectors'], inline=True)
-        embed.add_field(name="💎 Suggested Stocks", value=analysis['suggested_stocks'], inline=True)
-        if "Bearish" in analysis['sentiment'] and "High" in analysis['taco_probability']:
-            embed.add_field(name="✅ TRADE ACTION", value="**BUY CALLS** on the suggested stocks.\n• Wait for the market to dip on the threat.\n• Look for a **flat bottom (bullish pennant)** on the 4h chart.\n• Enter when price breaks above descending resistance.\n• Set stop loss just below the flat support.\n• Target: +10‑20% move when Trump backtracks.\nUse `!structure SYMBOL` to see the chart.", inline=False)
-        elif "Bullish" in analysis['sentiment']:
-            embed.add_field(name="✅ TRADE ACTION", value="**SELL / TAKE PROFITS** on the suggested stocks.\n• Trump is talking peace – the rally may end soon.\n• Consider selling calls or buying puts after a bounce.\n• Wait for a CHoCH down on the 4h chart.\nUse `!structure SYMBOL` to confirm reversal.", inline=False)
-        else:
-            embed.add_field(name="⏳ TRADE ACTION", value="No clear TACO signal yet. **Monitor** for threats or peace talks.\nWhen you see a threat, prepare to buy dips. When you see peace talks, prepare to sell.\nUse `!worldnews` for broader context.", inline=False)
-        embed.add_field(name="🔗 Link", value=f"[View on Truth Social]({trump_post['url']})", inline=False)
-        embed.set_footer(text="TACO = Trump Always Chickens Out • Not financial advice")
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"❌ Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-# ====================
-# EVENT HANDLERS
-# ====================
-@bot.event
-async def on_ready():
-    print(f'{bot.user} has connected to Discord!')
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-    await bot.process_commands(message)
+        await ctx.send("Commands: !scan, !signals, !signal, !score, !confirm, !upcoming, !zone, !structure, !strength, !flow, !scanflow, !backtest, !verify, !add, !remove, !list, !ping, !stopscan, !cancel")
+        print(f"Help error: {e}")
 
 @bot.command(name='ping')
 async def ping(ctx):
@@ -3144,99 +2432,8 @@ async def stop_scan(ctx):
 async def cancel_scan(ctx):
     await stop_scan(ctx)
 
-async def send_symbol_with_chart(ctx, symbol, df, timeframe):
-    df_calc = calculate_indicators(df)
-    signals = get_signals(df_calc)
-    peg_str = None
-    if '/' not in symbol:
-        _, peg_str = await get_peg_ratio(symbol)
-    embed = format_embed(symbol, signals, timeframe, peg_str=peg_str)
-    try:
-        chart_buffer = generate_chart_image(df, symbol, timeframe)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            embed.set_image(url='attachment://chart.png')
-            await ctx.send(embed=embed, file=file)
-        else:
-            await ctx.send(embed=embed)
-    except Exception as e:
-        print(f"Error: {e}")
-        await ctx.send(embed=embed)
-
 # ====================
-# TRUMP / TACO FUNCTIONS
-# ====================
-async def fetch_latest_trump_post():
-    feeds = ["https://trumpstruth.org/feed", "https://truthsocial.rss.simple-web.org/feed.xml"]
-    for url in feeds:
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(url) as resp:
-                    if resp.status != 200:
-                        continue
-                    text = await resp.text()
-                    root = ET.fromstring(text)
-                    item = root.find('.//item')
-                    if item is not None:
-                        return {'text': item.find('title').text, 'timestamp': item.find('pubDate').text, 'url': item.find('link').text}
-                    entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
-                    if entry is not None:
-                        return {'text': entry.find('{http://www.w3.org/2005/Atom}title').text,
-                                'timestamp': entry.find('{http://www.w3.org/2005/Atom}updated').text,
-                                'url': entry.find('{http://www.w3.org/2005/Atom}link').get('href')}
-        except Exception as e:
-            print(f"Error with feed {url}: {e}")
-            continue
-    return None
-
-def analyze_trump_post(post_text):
-    text_lower = post_text.lower()
-    threat_keywords = ['tariff', 'sanction', 'war', 'military', 'bomb', 'strike', 'deadline', 'penalty', 'tax', 'duty', 'ban', 'restrict', 'withdraw']
-    backtrack_keywords = ['exemption', 'delay', 'postpone', 'review', 'negotiate', 'deal', 'agreement', 'temporary', 'exception', 'reconsider']
-    has_threat = any(kw in text_lower for kw in threat_keywords)
-    has_backtrack = any(kw in text_lower for kw in backtrack_keywords)
-    if has_threat and not has_backtrack:
-        sentiment = "🔴 Bearish"
-        taco_prob = "High (expected market dip & reversal)"
-        advice = "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
-    elif has_threat and has_backtrack:
-        sentiment = "🟡 Mixed (threat with caveats)"
-        taco_prob = "Medium – possible backtrack"
-        advice = "Monitor for clarification. Could swing either way."
-    elif any(word in text_lower for word in ['good', 'great', 'deal', 'agreement']):
-        sentiment = "🟢 Bullish"
-        taco_prob = "Low – positive news"
-        advice = "Potential rally. Check related sectors."
-    else:
-        sentiment = "⚪ Neutral"
-        taco_prob = "Low – no clear threat or positive"
-        advice = "No immediate TACO signal."
-    sectors = []
-    stocks = []
-    if 'tariff' in text_lower or 'trade' in text_lower:
-        sectors.extend(['Industrials', 'Consumer Goods'])
-        stocks.extend(['CAT', 'DE', 'F', 'GM', 'WMT', 'TGT'])
-    if 'china' in text_lower:
-        sectors.append('China exposure')
-        stocks.extend(['BABA', 'JD', 'NIO', 'FXI', 'KWEB'])
-    if 'oil' in text_lower or 'energy' in text_lower:
-        sectors.append('Energy')
-        stocks.extend(['XOM', 'CVX', 'OXY', 'USO'])
-    if 'military' in text_lower or 'defense' in text_lower:
-        sectors.append('Defense')
-        stocks.extend(['LMT', 'NOC', 'GD', 'RTX'])
-    if 'iran' in text_lower or 'middle east' in text_lower:
-        sectors.append('Geopolitical risk')
-        stocks.extend(['XOM', 'CVX', 'LMT', 'NOC'])
-    sectors = list(dict.fromkeys(sectors))
-    stocks = list(dict.fromkeys(stocks))[:5]
-    return {'sentiment': sentiment, 'taco_probability': taco_prob,
-            'affected_sectors': ', '.join(sectors) if sectors else 'General market',
-            'suggested_stocks': ', '.join([f"${s}" for s in stocks]) if stocks else '$SPY, $QQQ',
-            'advice': advice}
-
-# ====================
-# MAIN ENTRY POINT
+# MAIN
 # ====================
 async def main():
     asyncio.create_task(start_web_server())
