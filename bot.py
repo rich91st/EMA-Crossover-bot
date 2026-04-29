@@ -31,7 +31,7 @@ import matplotlib.colors as mcolors
 import mplfinance as mpf
 import io
 
-# Finviz integration (removed, but keep import to avoid error? Actually user removed command, but import may stay)
+# Finviz integration
 from finvizfinance.screener.overview import Overview
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
@@ -53,7 +53,7 @@ ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 client = motor.motor_asyncio.AsyncIOMotorClient(MONGODB_URI)
 db = client['trading_bot']
 watchlist_collection = db['watchlist']
-# trades_collection = db['trades']  # removed
+trades_collection = db['trades']
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -370,6 +370,132 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 # ====================
+# NEWS FETCHING FUNCTIONS
+# ====================
+async def fetch_finnhub_news(symbol):
+    url = "https://finnhub.io/api/v1/company-news"
+    params = {'symbol': symbol,
+              'from': (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d'),
+              'to': datetime.now().strftime('%Y-%m-%d'), 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+async def fetch_finnhub_general_news():
+    url = "https://finnhub.io/api/v1/news"
+    params = {'category': 'general', 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data if isinstance(data, list) else None
+    except Exception:
+        return None
+
+async def fetch_newsapi_top_headlines(country='us'):
+    if not NEWSAPI_KEY:
+        return None
+    url = "https://newsapi.org/v2/top-headlines"
+    params = {'apiKey': NEWSAPI_KEY, 'language': 'en', 'country': country, 'pageSize': 10}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+                return data.get('articles', []) if data.get('status') == 'ok' else None
+    except Exception:
+        return None
+
+async def fetch_analyst_ratings(symbol, limit=3):
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data[:limit] if data else []
+    except Exception:
+        return []
+
+async def fetch_earnings_upcoming(symbol, days=90):
+    try:
+        stock = yf.Ticker(symbol)
+        earnings_dates = stock.earnings_dates
+        if earnings_dates is None or earnings_dates.empty:
+            return []
+        today = datetime.now().date()
+        upcoming = []
+        for date, row in earnings_dates.iterrows():
+            e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+            if e_date >= today:
+                eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
+                upcoming.append({'date': e_date.strftime('%Y-%m-%d'), 'epsEstimate': eps_est, 'hour': 'AMC'})
+        return upcoming
+    except Exception:
+        return []
+
+async def fetch_dividends_upcoming(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        dividends = stock.dividends
+        if dividends.empty:
+            return []
+        today = datetime.now().date()
+        upcoming = []
+        for date, amount in dividends.items():
+            d_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+            if d_date >= today:
+                upcoming.append({'exDate': d_date.strftime('%Y-%m-%d'), 'amount': f"{amount:.2f}", 'payDate': ''})
+        return upcoming
+    except Exception:
+        return []
+
+async def fetch_splits_upcoming(symbol):
+    try:
+        stock = yf.Ticker(symbol)
+        splits = stock.splits
+        if splits.empty:
+            return []
+        today = datetime.now().date()
+        upcoming = []
+        for date, ratio in splits.items():
+            s_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+            if s_date >= today:
+                ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
+                upcoming.append({'date': s_date.strftime('%Y-%m-%d'), 'splitRatio': ratio_str})
+        return upcoming
+    except Exception:
+        return []
+
+async def fetch_economic_events(days=14):
+    if not FINNHUB_API_KEY:
+        return []
+    url = "https://finnhub.io/api/v1/calendar/economic"
+    params = {'from': datetime.now().strftime('%Y-%m-%d'),
+              'to': (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d'), 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get('economicCalendar', [])
+    except Exception:
+        return []
+
+# ====================
 # INDICATOR CALCULATIONS
 # ====================
 def calculate_indicators(df):
@@ -554,14 +680,157 @@ def generate_zone_chart(df, symbol, zones):
         return None
 
 # ====================
-# WORLD NEWS COMMAND - REMOVED
+# WORLD NEWS COMMAND
 # ====================
-# (worldnews command removed)
+@bot.command(name='worldnews')
+async def world_news(ctx):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send("🌍 Fetching global market news with AI sentiment analysis...")
+        api_key = MARKETAUX_API_KEY
+        if not api_key:
+            await ctx.send("❌ Marketaux API key not configured.")
+            return
+        url = "https://api.marketaux.com/v1/news/all"
+        params = {'api_token': api_key, 'language': 'en', 'limit': 10, 'must_have_entities': 'true'}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    await ctx.send(f"❌ News API error: {resp.status}")
+                    return
+                data = await resp.json()
+        articles = data.get('data', [])
+        if not articles:
+            await ctx.send("No news articles found.")
+            return
+        embed = discord.Embed(title="🌍 World News – AI Market Sentiment",
+                              description="Top financial headlines from Marketaux", color=0x3498db, timestamp=datetime.now())
+        trump_post = await fetch_latest_trump_post()
+        if trump_post:
+            analysis = analyze_trump_post(trump_post['text'])
+            trump_value = (f"**Post:** {trump_post['text'][:300]}{'…' if len(trump_post['text'])>300 else ''}\n"
+                           f"**Time:** {trump_post['timestamp']}\n**Sentiment:** {analysis['sentiment']}\n"
+                           f"**TACO Probability:** {analysis['taco_probability']}\n"
+                           f"**Affected Sectors:** {analysis['affected_sectors']}\n"
+                           f"**Suggested Stocks:** {analysis['suggested_stocks']}\n"
+                           f"**Advice:** {analysis['advice']}\n[Link to post]({trump_post['url']})")
+            embed.add_field(name="🔔 @realDonaldTrump (Latest Truth)", value=trump_value, inline=False)
+        for article in articles[:8]:
+            title = article.get('title', 'No title')
+            source = article.get('source', 'Unknown')
+            published_at = article.get('published_at', '')
+            url_link = article.get('url', '')
+            entities = article.get('entities', [])
+            sentiment_score = entities[0].get('sentiment_score', 0.0) if entities else 0.0
+            sentiment_emoji = "🟢 Bullish" if sentiment_score > 0.2 else "🔴 Bearish" if sentiment_score < -0.2 else "⚪ Neutral"
+            time_ago = "recently"
+            if published_at:
+                try:
+                    pub_time = datetime.fromisoformat(published_at.replace('Z', '+00:00'))
+                    delta = datetime.now() - pub_time
+                    if delta.total_seconds() < 3600:
+                        mins = int(delta.total_seconds() / 60)
+                        time_ago = f"{mins} min ago" if mins > 0 else "just now"
+                    elif delta.total_seconds() < 86400:
+                        hours = int(delta.total_seconds() / 3600)
+                        time_ago = f"{hours} hour ago" if hours == 1 else f"{hours} hours ago"
+                    else:
+                        days = delta.days
+                        time_ago = f"{days} day ago" if days == 1 else f"{days} days ago"
+                except:
+                    pass
+            field_value = f"**Source:** {source} | {time_ago}\n**Sentiment:** {sentiment_emoji} (score: {sentiment_score:.2f})"
+            if url_link:
+                field_value += f"\n[Read more]({url_link})"
+            embed.add_field(name=f"📰 {title[:100]}{'…' if len(title)>100 else ''}", value=field_value, inline=False)
+        embed.set_footer(text="🟢 Bullish | 🔴 Bearish | ⚪ Neutral • AI-powered sentiment analysis")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
-# ENHANCED NEWS COMMAND - REMOVED
+# ENHANCED NEWS COMMAND
 # ====================
-# (news command removed)
+@bot.command(name='news')
+async def stock_news_enhanced(ctx, ticker: str):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+        symbol = ticker.upper()
+        await ctx.send(f"🔍 Gathering market intelligence for **{symbol}**...")
+        current_price = await get_stock_price(symbol)
+        prev_close = None
+        if current_price:
+            try:
+                stock = yf.Ticker(symbol)
+                hist = stock.history(period="2d")
+                if len(hist) >= 2:
+                    prev_close = hist['Close'].iloc[-2]
+            except:
+                pass
+        ratings_task = fetch_analyst_ratings(symbol, limit=3)
+        news_task = fetch_finnhub_news(symbol)
+        ratings_data, finnhub_data = await asyncio.gather(ratings_task, news_task, return_exceptions=True)
+        if isinstance(ratings_data, Exception):
+            ratings_data = None
+        if isinstance(finnhub_data, Exception):
+            finnhub_data = None
+        if not finnhub_data:
+            await ctx.send(f"❌ Could not fetch news data for {symbol}.")
+            return
+        web_url = get_tradingview_web_link(symbol)
+        tv_field = f"📊 **View on TradingView:** [Click here]({web_url})"
+        embed = discord.Embed(title=f"Latest News for {symbol}", color=0x3498db, timestamp=datetime.now())
+        if current_price:
+            embed.description = f"Current Price: **${current_price:.2f}**"
+            if prev_close:
+                change = current_price - prev_close
+                change_pct = (change / prev_close) * 100
+                arrow = "🟢" if change > 0 else "🔴" if change < 0 else "⚪"
+                embed.description += f" | {arrow} {change:+.2f} ({change_pct:+.2f}%)"
+        if ratings_data:
+            ratings_text = ""
+            for r in ratings_data[:3]:
+                period = r.get('period', '')
+                sb = r.get('strongBuy', 0)
+                b = r.get('buy', 0)
+                h = r.get('hold', 0)
+                s = r.get('sell', 0)
+                ss = r.get('strongSell', 0)
+                total = sb + b + h + s + ss
+                buys = sb + b
+                sells = s + ss
+                sentiment = "🟢" if buys > sells else "🔴" if sells > buys else "⚪"
+                if total > 0:
+                    ratings_text += f"**{period}** – {buys} Buy / {h} Hold / {sells} Sell {sentiment}\n"
+            if ratings_text:
+                embed.add_field(name="📈 Analyst Ratings (last 3)", value=ratings_text, inline=False)
+        for article in finnhub_data[:5]:
+            headline = article.get('headline', 'No Headline')
+            source = article.get('source', 'Unknown')
+            dt = article.get('datetime')
+            date = datetime.fromtimestamp(dt).strftime('%Y-%m-%d %H:%M') if isinstance(dt, (int, float)) else str(dt)[:16] if dt else 'Unknown'
+            url = article.get('url', '')
+            if len(headline) > 256:
+                headline = headline[:253] + "..."
+            embed.add_field(name=f"{source} - {date}", value=f"[{headline}]({url})", inline=False)
+        embed.add_field(name="📊 TradingView", value=tv_field, inline=False)
+        embed.set_footer(text=f"Requested by {ctx.author.display_name}")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
 # PEG RATIO HELPER
@@ -1508,12 +1777,80 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
         user_busy[ctx.author.id] = False
 
 # ====================
-# FINVIZ SCANNER - REMOVED
+# FINVIZ SCANNER
 # ====================
-# (All finviz commands removed)
+@bot.command(name='finviz_scan')
+async def finviz_scan(ctx, *, filters: str = None):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+        if not filters:
+            help_embed = discord.Embed(title="🔎 Finviz Scanner Help", description="Use `!finviz_scan` followed by a comma‑separated list of filters.\n\n**Example:**\n`!finviz_scan Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%`\n\n**Available filters (common ones):**\n- `Price: $10 to $20`\n- `Option/Short: Optionable`\n- `Average Volume: Over 1M`\n- `Relative Volume: Over 1.5`\n- `Change: Up 3%`\n- `Market Cap.: +Mid (over $2bln)`\n- `EPS growth this year: Positive`\n- `RSI (14): Over 50`\n- `20-Day Simple Moving Average: Price above SMA20`\n\n**Tip:** You can combine many filters. The scanner will return up to 50 results.", color=0x3498db)
+            await ctx.send(embed=help_embed)
+            return
+        await ctx.send("🔎 Running Finviz scan... This may take a few seconds.")
+        filter_list = [f.strip() for f in filters.split(',') if f.strip()]
+        if not filter_list:
+            await ctx.send("❌ No valid filters provided.")
+            return
+        filter_dict = {}
+        for f in filter_list:
+            if ':' in f:
+                key, value = f.split(':', 1)
+                filter_dict[key.strip()] = value.strip()
+            else:
+                filter_dict[f] = ""
+        fov = Overview()
+        fov.set_filter(filters_dict=filter_dict)
+        df = fov.screener_view()
+        if df.empty:
+            await ctx.send("📭 No stocks found matching your filters.")
+            return
+        df = df.head(25)
+        embed = discord.Embed(title="📊 Finviz Scan Results", description=f"Filters used: {filters[:200]}{'...' if len(filters) > 200 else ''}", color=0x00ff00, timestamp=datetime.now())
+        results_text = ""
+        for idx, row in df.iterrows():
+            ticker = row.get('Ticker', 'N/A')
+            price = row.get('Price', 'N/A')
+            change = row.get('Change', 'N/A')
+            volume = row.get('Volume', 'N/A')
+            rel_vol = row.get('Rel Volume', 'N/A')
+            market_cap = row.get('Market Cap', 'N/A')
+            results_text += f"**{ticker}** – ${price} ({change}) | Vol: {volume} | RelVol: {rel_vol} | MCap: {market_cap}\n"
+        if results_text:
+            add_field_safe(embed, "📈 Top Matches", results_text, inline=False)
+        else:
+            embed.add_field(name="📈 Top Matches", value="No data returned", inline=False)
+        embed.set_footer(text="Use !structure TICKER or !flow TICKER for deeper analysis")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Finviz scan error: {str(e)}")
+        print(f"Finviz error: {e}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='cheap_options')
+async def cheap_options(ctx):
+    filters = "Price: $10 to $20, Option/Short: Optionable, Average Volume: Over 1M, Relative Volume: Over 1.5, Change: Up 3%"
+    await finviz_scan(ctx, filters=filters)
+
+@bot.command(name='hype_stocks')
+async def hype_stocks(ctx):
+    filters = "Relative Volume: Over 2, Change: Up 5%, Option/Short: Optionable, Average Volume: Over 500K"
+    await finviz_scan(ctx, filters=filters)
+
+@bot.command(name='cheap_plays')
+async def cheap_plays(ctx):
+    await cheap_options(ctx)
 
 # ====================
-# UPCOMING COMMAND
+# UPCOMING COMMAND - FIXED
 # ====================
 async def get_earnings_stats(symbol, earnings_date):
     try:
@@ -1634,18 +1971,6 @@ async def upcoming_events(ctx, ticker: str):
             print(f"Error fetching splits: {e}")
 
         # Get analyst ratings
-        async def fetch_analyst_ratings(symbol, limit=3):
-            url = "https://finnhub.io/api/v1/stock/recommendation"
-            params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.get(url, params=params) as resp:
-                        if resp.status != 200:
-                            return []
-                        data = await resp.json()
-                        return data[:limit] if data else []
-            except Exception:
-                return []
         ratings = await fetch_analyst_ratings(symbol, limit=3)
 
         if not earnings_list and not dividends_list and not splits_list and not ratings:
@@ -1973,8 +2298,156 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
     return zones
 
 # ====================
-# TRADE TRACKING COMMANDS - REMOVED
+# TRADE TRACKING COMMANDS
 # ====================
+@bot.command(name='track')
+async def track_trade(ctx, action: str, symbol: str, *, details: str = None):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        now = datetime.now()
+        last = last_command_time.get(ctx.author.id)
+        if last and (now - last) < timedelta(seconds=5):
+            return
+        last_command_time[ctx.author.id] = now
+        action, symbol = action.upper(), symbol.upper()
+        if action in ['BUY', 'OPEN']:
+            parts = details.split() if details else []
+            option_type = parts[0].upper() if parts and parts[0] in ['CALL', 'PUT'] else None
+            strike, premium = None, None
+            for i, p in enumerate(parts):
+                if p.lower() == 'strike' and i + 1 < len(parts):
+                    strike = float(parts[i + 1])
+                elif p.replace('.', '').isdigit() and not p.lower() == 'strike':
+                    if premium is None:
+                        premium = float(p)
+            trade = {'user_id': str(ctx.author.id), 'symbol': symbol, 'action': 'BUY', 'option_type': option_type,
+                     'strike': strike, 'premium': premium, 'entry_date': now, 'entry_price': premium, 'status': 'OPEN', 'strategy': None}
+            await trades_collection.insert_one(trade)
+            opt_text = f" {option_type} ${strike:.0f} strike" if option_type and strike else ""
+            await ctx.send(f"✅ Tracked: **BUY {symbol}{opt_text} at ${premium:.2f}**" if premium else f"✅ Tracked: **BUY {symbol}**")
+        elif action in ['SELL', 'CLOSE']:
+            open_trade = await trades_collection.find_one({'user_id': str(ctx.author.id), 'symbol': symbol, 'status': 'OPEN'}, sort=[('entry_date', -1)])
+            if not open_trade:
+                await ctx.send(f"❌ No open trade found for {symbol}. Use `!track BUY {symbol}` first.")
+                return
+            if details:
+                if details.endswith('%'):
+                    profit_pct = float(details[:-1])
+                    entry_premium = open_trade.get('premium', 0)
+                    exit_premium = entry_premium * (1 + profit_pct / 100) if entry_premium > 0 else None
+                else:
+                    exit_premium = float(details)
+                    profit_pct = ((exit_premium - open_trade.get('premium', 0)) / open_trade.get('premium', 1)) * 100 if open_trade.get('premium') else None
+            else:
+                exit_premium, profit_pct = None, None
+            await trades_collection.update_one({'_id': open_trade['_id']}, {'$set': {'status': 'CLOSED', 'exit_date': now,
+                'exit_premium': exit_premium, 'profit_pct': profit_pct,
+                'profit_amount': (exit_premium - open_trade.get('premium', 0)) * 100 if exit_premium and open_trade.get('premium') else None}})
+            if profit_pct is not None:
+                emoji = "🟢" if profit_pct > 0 else "🔴" if profit_pct < 0 else "⚪"
+                await ctx.send(f"✅ Closed **{symbol}** trade: {emoji} {profit_pct:+.1f}%")
+            else:
+                await ctx.send(f"✅ Closed **{symbol}** trade.")
+        else:
+            await ctx.send("❌ Invalid action. Use `!track BUY SYMBOL` or `!track CLOSE SYMBOL`")
+    except Exception as e:
+        await ctx.send(f"❌ Error tracking trade: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='trades')
+async def list_trades(ctx, symbol: str = None, limit: int = 10):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        query = {'user_id': str(ctx.author.id)}
+        if symbol:
+            query['symbol'] = symbol.upper()
+        trades = await trades_collection.find(query).sort('entry_date', -1).to_list(length=limit)
+        if not trades:
+            await ctx.send(f"📭 No trades found. Start tracking with `!track BUY SYMBOL`")
+            return
+        title = f"📋 Recent Trades - {symbol.upper()}" if symbol else "📋 Recent Trades"
+        embed = discord.Embed(title=title, color=0x3498db, timestamp=datetime.now())
+        trade_list = ""
+        for t in trades[:limit]:
+            status = "🟢 OPEN" if t.get('status') == 'OPEN' else "🔒 CLOSED"
+            profit_str = f"{t.get('profit_pct', 0):+.1f}%" if t.get('profit_pct') is not None else "N/A"
+            entry_date = t['entry_date'].strftime('%m/%d') if hasattr(t['entry_date'], 'strftime') else str(t['entry_date'])[:10]
+            opt_info = f" {t['option_type']} ${t.get('strike', 0):.0f} strike" if t.get('option_type') else ""
+            trade_list += f"**{t['symbol']}**{opt_info} {status} | Entry: ${t.get('premium', 0):.2f} | P&L: {profit_str} | {entry_date}\n"
+        embed.add_field(name="Trades", value=trade_list or "None", inline=False)
+        embed.set_footer(text="Use !performance for detailed stats | !performance NIO for symbol stats")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
+
+@bot.command(name='performance', aliases=['stats', 'perf'])
+async def performance(ctx, symbol: str = None, days: int = 30):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        if symbol and symbol.isdigit():
+            days, symbol = int(symbol), None
+        now, cutoff = datetime.now(), datetime.now() - timedelta(days=days)
+        query = {'user_id': str(ctx.author.id), 'status': 'CLOSED', 'exit_date': {'$gte': cutoff}}
+        if symbol:
+            query['symbol'] = symbol.upper()
+        trades = await trades_collection.find(query).to_list(length=1000)
+        if not trades:
+            await ctx.send(f"📭 No closed trades found. Start tracking with `!track BUY SYMBOL`")
+            return
+        total_trades, winning_trades = len(trades), [t for t in trades if t.get('profit_pct', 0) > 0]
+        losing_trades = [t for t in trades if t.get('profit_pct', 0) < 0]
+        win_rate = len(winning_trades) / total_trades * 100 if total_trades > 0 else 0
+        total_profit = sum(t.get('profit_pct', 0) for t in trades)
+        avg_win = sum(t.get('profit_pct', 0) for t in winning_trades) / len(winning_trades) if winning_trades else 0
+        avg_loss = abs(sum(t.get('profit_pct', 0) for t in losing_trades) / len(losing_trades)) if losing_trades else 0
+        gross_profit, gross_loss = sum(t.get('profit_pct', 0) for t in winning_trades), abs(sum(t.get('profit_pct', 0) for t in losing_trades))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+        best_trade = max(trades, key=lambda x: x.get('profit_pct', -999)) if trades else None
+        worst_trade = min(trades, key=lambda x: x.get('profit_pct', 999)) if trades else None
+        title = f"📊 Trading Performance{f' - {symbol.upper()}' if symbol else ''} (Last {days} days)"
+        embed = discord.Embed(title=title, color=0x00ff00 if total_profit > 0 else 0xff0000, timestamp=now)
+        embed.add_field(name="Total Trades", value=str(total_trades), inline=True)
+        embed.add_field(name="Win Rate", value=f"{win_rate:.1f}%", inline=True)
+        embed.add_field(name="Total P&L", value=f"{total_profit:+.1f}%", inline=True)
+        embed.add_field(name="Avg Win", value=f"{avg_win:+.1f}%", inline=True)
+        embed.add_field(name="Avg Loss", value=f"{avg_loss:+.1f}%", inline=True)
+        embed.add_field(name="Profit Factor", value=f"{profit_factor:.2f}", inline=True)
+        if best_trade:
+            embed.add_field(name="🏆 Best Trade", value=f"{best_trade['symbol']}: {best_trade.get('profit_pct', 0):+.1f}%", inline=True)
+        if worst_trade:
+            embed.add_field(name="📉 Worst Trade", value=f"{worst_trade['symbol']}: {worst_trade.get('profit_pct', 0):+.1f}%", inline=True)
+        if not symbol:
+            symbol_stats = {}
+            for t in trades:
+                sym = t['symbol']
+                if sym not in symbol_stats:
+                    symbol_stats[sym] = {'trades': 0, 'wins': 0, 'profit': 0}
+                symbol_stats[sym]['trades'] += 1
+                symbol_stats[sym]['profit'] += t.get('profit_pct', 0)
+                if t.get('profit_pct', 0) > 0:
+                    symbol_stats[sym]['wins'] += 1
+            top_symbols = sorted(symbol_stats.items(), key=lambda x: x[1]['profit'], reverse=True)[:3]
+            if top_symbols:
+                symbol_text = ""
+                for sym, stats in top_symbols:
+                    win_pct = stats['wins'] / stats['trades'] * 100
+                    symbol_text += f"**{sym}**: {stats['profit']:+.1f}% ({stats['wins']}/{stats['trades']} wins, {win_pct:.0f}%)\n"
+                embed.add_field(name="📈 Best Symbols", value=symbol_text, inline=False)
+        embed.set_footer(text="Track trades with !track BUY SYMBOL and !track CLOSE SYMBOL")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
 # QUICK SCORE COMMAND - UPDATED WITH FULL SCORING SYSTEM
@@ -2251,6 +2724,13 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
             spy_20_ago = spy_df['close'].iloc[-20]
             spy_trend = "bullish" if spy_close > spy_20_ago else "bearish"
 
+        # Historical win rate
+        historical_win_rate = 0
+        similar_trades = await trades_collection.find({'user_id': str(ctx.author.id), 'status': 'CLOSED', 'symbol': symbol}).to_list(length=100)
+        if similar_trades:
+            wins = sum(1 for t in similar_trades if t.get('profit_pct', 0) > 0)
+            historical_win_rate = wins / len(similar_trades) * 100
+
         # Calculate score
         score = 0
         reasons_bullish = []
@@ -2331,6 +2811,11 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
         else:
             score -= 5
             reasons_bearish.append("🔴 SPY in downtrend (bearish market regime)")
+
+        if historical_win_rate > 0:
+            hist_bonus = min(10, int(historical_win_rate / 10))
+            score += hist_bonus
+            reasons_bullish.append(f"📊 Historical win rate on {symbol}: {historical_win_rate:.0f}% ({hist_bonus} pt bonus)")
 
         score = max(0, min(100, score))
 
@@ -2461,19 +2946,32 @@ async def help_command(ctx):
                 "`!score NVDA` – Get quick score for a single symbol\n\n"
                 "**CONFIRMATION**\n"
                 "`!confirm SYMBOL [timeframe]` – Comprehensive trade confirmation score (0-100)\n\n"
+                "**NEWS & EVENTS**\n"
+                "`!news TICKER` – Company news with analyst ratings\n"
+                "`!worldnews` – Global headlines with AI sentiment analysis\n"
+                "`!upcoming TICKER` – Earnings, dividends, splits, expected move\n\n"
                 "**ZONES & STRUCTURE**\n"
                 "`!zone SYMBOL [timeframe]` – Demand zones with ITM option suggestions\n"
                 "`!structure SYMBOL [timeframe]` – BOS/CHoCH analysis with chart\n"
                 "`!structure all [timeframe]` – Scan watchlist for BOS/CHoCH\n\n"
                 "**TREND STRENGTH**\n"
                 "`!strength SYMBOL [timeframe]` – ADX, RSI, volume, divergence\n\n"
+                "**TACO TRADE**\n"
+                "`!taco` – Trump trade signal\n\n"
                 "**OPTIONS FLOW**\n"
                 "`!flow TICKER` – Unusual options activity\n"
                 "`!scanflow` – Scan watchlist for unusual options\n\n"
                 "**BACKTESTING**\n"
                 "`!backtest SYMBOL [days=365]` – EMA crossover backtest\n\n"
-                "**NEWS & EVENTS**\n"
-                "`!upcoming TICKER` – Earnings, dividends, splits, expected move\n\n"
+                "**FINVIZ SCANNER**\n"
+                "`!finviz_scan [filters]` – Custom Finviz scan\n"
+                "`!cheap_options` – Preset: $10-20, optionable, high volume\n"
+                "`!hype_stocks` – Preset: high relative volume, up 5%\n\n"
+                "**TRADE TRACKING**\n"
+                "`!track BUY SYMBOL [CALL/PUT strike] premium` – Record entry\n"
+                "`!track CLOSE SYMBOL price_or_percent` – Close trade\n"
+                "`!trades [symbol] [limit]` – List recent trades\n"
+                "`!performance [symbol] [days]` – Win rate and P&L stats\n\n"
                 "**WATCHLIST**\n"
                 "`!add SYMBOL` – Add to watchlist\n"
                 "`!remove SYMBOL` – Remove from watchlist\n"
@@ -2490,12 +2988,44 @@ async def help_command(ctx):
         embed.set_footer(text="Use !help for this menu")
         await ctx.send(embed=embed)
     except Exception as e:
-        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !upcoming, !zone, !structure, !strength, !flow, !scanflow, !backtest, !add, !remove, !list, !ping, !stopscan, !cancel")
+        await ctx.send("📚 Commands: !scan, !signals, !signal, !score, !confirm, !news, !worldnews, !upcoming, !zone, !structure, !strength, !taco, !finviz_scan, !cheap_options, !hype_stocks, !cheap_plays, !flow, !scanflow, !backtest, !track, !performance, !trades, !add, !remove, !list, !ping, !stopscan, !cancel")
         print(f"Help command error: {e}")
 
 # ====================
-# TACO TRADE COMMAND - REMOVED
+# TACO TRADE COMMAND
 # ====================
+@bot.command(name='taco')
+async def taco_trade(ctx):
+    if user_busy.get(ctx.author.id):
+        return
+    user_busy[ctx.author.id] = True
+    try:
+        await ctx.send("🌮 Checking Trump's latest Truth for TACO signal...")
+        trump_post = await fetch_latest_trump_post()
+        if not trump_post:
+            await ctx.send("❌ Could not fetch Trump's latest post. RSS feed may be down.")
+            return
+        analysis = analyze_trump_post(trump_post['text'])
+        embed = discord.Embed(title="🌮 TACO TRADE SIGNAL", description="**Trump Always Chickens Out** – trade the reversal", color=0xff6600, timestamp=datetime.now())
+        embed.add_field(name="📢 Latest Truth", value=f"> {trump_post['text'][:500]}{'…' if len(trump_post['text'])>500 else ''}", inline=False)
+        embed.add_field(name="📅 Time", value=trump_post['timestamp'], inline=True)
+        embed.add_field(name="📊 Sentiment", value=analysis['sentiment'], inline=True)
+        embed.add_field(name="🎲 TACO Probability", value=analysis['taco_probability'], inline=False)
+        embed.add_field(name="🎯 Affected Sectors", value=analysis['affected_sectors'], inline=True)
+        embed.add_field(name="💎 Suggested Stocks", value=analysis['suggested_stocks'], inline=True)
+        if "Bearish" in analysis['sentiment'] and "High" in analysis['taco_probability']:
+            embed.add_field(name="✅ TRADE ACTION", value="**BUY CALLS** on the suggested stocks.\n• Wait for the market to dip on the threat.\n• Look for a **flat bottom (bullish pennant)** on the 4h chart.\n• Enter when price breaks above descending resistance.\n• Set stop loss just below the flat support.\n• Target: +10‑20% move when Trump backtracks.\nUse `!structure SYMBOL` to see the chart.", inline=False)
+        elif "Bullish" in analysis['sentiment']:
+            embed.add_field(name="✅ TRADE ACTION", value="**SELL / TAKE PROFITS** on the suggested stocks.\n• Trump is talking peace – the rally may end soon.\n• Consider selling calls or buying puts after a bounce.\n• Wait for a CHoCH down on the 4h chart.\nUse `!structure SYMBOL` to confirm reversal.", inline=False)
+        else:
+            embed.add_field(name="⏳ TRADE ACTION", value="No clear TACO signal yet. **Monitor** for threats or peace talks.\nWhen you see a threat, prepare to buy dips. When you see peace talks, prepare to sell.\nUse `!worldnews` for broader context.", inline=False)
+        embed.add_field(name="🔗 Link", value=f"[View on Truth Social]({trump_post['url']})", inline=False)
+        embed.set_footer(text="TACO = Trump Always Chickens Out • Not financial advice")
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ Error: {str(e)}")
+    finally:
+        user_busy[ctx.author.id] = False
 
 # ====================
 # EVENT HANDLERS
@@ -2555,6 +3085,78 @@ async def send_symbol_with_chart(ctx, symbol, df, timeframe):
     except Exception as e:
         print(f"Error: {e}")
         await ctx.send(embed=embed)
+
+# ====================
+# TRUMP / TACO FUNCTIONS
+# ====================
+async def fetch_latest_trump_post():
+    feeds = ["https://trumpstruth.org/feed", "https://truthsocial.rss.simple-web.org/feed.xml"]
+    for url in feeds:
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(url) as resp:
+                    if resp.status != 200:
+                        continue
+                    text = await resp.text()
+                    root = ET.fromstring(text)
+                    item = root.find('.//item')
+                    if item is not None:
+                        return {'text': item.find('title').text, 'timestamp': item.find('pubDate').text, 'url': item.find('link').text}
+                    entry = root.find('.//{http://www.w3.org/2005/Atom}entry')
+                    if entry is not None:
+                        return {'text': entry.find('{http://www.w3.org/2005/Atom}title').text,
+                                'timestamp': entry.find('{http://www.w3.org/2005/Atom}updated').text,
+                                'url': entry.find('{http://www.w3.org/2005/Atom}link').get('href')}
+        except Exception as e:
+            print(f"Error with feed {url}: {e}")
+            continue
+    return None
+
+def analyze_trump_post(post_text):
+    text_lower = post_text.lower()
+    threat_keywords = ['tariff', 'sanction', 'war', 'military', 'bomb', 'strike', 'deadline', 'penalty', 'tax', 'duty', 'ban', 'restrict', 'withdraw']
+    backtrack_keywords = ['exemption', 'delay', 'postpone', 'review', 'negotiate', 'deal', 'agreement', 'temporary', 'exception', 'reconsider']
+    has_threat = any(kw in text_lower for kw in threat_keywords)
+    has_backtrack = any(kw in text_lower for kw in backtrack_keywords)
+    if has_threat and not has_backtrack:
+        sentiment = "🔴 Bearish"
+        taco_prob = "High (expected market dip & reversal)"
+        advice = "TACO play likely. Watch for dip – DO NOT buy puts. Wait for dip to buy calls."
+    elif has_threat and has_backtrack:
+        sentiment = "🟡 Mixed (threat with caveats)"
+        taco_prob = "Medium – possible backtrack"
+        advice = "Monitor for clarification. Could swing either way."
+    elif any(word in text_lower for word in ['good', 'great', 'deal', 'agreement']):
+        sentiment = "🟢 Bullish"
+        taco_prob = "Low – positive news"
+        advice = "Potential rally. Check related sectors."
+    else:
+        sentiment = "⚪ Neutral"
+        taco_prob = "Low – no clear threat or positive"
+        advice = "No immediate TACO signal."
+    sectors = []
+    stocks = []
+    if 'tariff' in text_lower or 'trade' in text_lower:
+        sectors.extend(['Industrials', 'Consumer Goods'])
+        stocks.extend(['CAT', 'DE', 'F', 'GM', 'WMT', 'TGT'])
+    if 'china' in text_lower:
+        sectors.append('China exposure')
+        stocks.extend(['BABA', 'JD', 'NIO', 'FXI', 'KWEB'])
+    if 'oil' in text_lower or 'energy' in text_lower:
+        sectors.append('Energy')
+        stocks.extend(['XOM', 'CVX', 'OXY', 'USO'])
+    if 'military' in text_lower or 'defense' in text_lower:
+        sectors.append('Defense')
+        stocks.extend(['LMT', 'NOC', 'GD', 'RTX'])
+    if 'iran' in text_lower or 'middle east' in text_lower:
+        sectors.append('Geopolitical risk')
+        stocks.extend(['XOM', 'CVX', 'LMT', 'NOC'])
+    sectors = list(dict.fromkeys(sectors))
+    stocks = list(dict.fromkeys(stocks))[:5]
+    return {'sentiment': sentiment, 'taco_probability': taco_prob,
+            'affected_sectors': ', '.join(sectors) if sectors else 'General market',
+            'suggested_stocks': ', '.join([f"${s}" for s in stocks]) if stocks else '$SPY, $QQQ',
+            'advice': advice}
 
 # ====================
 # MAIN ENTRY POINT
