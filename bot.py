@@ -31,7 +31,7 @@ import matplotlib.colors as mcolors
 import mplfinance as mpf
 import io
 
-# Finviz integration (import kept but commands removed)
+# Finviz import kept but commands removed
 from finvizfinance.screener.overview import Overview
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
@@ -553,14 +553,9 @@ def generate_zone_chart(df, symbol, zones):
         return None
 
 # ====================
-# WORLD NEWS COMMAND - REMOVED
+# WORLD NEWS / ENHANCED NEWS COMMANDS - REMOVED
 # ====================
-# (worldnews command removed)
-
-# ====================
-# ENHANCED NEWS COMMAND - REMOVED
-# ====================
-# (news command removed)
+# (Removed: worldnews, news)
 
 # ====================
 # PEG RATIO HELPER
@@ -677,13 +672,13 @@ def format_zone_embed(symbol, signals, timeframe):
     support_levels = [support]
     resistance_levels = [resistance]
     if not pd.isna(ema200):
-        (support_levels if ema200 < price else resistance_levels).append(ema200)
+        support_levels.append(ema200) if ema200 < price else resistance_levels.append(ema200)
     if not pd.isna(ema50):
-        (support_levels if ema50 < price else resistance_levels).append(ema50)
+        support_levels.append(ema50) if ema50 < price else resistance_levels.append(ema50)
     if not pd.isna(ema13):
-        (support_levels if ema13 < price else resistance_levels).append(ema13)
+        support_levels.append(ema13) if ema13 < price else resistance_levels.append(ema13)
     if not pd.isna(ema5):
-        (support_levels if ema5 < price else resistance_levels).append(ema5)
+        support_levels.append(ema5) if ema5 < price else resistance_levels.append(ema5)
     support_levels.sort(reverse=True)
     resistance_levels.sort()
     web_url = get_tradingview_web_link(symbol)
@@ -771,38 +766,6 @@ async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
     else:
         recommendation = "🎯 **RECOMMENDATION: NEUTRAL - Mixed signals**"
     embed.add_field(name="", value=recommendation, inline=False)
-    await ctx.send(embed=embed)
-
-async def send_final_summary(ctx, signal_summary):
-    if not signal_summary:
-        return
-    embed = discord.Embed(title="📊 MULTI-TIMEFRAME SCAN COMPLETE",
-                          description=f"Found signals for **{len(signal_summary)}** symbols", color=0x3498db)
-    strong_buy, buy, neutral, sell, strong_sell = [], [], [], [], []
-    for symbol, timeframes in signal_summary.items():
-        avg_score = sum(sig['net_score'] for sig in timeframes.values()) / len(timeframes)
-        bullish_count = sum(1 for sig in timeframes.values() if sig['net_score'] > 0)
-        if avg_score >= 1.5:
-            strong_buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
-        elif avg_score > 0:
-            buy.append(f"{symbol} ({bullish_count}/{len(timeframes)})")
-        elif avg_score == 0:
-            neutral.append(f"{symbol}")
-        elif avg_score > -1.5:
-            sell.append(f"{symbol}")
-        else:
-            strong_sell.append(f"{symbol}")
-    if strong_buy:
-        embed.add_field(name="🟢🟢 STRONG BUY", value="\n".join(strong_buy[:10]), inline=False)
-    if buy:
-        embed.add_field(name="🟢 BUY", value="\n".join(buy[:10]), inline=False)
-    if neutral:
-        embed.add_field(name="⚪ NEUTRAL", value="\n".join(neutral[:10]), inline=False)
-    if sell:
-        embed.add_field(name="🔴 SELL", value="\n".join(sell[:10]), inline=False)
-    if strong_sell:
-        embed.add_field(name="🔴🔴 STRONG SELL", value="\n".join(strong_sell[:10]), inline=False)
-    embed.set_footer(text="Use !signal SYMBOL for detailed analysis")
     await ctx.send(embed=embed)
 
 # ====================
@@ -1060,7 +1023,7 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 # ====================
-# MARKET STRUCTURE ANALYSIS
+# MARKET STRUCTURE ANALYSIS (FIXED - CONFIRMED CHoCH)
 # ====================
 def find_swings(df, window=5):
     if len(df) < window * 2 + 1:
@@ -1077,22 +1040,13 @@ def find_swings(df, window=5):
 
 def analyze_structure(df, window=5):
     """
-    Identify BOS and CHoCH events with confirmation.
-    - BOS (Break of Structure): continuous higher highs / lower lows.
-    - CHoCH (Change of Character): confirmed reversal.
-      * CHoCH up requires price to later break above the prior swing high.
-      * CHoCH down requires price to later break below the prior swing low.
+    Identify BOS (unconditional) and CHoCH (only if confirmed later by price breaking prior swing high/low).
     """
     if len(df) < 50:
-        return {'trend': 'insufficient data', 'last_event': None,
-                'last_event_direction': None, 'bos_events': [], 'choch_events': [],
-                'description': 'Not enough data.'}
+        return {'trend': 'insufficient data', 'last_event': None, 'last_event_direction': None,
+                'bos_events': [], 'choch_events': [], 'description': 'Not enough data.'}
 
     highs, lows = find_swings(df, window)
-    if not highs and not lows:
-        return {'trend': 'sideways', 'last_event': None, 'last_event_direction': None,
-                'bos_events': [], 'choch_events': [], 'description': 'No swings found.'}
-
     current_price = df['close'].iloc[-1]
     price_40_ago = df['close'].iloc[-40] if len(df) >= 40 else df['close'].iloc[0]
     pct_change = (current_price - price_40_ago) / price_40_ago * 100
@@ -1101,7 +1055,6 @@ def analyze_structure(df, window=5):
     elif pct_change < -3:
         trend = 'downtrend'
     else:
-        # fallback to recent swing direction
         if len(highs) >= 2 and highs[-1][1] > highs[-2][1]:
             trend = 'uptrend'
         elif len(lows) >= 2 and lows[-1][1] < lows[-2][1]:
@@ -1109,29 +1062,23 @@ def analyze_structure(df, window=5):
         else:
             trend = 'sideways'
 
-    # ----- BOS events (unconfirmed, just swings) -----
+    # BOS events (simple swing continuations)
     bos_events = []
     for i in range(1, len(highs)):
         if highs[i][1] > highs[i-1][1]:
-            bos_events.append({'type': 'BOS', 'direction': 'up', 'price': highs[i][1],
-                               'date': highs[i][0], 'confirmed': True})
+            bos_events.append({'type': 'BOS', 'direction': 'up', 'price': highs[i][1], 'date': highs[i][0]})
     for i in range(1, len(lows)):
         if lows[i][1] < lows[i-1][1]:
-            bos_events.append({'type': 'BOS', 'direction': 'down', 'price': lows[i][1],
-                               'date': lows[i][0], 'confirmed': True})
+            bos_events.append({'type': 'BOS', 'direction': 'down', 'price': lows[i][1], 'date': lows[i][0]})
+    bos_events = bos_events[-3:] if len(bos_events) > 3 else bos_events
 
-    # ----- CHoCH events with confirmation -----
+    # Confirmed CHoCH events
     choch_events = []
 
-    # CHoCH up: a swing low that is higher than the previous swing low
-    # and later price breaks above the previous swing high (the high before that swing low)
+    # CHoCH up: a swing low higher than previous swing low, and later price closes above the prior swing high
     for i in range(2, len(lows)):
-        # candidate CHoCH up: this low > previous low
         if lows[i][1] > lows[i-1][1]:
-            # Find the swing high before this low's low
-            # We need the highest high between lows[i-1] and lows[i]? Actually simpler:
-            # The previous swing high is the high that occurred before this low.
-            # We'll find the most recent swing high with index < lows[i][0]
+            # Find the most recent swing high that occurred before this low
             prev_high = None
             for h in highs:
                 if h[0] < lows[i][0]:
@@ -1139,22 +1086,15 @@ def analyze_structure(df, window=5):
                 else:
                     break
             if prev_high:
-                # Check if after this low, price ever closes above prev_high[1]
+                # Check if any close after this low is above prev_high[1]
                 mask = (df.index > lows[i][0]) & (df['close'] > prev_high[1])
                 if mask.any():
-                    # Confirmed CHoCH up
-                    choch_events.append({'type': 'CHoCH', 'direction': 'up',
-                                         'price': lows[i][1], 'date': lows[i][0],
-                                         'confirmed': True})
-                else:
-                    # Unconfirmed (ignore, but we could store as potential)
-                    pass
+                    choch_events.append({'type': 'CHoCH', 'direction': 'up', 'price': lows[i][1], 'date': lows[i][0]})
 
-    # CHoCH down: a swing high that is lower than the previous swing high
-    # and later price breaks below the previous swing low
+    # CHoCH down: a swing high lower than previous swing high, and later price closes below the prior swing low
     for i in range(2, len(highs)):
         if highs[i][1] < highs[i-1][1]:
-            # Find previous swing low
+            # Find the most recent swing low before this high
             prev_low = None
             for l in lows:
                 if l[0] < highs[i][0]:
@@ -1164,33 +1104,92 @@ def analyze_structure(df, window=5):
             if prev_low:
                 mask = (df.index > highs[i][0]) & (df['close'] < prev_low[1])
                 if mask.any():
-                    choch_events.append({'type': 'CHoCH', 'direction': 'down',
-                                         'price': highs[i][1], 'date': highs[i][0],
-                                         'confirmed': True})
+                    choch_events.append({'type': 'CHoCH', 'direction': 'down', 'price': highs[i][1], 'date': highs[i][0]})
 
-    # Keep only the last 3 of each type (most recent first)
-    bos_events = sorted(bos_events, key=lambda x: x['date'], reverse=True)[:3]
-    choch_events = sorted(choch_events, key=lambda x: x['date'], reverse=True)[:3]
+    choch_events = choch_events[-3:] if len(choch_events) > 3 else choch_events
 
-    # Combine all events (both BOS and confirmed CHoCH) for "last_event"
     all_events = bos_events + choch_events
-    if all_events:
-        all_events.sort(key=lambda x: x['date'], reverse=True)
-        last_event = all_events[0]['type']
-        last_dir = all_events[0]['direction']
-    else:
-        last_event = None
-        last_dir = None
+    all_events.sort(key=lambda x: x['date'], reverse=True)
+    last_event = all_events[0] if all_events else None
+    last_type = last_event['type'] if last_event else None
+    last_dir = last_event['direction'] if last_event else None
 
     description = f"Trend: {trend}. "
-    if last_event:
-        description += f"Last confirmed event: {last_event} {'↑' if last_dir=='up' else '↓'}."
+    if last_type:
+        description += f"Last confirmed event: {last_type} {'↑' if last_dir=='up' else '↓'}."
     else:
         description += "No confirmed BOS or CHoCH events."
 
-    return {'trend': trend, 'last_event': last_event, 'last_event_direction': last_dir,
-            'bos_events': bos_events, 'choch_events': choch_events,
-            'description': description}
+    return {'trend': trend, 'last_event': last_type, 'last_event_direction': last_dir,
+            'bos_events': bos_events, 'choch_events': choch_events, 'description': description}
+
+def generate_structure_chart(df, symbol, structure):
+    if len(df) < 50:
+        return None
+    chart_data = df[['open', 'high', 'low', 'close']].tail(100).copy()
+    chart_data.columns = ['Open', 'High', 'Low', 'Close']
+    swing_highs, swing_lows = find_swings(df)
+    fig, ax = plt.subplots(figsize=(14, 8), facecolor='#1e1e1e')
+    ax.set_facecolor('#1e1e1e')
+    ax.grid(True, color='#444444', linestyle='--', alpha=0.5)
+    dates = chart_data.index
+    width = 0.6 * (dates[1] - dates[0]).total_seconds() / (24*3600) if len(dates) > 1 else 0.5
+    for idx, row in chart_data.iterrows():
+        color = '#26a69a' if row['Close'] >= row['Open'] else '#ef5350'
+        ax.bar(idx, row['High'] - row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
+        ax.bar(idx, row['Close'] - row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
+    for idx, price in swing_highs:
+        if idx in chart_data.index:
+            ax.plot(idx, price, '^', color='lime', markersize=10, zorder=5, linewidth=2)
+    for idx, price in swing_lows:
+        if idx in chart_data.index:
+            ax.plot(idx, price, 'v', color='red', markersize=10, zorder=5, linewidth=2)
+    for bos in structure.get('bos_events', []):
+        if bos['date'] in chart_data.index:
+            line_color = '#00aaff' if bos['direction'] == 'up' else '#ff8800'
+            ax.axhline(y=bos['price'], color=line_color, linestyle='--', linewidth=1.5, alpha=0.7)
+            ax.text(bos['date'], bos['price'], f"BOS {bos['direction'].upper()}", fontsize=8, color=line_color,
+                    ha='left', va='bottom', bbox=dict(facecolor='#1e1e1e', alpha=0.7, pad=1))
+    for choch in structure.get('choch_events', []):
+        if choch['date'] in chart_data.index:
+            line_color = '#ff00ff' if choch['direction'] == 'up' else '#ff4444'
+            ax.axhline(y=choch['price'], color=line_color, linestyle='--', linewidth=2, alpha=0.8)
+            ax.text(choch['date'], choch['price'], f"CHoCH {choch['direction'].upper()}", fontsize=9, color=line_color,
+                    ha='left', va='top', weight='bold', bbox=dict(facecolor='#1e1e1e', alpha=0.8, pad=2))
+    all_events = structure.get('bos_events', []) + structure.get('choch_events', [])
+    if all_events:
+        last = sorted(all_events, key=lambda x: x['date'], reverse=True)[0]
+        if last['date'] in chart_data.index:
+            ax.axhline(y=last['price'], color='white', linestyle='-', linewidth=3, alpha=0.9)
+            ax.text(last['date'], last['price'], f"★ MOST RECENT: {last['type']} {last['direction'].upper()}",
+                    fontsize=10, color='yellow', ha='left', va='bottom', weight='bold',
+                    bbox=dict(facecolor='#1e1e1e', alpha=0.9, pad=3))
+    legend_elements = [
+        plt.Line2D([0], [0], marker='^', color='w', label='Swing High', markerfacecolor='lime', markersize=8),
+        plt.Line2D([0], [0], marker='v', color='w', label='Swing Low', markerfacecolor='red', markersize=8),
+        plt.Line2D([0], [0], color='#00aaff', linestyle='--', linewidth=2, label='BOS Up'),
+        plt.Line2D([0], [0], color='#ff8800', linestyle='--', linewidth=2, label='BOS Down'),
+        plt.Line2D([0], [0], color='#ff00ff', linestyle='--', linewidth=2, label='CHoCH Up'),
+        plt.Line2D([0], [0], color='#ff4444', linestyle='--', linewidth=2, label='CHoCH Down'),
+        plt.Line2D([0], [0], color='white', linestyle='-', linewidth=3, label='Most Recent Event'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=9, facecolor='#333333',
+              edgecolor='white', labelcolor='white', framealpha=0.8)
+    ax.set_title(f'{symbol} Market Structure - BOS (blue/orange) & CHoCH (purple/red)', color='white', fontsize=14)
+    ax.set_xlabel('Date', color='white')
+    ax.set_ylabel('Price', color='white')
+    ax.tick_params(colors='white')
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d %H:%M'))
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
+        plt.savefig(tmpfile.name, format='png', dpi=120, facecolor='#1e1e1e', bbox_inches='tight')
+        tmpfile.flush()
+        with open(tmpfile.name, 'rb') as f:
+            img_data = f.read()
+    os.unlink(tmpfile.name)
+    plt.close(fig)
+    return io.BytesIO(img_data)
 
 # ====================
 # STRUCTURE COMMAND
@@ -1510,39 +1509,36 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
 # ====================
 # UPCOMING COMMAND
 # ====================
-async def get_earnings_stats(symbol, earnings_date):
+async def fetch_analyst_ratings(symbol, limit=3):
+    url = "https://finnhub.io/api/v1/stock/recommendation"
+    params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(url, params=params) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data[:limit] if data else []
+    except Exception:
+        return []
+
+async def fetch_earnings_upcoming(symbol, days=90):
     try:
         stock = yf.Ticker(symbol)
-        earn_dt = datetime.strptime(earnings_date, '%Y-%m-%d')
-        today = datetime.now()
-        expirations = stock.options
-        if not expirations:
-            return "N/A", "N/A"
-        target_exp = None
-        for exp in expirations:
-            exp_dt = datetime.strptime(exp, '%Y-%m-%d').date()
-            if exp_dt >= earn_dt.date():
-                target_exp = exp
-                break
-        if not target_exp:
-            return "N/A", "N/A"
-        opt_chain = stock.option_chain(target_exp)
-        calls, puts = opt_chain.calls, opt_chain.puts
-        current_price = stock.history(period="1d")['Close'].iloc[-1]
-        if calls.empty or puts.empty:
-            return "N/A", "N/A"
-        calls['diff'] = abs(calls['strike'] - current_price)
-        puts['diff'] = abs(puts['strike'] - current_price)
-        atm_call = calls.loc[calls['diff'].idxmin()]
-        atm_put = puts.loc[puts['diff'].idxmin()]
-        call_price = (atm_call['bid'] + atm_call['ask']) / 2 if atm_call['bid'] > 0 and atm_call['ask'] > 0 else atm_call['lastPrice']
-        put_price = (atm_put['bid'] + atm_put['ask']) / 2 if atm_put['bid'] > 0 and atm_put['ask'] > 0 else atm_put['lastPrice']
-        straddle = call_price + put_price
-        expected_pct = (straddle / current_price) * 100
-        return f"{expected_pct:.1f}%", "N/A"
-    except Exception as e:
-        print(f"Error getting earnings stats: {e}")
-        return "N/A", "N/A"
+        earnings_dates = stock.earnings_dates
+        if earnings_dates is None or earnings_dates.empty:
+            return []
+        today = datetime.now().date()
+        upcoming = []
+        for date, row in earnings_dates.iterrows():
+            e_date = date.date() if hasattr(date, 'date') else datetime.strptime(str(date), '%Y-%m-%d').date()
+            if e_date >= today and (e_date - today).days <= days:
+                eps_est = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
+                eps_est = 'N/A' if eps_est is None or pd.isna(eps_est) else f"{eps_est:.2f}"
+                upcoming.append({'date': e_date.strftime('%Y-%m-%d'), 'epsEstimate': eps_est})
+        return upcoming
+    except Exception:
+        return []
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str):
@@ -1560,8 +1556,8 @@ async def upcoming_events(ctx, ticker: str):
         await ctx.send(f"🔍 Fetching upcoming events for **{symbol}**...")
 
         stock = yf.Ticker(symbol)
-        
-        # Get earnings
+
+        # Earnings
         earnings_list = []
         try:
             earnings_dates = stock.earnings_dates
@@ -1601,7 +1597,7 @@ async def upcoming_events(ctx, ticker: str):
         except Exception as e:
             print(f"Error fetching earnings: {e}")
 
-        # Get dividends
+        # Dividends
         dividends_list = []
         try:
             dividends = stock.dividends
@@ -1614,7 +1610,7 @@ async def upcoming_events(ctx, ticker: str):
         except Exception as e:
             print(f"Error fetching dividends: {e}")
 
-        # Get splits
+        # Splits
         splits_list = []
         try:
             splits = stock.splits
@@ -1628,19 +1624,7 @@ async def upcoming_events(ctx, ticker: str):
         except Exception as e:
             print(f"Error fetching splits: {e}")
 
-        # Get analyst ratings
-        async def fetch_analyst_ratings(symbol, limit=3):
-            url = "https://finnhub.io/api/v1/stock/recommendation"
-            params = {'symbol': symbol, 'token': FINNHUB_API_KEY}
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.get(url, params=params) as resp:
-                        if resp.status != 200:
-                            return []
-                        data = await resp.json()
-                        return data[:limit] if data else []
-            except Exception:
-                return []
+        # Analyst ratings
         ratings = await fetch_analyst_ratings(symbol, limit=3)
 
         if not earnings_list and not dividends_list and not splits_list and not ratings:
@@ -1968,11 +1952,7 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
     return zones
 
 # ====================
-# TRADE TRACKING COMMANDS - REMOVED
-# ====================
-
-# ====================
-# QUICK SCORE COMMAND - UPDATED WITH FULL SCORING SYSTEM
+# QUICK SCORE COMMAND (unchanged, uses analyze_structure)
 # ====================
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
@@ -2055,10 +2035,8 @@ async def quick_score(ctx, target: str = None, timeframe: str = '4h'):
         user_busy[ctx.author.id] = False
 
 async def calculate_quick_score(df, symbol, timeframe):
-    """Quick score based on market structure, ADX, RSI, EMA, and volume"""
     if df is None or df.empty:
         return 0, "No data"
-    
     current_price = df['close'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df) >= 20 else 20
@@ -2071,13 +2049,12 @@ async def calculate_quick_score(df, symbol, timeframe):
     avg_volume = df['volume'].tail(20).mean()
     current_volume = df['volume'].iloc[-1]
     volume_ratio = current_volume / avg_volume if avg_volume > 0 else 1
-    
-    # Market structure analysis
+
     structure = analyze_structure(df)
-    
+
     score = 0
     details = []
-    
+
     # 1. Market structure (0-25 points)
     if structure['last_event'] == 'CHoCH' and structure['last_event_direction'] == 'up':
         score += 25
@@ -2093,7 +2070,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         details.append(f"🔴 BOS DOWN: -20 (downtrend continuing)")
     else:
         details.append(f"⚪ No clear structure signal: 0")
-    
+
     # 2. ADX trend strength (0-15 points)
     if adx > 25:
         score += 15
@@ -2107,7 +2084,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 5
         details.append(f"🔴 Very weak / ranging (ADX: {adx:.1f}): -5")
-    
+
     # 3. RSI momentum (0-10 points)
     if 30 <= rsi <= 70:
         score += 10
@@ -2118,7 +2095,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     elif rsi > 70:
         score -= 8
         details.append(f"🔴 RSI overbought ({rsi:.1f}): -8 (pullback risk)")
-    
+
     # 4. EMA alignment (0-10 points)
     ema_score = 0
     if above_ema13:
@@ -2131,7 +2108,7 @@ async def calculate_quick_score(df, symbol, timeframe):
         ema_score += 5
     score += ema_score
     details.append(f"🟡 EMA position: +{ema_score} ({'Above' if above_ema13 else 'Below'} 13, {'Above' if above_ema50 else 'Below'} 50, {'Above' if above_ema200 else 'Below'} 200)")
-    
+
     # 5. Volume (0-10 points)
     if volume_ratio > 1.5:
         score += 10
@@ -2148,7 +2125,7 @@ async def calculate_quick_score(df, symbol, timeframe):
     else:
         score -= 10
         details.append(f"🔴 Very low volume ({volume_ratio:.1f}x avg): -10")
-    
+
     score = max(0, min(100, score))
     return score, "\n".join(details[:10])
 
@@ -2173,7 +2150,7 @@ def get_score_color(score):
         return 0xff0000
 
 # ====================
-# CONFIRMATION COMMAND - COMBINES ALL SIGNALS
+# CONFIRMATION COMMAND (uses analyze_structure)
 # ====================
 @bot.command(name='confirm')
 async def trade_confirmation(ctx, ticker: str, timeframe: str = '4h'):
