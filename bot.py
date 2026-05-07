@@ -16,12 +16,10 @@ from datetime import datetime, timedelta
 import motor.motor_asyncio
 import yfinance as yf
 
-# Alpaca imports
 from alpaca.data.historical import StockHistoricalDataClient, CryptoHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest, CryptoBarsRequest
 from alpaca.data.timeframe import TimeFrame
 
-# Charting libraries
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -35,7 +33,6 @@ from finvizfinance.screener.overview import Overview
 
 warnings.filterwarnings("ignore", category=RuntimeWarning, message="All-NaN slice encountered")
 
-# === CONFIGURATION ===
 FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 TWELVEDATA_API_KEY = os.getenv('TWELVEDATA_API_KEY')
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -43,7 +40,6 @@ MONGODB_URI = os.getenv('MONGODB_URI')
 PORT = int(os.getenv('PORT', 10000))
 NEWSAPI_KEY = os.getenv('NEWSAPI_KEY')
 MARKETAUX_API_KEY = os.getenv('MARKETAUX_API_KEY')
-
 ALPACA_API_KEY = os.getenv('ALPACA_API_KEY')
 ALPACA_SECRET_KEY = os.getenv('ALPACA_SECRET_KEY')
 
@@ -62,8 +58,6 @@ cancellation_flags = {}
 
 data_cache = {}
 CACHE_DURATION = timedelta(minutes=10)
-
-world_news_cache = {"data": None, "expiry": datetime.min}
 
 class RateLimiter:
     def __init__(self, max_calls, period):
@@ -97,24 +91,22 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✅ Web server running on port {PORT}")
+    print(f"✅ Web server on port {PORT}")
 
 async def load_watchlist():
     try:
         doc = await watchlist_collection.find_one({'_id': 'main'})
         if doc:
             return {"stocks": doc.get('stocks', []), "crypto": doc.get('crypto', [])}
-        else:
-            default = {
-                "_id": "main",
-                "stocks": ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "VUG", "QUBT", "TSLA", "LYFT", "NFLX", "ORCL", "UBER", "HOOD", "SOFI", "SPY", "NIO", "PLTR", "GRAB", "LMT", "MARA", "SOUN", "APLD", "CLSK", "OPEN", "ASML", "RIOT", "AAL", "F", "FCEL"],
-                "crypto": ["BTC/USD", "ETH/USD", "SOL/USD", "XRP/USD", "DOGE/USD", "PEPE/USD", "LINK/USD"]
-            }
-            await watchlist_collection.insert_one(default)
-            return default
-    except Exception as e:
-        print(f"Error loading watchlist: {e}")
-        return {"stocks": ["AAPL","MSFT","GOOGL","AMZN","NVDA","VUG","QUBT","TSLA","LYFT","NFLX","ORCL","UBER","HOOD","SOFI","SPY","NIO","PLTR","GRAB","LMT","MARA","SOUN","APLD","CLSK","OPEN","ASML","RIOT","AAL","F","FCEL"], "crypto": []}
+        default = {
+            "_id": "main",
+            "stocks": ["AAPL","MSFT","GOOGL","AMZN","NVDA","VUG","QUBT","TSLA","LYFT","NFLX","ORCL","UBER","HOOD","SOFI","SPY","NIO","PLTR","GRAB","LMT","MARA","SOUN","APLD","CLSK","OPEN","ASML","RIOT","AAL","F","FCEL"],
+            "crypto": ["BTC/USD","ETH/USD","SOL/USD","XRP/USD","DOGE/USD","PEPE/USD","LINK/USD"]
+        }
+        await watchlist_collection.insert_one(default)
+        return default
+    except:
+        return {"stocks": ["AAPL","MSFT","GOOGL","AMZN","NVDA","SPY"], "crypto": []}
 
 async def save_watchlist(watchlist):
     try:
@@ -134,109 +126,91 @@ def normalize_symbol(symbol):
 
 def get_tradingview_web_link(symbol):
     if '/' in symbol:
-        base = symbol.split('/')[0]
-        return f"https://www.tradingview.com/chart/?symbol=BINANCE:{base}USDT"
-    else:
-        return f"https://www.tradingview.com/chart/?symbol=NASDAQ:{symbol}"
+        return f"https://www.tradingview.com/chart/?symbol=BINANCE:{symbol.split('/')[0]}USDT"
+    return f"https://www.tradingview.com/chart/?symbol=NASDAQ:{symbol}"
 
 async def fetch_finnhub(symbol, timeframe):
     resolution_map = {'5min':'5','15min':'15','30min':'30','1h':'60','4h':'240','daily':'D','weekly':'W'}
     resolution = resolution_map.get(timeframe)
-    if not resolution:
-        return None
+    if not resolution: return None
     url = "https://finnhub.io/api/v1/stock/candle"
     params = {'symbol': symbol, 'resolution': resolution,
               'from': int((datetime.now() - timedelta(days=60)).timestamp()),
               'to': int(datetime.now().timestamp()), 'token': FINNHUB_API_KEY}
     await finnhub_limiter.wait_if_needed()
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+        async with aiohttp.ClientSession(timeout=15) as session:
             async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 data = await resp.json()
-                if data.get('s') != 'ok':
-                    return None
+                if data.get('s') != 'ok': return None
                 df = pd.DataFrame({'timestamp': pd.to_datetime(data['t'], unit='s'),
                                    'open': data['o'], 'high': data['h'],
                                    'low': data['l'], 'close': data['c'], 'volume': data['v']}).set_index('timestamp')
                 return df
-    except:
-        return None
+    except: return None
 
 async def fetch_twelvedata(symbol, timeframe):
     interval_map = {'5min':'5min','15min':'15min','30min':'30min','1h':'1h','4h':'4h','daily':'1day','weekly':'1week'}
     interval = interval_map.get(timeframe)
-    if not interval:
-        return None
+    if not interval: return None
     url = "https://api.twelvedata.com/time_series"
     params = {'symbol': symbol, 'interval': interval, 'apikey': TWELVEDATA_API_KEY, 'outputsize': 500}
     await twelvedata_limiter.wait_if_needed()
     try:
         async with aiohttp.ClientSession(timeout=15) as session:
             async with session.get(url, params=params) as resp:
-                if resp.status == 429:
-                    await asyncio.sleep(60)
-                    return None
+                if resp.status == 429: await asyncio.sleep(60); return None
                 data = await resp.json()
-                if 'values' not in data:
-                    return None
+                if 'values' not in data: return None
                 df = pd.DataFrame(data['values'])
                 df = df.rename(columns={'datetime': 'timestamp'})
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 df.set_index('timestamp', inplace=True)
                 df = df.astype(float).sort_index()
                 return df
-    except:
-        return None
+    except: return None
 
 async def fetch_coingecko_ohlc(symbol, timeframe):
     base = symbol.split('/')[0].lower()
     coin_map = {'btc':'bitcoin','eth':'ethereum','sol':'solana','xrp':'ripple','doge':'dogecoin',
                 'pepe':'pepecoin','ada':'cardano','dot':'polkadot','link':'chainlink'}
     coin_id = coin_map.get(base)
-    if not coin_id:
-        return None
+    if not coin_id: return None
     days_map = {'5min':1,'15min':2,'30min':2,'1h':7,'4h':7,'daily':30,'weekly':90}
     days = days_map.get(timeframe)
-    if not days:
-        return None
+    if not days: return None
     url = f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc"
     params = {'vs_currency':'usd','days':days}
     await coingecko_limiter.wait_if_needed()
     try:
         async with aiohttp.ClientSession(timeout=15) as session:
             async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 data = await resp.json()
                 df = pd.DataFrame(data, columns=['timestamp','open','high','low','close'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 df.set_index('timestamp', inplace=True)
                 df['volume'] = np.nan
                 return df
-    except:
-        return None
+    except: return None
 
 async def fetch_coingecko_price(symbol):
     base = symbol.split('/')[0].lower()
     coin_map = {'btc':'bitcoin','eth':'ethereum','sol':'solana','xrp':'ripple','doge':'dogecoin',
                 'pepe':'pepecoin','ada':'cardano','dot':'polkadot','link':'chainlink'}
     coin_id = coin_map.get(base)
-    if not coin_id:
-        return None
+    if not coin_id: return None
     url = "https://api.coingecko.com/api/v3/simple/price"
     params = {'ids': coin_id, 'vs_currencies': 'usd'}
     await coingecko_limiter.wait_if_needed()
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return None
+                if resp.status != 200: return None
                 data = await resp.json()
                 price = data.get(coin_id, {}).get('usd')
-                if price is None:
-                    return None
+                if price is None: return None
                 np.random.seed(42)
                 dates = pd.date_range(end=datetime.now(), periods=200, freq='H')
                 close_prices = price * (1 + np.random.normal(0,0.01,200).cumsum()*0.01)
@@ -247,8 +221,7 @@ async def fetch_coingecko_price(symbol):
                 df = pd.DataFrame({'timestamp':dates,'open':open_prices,'high':high_prices,
                                    'low':low_prices,'close':close_prices,'volume':volumes}).set_index('timestamp')
                 return df
-    except:
-        return None
+    except: return None
 
 async def fetch_ohlcv(symbol, timeframe):
     cache_key = f"{symbol}_{timeframe}"
@@ -257,24 +230,22 @@ async def fetch_ohlcv(symbol, timeframe):
         return data_cache[cache_key][0]
     df = None
     is_crypto = '/' in symbol
-    if timeframe == '30min' and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
+    # For daily, use yfinance directly (most reliable)
+    if not is_crypto and timeframe == 'daily':
         try:
-            client = StockHistoricalDataClient(ALPACA_API_KEY, ALPACA_SECRET_KEY)
-            request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=TimeFrame.Minute,
-                                       timeframe_multiplier=15, start=now - timedelta(days=60), end=now)
-            bars = await asyncio.to_thread(client.get_stock_bars, request)
-            if bars.data:
-                df_15 = bars.df.reset_index(level=0, drop=True)
-                df_15.index = pd.to_datetime(df_15.index)
-                df_30 = df_15.resample('30T').agg({'open':'first','high':'max','low':'min',
-                                                   'close':'last','volume':'sum'}).dropna()
-                if not df_30.empty:
-                    df = df_30
+            ticker = yf.Ticker(symbol)
+            df = ticker.history(period="60d", interval="1d")
+            if not df.empty:
+                df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
+                print(f"✅ yfinance daily {symbol}: price={df['close'].iloc[-1]:.2f}, vol={df['volume'].iloc[-1]}")
+                data_cache[cache_key] = (df, now + CACHE_DURATION)
+                return df
         except Exception as e:
-            print(f"Alpaca 15min fetch failed: {e}")
+            print(f"yfinance daily failed: {e}")
+    # Fallback for other timeframes or if yfinance fails
     if df is None and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
-        tf_map = {'5min':(TimeFrame.Minute,5),'15min':(TimeFrame.Minute,15),'1h':(TimeFrame.Hour,1),
-                  '4h':(TimeFrame.Hour,4),'daily':(TimeFrame.Day,1),'weekly':(TimeFrame.Week,1)}
+        tf_map = {'5min':(TimeFrame.Minute,5),'15min':(TimeFrame.Minute,15),'30min':(TimeFrame.Minute,30),
+                  '1h':(TimeFrame.Hour,1),'4h':(TimeFrame.Hour,4),'daily':(TimeFrame.Day,1),'weekly':(TimeFrame.Week,1)}
         if timeframe in tf_map:
             tf, mult = tf_map[timeframe]
             try:
@@ -282,7 +253,7 @@ async def fetch_ohlcv(symbol, timeframe):
                 request = StockBarsRequest(symbol_or_symbols=symbol, timeframe=tf, timeframe_multiplier=mult,
                                            start=now - timedelta(days=60), end=now)
                 bars = await asyncio.to_thread(client.get_stock_bars, request)
-                if bars.data:
+                if bars.data and not bars.df.empty:
                     df = bars.df.reset_index(level=0, drop=True)[['open','high','low','close','volume']]
             except Exception as e:
                 print(f"Alpaca fetch failed: {e}")
@@ -292,8 +263,8 @@ async def fetch_ohlcv(symbol, timeframe):
         df = await fetch_twelvedata(symbol, timeframe)
     if is_crypto:
         if ALPACA_API_KEY and ALPACA_SECRET_KEY:
-            tf_map = {'5min':(TimeFrame.Minute,5),'15min':(TimeFrame.Minute,15),'1h':(TimeFrame.Hour,1),
-                      '4h':(TimeFrame.Hour,4),'daily':(TimeFrame.Day,1),'weekly':(TimeFrame.Week,1)}
+            tf_map = {'5min':(TimeFrame.Minute,5),'15min':(TimeFrame.Minute,15),'30min':(TimeFrame.Minute,30),
+                      '1h':(TimeFrame.Hour,1),'4h':(TimeFrame.Hour,4),'daily':(TimeFrame.Day,1),'weekly':(TimeFrame.Week,1)}
             if timeframe in tf_map:
                 tf, mult = tf_map[timeframe]
                 try:
@@ -302,7 +273,7 @@ async def fetch_ohlcv(symbol, timeframe):
                     request = CryptoBarsRequest(symbol_or_symbols=alpaca_symbol, timeframe=tf,
                                                 timeframe_multiplier=mult, start=now - timedelta(days=60), end=now)
                     bars = await asyncio.to_thread(client.get_crypto_bars, request)
-                    if bars.data:
+                    if bars.data and not bars.df.empty:
                         df = bars.df.reset_index(level=0, drop=True)[['open','high','low','close','volume']]
                 except Exception as e:
                     print(f"Alpaca crypto failed: {e}")
@@ -331,8 +302,7 @@ def calculate_indicators(df):
     return df
 
 def get_signals(df):
-    if len(df) < 2:
-        return {}
+    if len(df) < 2: return {}
     latest = df.iloc[-1]
     prev = df.iloc[-2]
     signals = {}
@@ -398,8 +368,7 @@ def get_rating(signals):
         return "NEUTRAL", 0xffff00
 
 def generate_chart_image(df, symbol, timeframe):
-    if len(df) < 20:
-        return None
+    if len(df) < 20: return None
     if timeframe in ['5min','15min','1h']:
         chart_data = df[['open','high','low','close','volume']].tail(50).copy()
     else:
@@ -426,70 +395,58 @@ def generate_chart_image(df, symbol, timeframe):
             axes[0].legend(loc='upper left', fontsize=9, facecolor='#333333', edgecolor='white',
                            labelcolor='white', framealpha=0.8)
         axes[0].tick_params(colors='white')
-        axes[0].yaxis.label.set_color('white')
-        axes[0].xaxis.label.set_color('white')
         axes[0].set_facecolor('#1e1e1e')
         if not volume_all_nan:
             axes[2].set_ylabel('Volume', color='white')
             axes[2].tick_params(colors='white')
-            axes[2].yaxis.label.set_color('white')
             axes[2].set_facecolor('#1e1e1e')
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
             fig.savefig(tmpfile.name, format='PNG', dpi=120, bbox_inches='tight', facecolor=s['facecolor'])
             tmpfile.flush()
             with open(tmpfile.name, 'rb') as f:
-                img_data = f.read()
+                img = f.read()
         os.unlink(tmpfile.name)
         plt.close(fig)
-        return io.BytesIO(img_data)
+        return io.BytesIO(img)
     except Exception as e:
-        print(f"Chart generation failed: {e}")
+        print(f"Chart error: {e}")
         return None
 
 def generate_zone_chart(df, symbol, zones):
-    if len(df) < 20:
-        return None
+    if len(df) < 20: return None
     chart_data = df[['open','high','low','close','volume']].tail(100).copy()
     chart_data.columns = ['Open','High','Low','Close','Volume']
     mc = mpf.make_marketcolors(up='#26a69a', down='#ef5350', edge='white', wick='white', volume='in', inherit=True)
     s = mpf.make_mpf_style(marketcolors=mc, gridstyle='--', y_on_right=False, facecolor='#1e1e1e',
                            figcolor='#1e1e1e', gridcolor='#444444')
+    apds = []
     if zones:
         strengths = [z['strength'] for z in zones]
         min_s, max_s = min(strengths), max(strengths)
-        norm_strengths = [(s - min_s) / (max_s - min_s) for s in strengths] if max_s > min_s else [0.5] * len(strengths)
-        colormap = matplotlib.colormaps['RdYlGn_r']
-        line_colors = [colormap(norm) for norm in norm_strengths]
-    else:
-        line_colors = []
-    apds = []
-    for i, zone in enumerate(zones):
-        level = zone['level']
-        color = mcolors.to_hex(line_colors[i]) if line_colors else '#ffffff'
-        label = f"Demand ${level:.2f} (touches: {zone['strength']})"
-        apds.append(mpf.make_addplot([level] * len(chart_data), color=color, width=2.0, linestyle='-', label=label))
+        norm = [(s-min_s)/(max_s-min_s) if max_s>min_s else 0.5 for s in strengths]
+        cmap = matplotlib.colormaps['RdYlGn_r']
+        for i,z in enumerate(zones):
+            color = mcolors.to_hex(cmap(norm[i]))
+            apds.append(mpf.make_addplot([z['level']]*len(chart_data), color=color, width=2.0, linestyle='-', label=f"Demand ${z['level']:.2f} (touches:{z['strength']})"))
     try:
-        fig, axes = mpf.plot(chart_data, type='candle', style=s, addplot=apds, volume=True, figsize=(12,7),
-                             returnfig=True, title=f'\n{symbol} Demand Zones (30min)', tight_layout=True,
-                             scale_padding={'left':0.5,'right':0.5,'top':0.5,'bottom':0.5})
+        fig, axes = mpf.plot(chart_data, type='candle', style=s, addplot=apds, volume=True, figsize=(12,7), returnfig=True, title=f'{symbol} Demand Zones (30min)', tight_layout=True)
         if apds:
-            axes[0].legend(loc='upper left', fontsize=10, facecolor='#333333', edgecolor='white',
-                           labelcolor='white', framealpha=0.8)
+            axes[0].legend(loc='upper left', fontsize=10, facecolor='#333', edgecolor='white', labelcolor='white')
         axes[2].set_ylabel('Volume', color='white')
         axes[2].tick_params(colors='white')
         axes[0].tick_params(colors='white')
         axes[0].set_facecolor('#1e1e1e')
         axes[2].set_facecolor('#1e1e1e')
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmpfile:
-            fig.savefig(tmpfile.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
-            tmpfile.flush()
-            with open(tmpfile.name, 'rb') as f:
-                img_data = f.read()
-        os.unlink(tmpfile.name)
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            fig.savefig(tmp.name, format='PNG', dpi=150, bbox_inches='tight', facecolor=s['facecolor'])
+            tmp.flush()
+            with open(tmp.name, 'rb') as f:
+                img = f.read()
+        os.unlink(tmp.name)
         plt.close(fig)
-        return io.BytesIO(img_data)
+        return io.BytesIO(img)
     except Exception as e:
-        print(f"Zone chart failed: {e}")
+        print(f"Zone chart error: {e}")
         return None
 
 async def get_peg_ratio(symbol):
@@ -499,220 +456,119 @@ async def get_peg_ratio(symbol):
         peg = None
         for field in ['pegRatio','pegRatio5yr','pegRatioTTM','trailingPEG']:
             val = info.get(field)
-            if val and isinstance(val,(int,float)) and val > 0:
+            if val and isinstance(val,(int,float)) and val>0:
                 peg = float(val)
                 break
         if peg is None:
             pe = info.get('trailingPE')
-            earnings_growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('earningsGrowth5y')
-            if pe and earnings_growth and isinstance(earnings_growth,(int,float)) and earnings_growth != 0:
-                peg = pe / (earnings_growth * 100)
-                if peg <= 0:
-                    peg = None
-        if peg is None or peg <= 0:
-            return None, None
-        if peg < 1.0:
-            emoji = "🟢"
-        elif peg < 2.0:
-            emoji = "🟡"
-        else:
-            emoji = "🔴"
+            growth = info.get('earningsGrowth') or info.get('earningsQuarterlyGrowth') or info.get('earningsGrowth5y')
+            if pe and growth and isinstance(growth,(int,float)) and growth!=0:
+                peg = pe / (growth*100)
+                if peg<=0: peg=None
+        if peg is None or peg<=0: return None, None
+        emoji = "🟢" if peg<1 else "🟡" if peg<2 else "🔴"
         return peg, f"{emoji} {peg:.2f}"
-    except Exception as e:
-        print(f"Error fetching PEG: {e}")
+    except:
         return None, None
 
 def format_embed(symbol, signals, timeframe, peg_str=None):
     if not signals:
         return discord.Embed(title="Error", description=f"No data for {symbol}", color=0xff0000)
-    sym_type = "Crypto" if '/' in symbol else "Stock"
     rating, color = get_rating(signals)
-    if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg'] > 0:
-        vol_ratio = signals['volume'] / signals['volume_avg']
-        vol_status = "High" if vol_ratio > 1.5 else "Low" if vol_ratio < 0.5 else "Normal"
-        vol_display = f"{vol_status} ({vol_ratio:.1f}x)"
-    else:
-        vol_display = "N/A"
+    vol_display = "N/A"
+    if signals.get('volume') and signals.get('volume_avg') and signals['volume_avg']>0:
+        ratio = signals['volume']/signals['volume_avg']
+        vol_display = f"{'High' if ratio>1.5 else 'Low' if ratio<0.5 else 'Normal'} ({ratio:.1f}x)"
     reasons = []
     if signals['ema5_cross_above_13']: reasons.append("EMA5 ↑ EMA13")
     if signals['ema13_cross_above_50']: reasons.append("EMA13 ↑ EMA50")
     if signals['ema5_cross_below_13']: reasons.append("EMA5 ↓ EMA13")
     if signals['ema13_cross_below_50']: reasons.append("EMA13 ↓ EMA50")
-    if signals['oversold_triangle']: reasons.append("🔻 Oversold BB")
-    if signals['overbought_triangle']: reasons.append("🔺 Overbought BB")
-    if signals['rsi_oversold']: reasons.append("RSI Oversold")
-    if signals['rsi_overbought']: reasons.append("RSI Overbought")
+    if signals['oversold_triangle']: reasons.append("Oversold BB")
+    if signals['overbought_triangle']: reasons.append("Overbought BB")
     if signals['price'] > signals['ema200'] and not pd.isna(signals['ema200']): reasons.append("Above 200 EMA")
-    elif signals['price'] < signals['ema200'] and not pd.isna(signals['ema200']): reasons.append("Below 200 EMA")
     if not reasons: reasons.append("No signals")
-    reason_str = " | ".join(reasons)
-    if signals['overbought_triangle']:
-        bb_status = "🔴 Overbought"
-    elif signals['oversold_triangle']:
-        bb_status = "🟢 Oversold"
-    else:
-        bb_status = "⚪ Normal"
+    bb_status = "🔴 Overbought" if signals['overbought_triangle'] else "🟢 Oversold" if signals['oversold_triangle'] else "⚪ Normal"
     support = signals['support_20']
     resistance = signals['resistance_20']
-    stop_loss = support
-    target = resistance + (resistance - support)
-    ema_items = [(signals['ema5'],'5','🟢'),(signals['ema13'],'13','🟡'),
-                 (signals['ema50'],'50','🔴'),(signals['ema200'],'200','🟣')]
-    valid_items = [(val,lbl,emoji) for val,lbl,emoji in ema_items if not pd.isna(val)]
-    valid_items.sort(reverse=True)
-    ema_lines = [f"{emoji} {lbl}: ${val:.2f}" for val,lbl,emoji in valid_items]
-    ema_text = "\n".join(ema_lines) if valid_items else "N/A"
-    web_url = get_tradingview_web_link(symbol)
-    tv_field = f"📊 [TradingView]({web_url})"
-    embed = discord.Embed(title=f"{rating}", description=f"**{symbol}** · ${signals['price']:.2f}", color=color)
+    embed = discord.Embed(title=f"{rating}", description=f"{symbol} · ${signals['price']:.2f}", color=color)
     embed.add_field(name="RSI", value=f"{signals['rsi']:.1f}", inline=True)
     embed.add_field(name="Trend", value=signals['trend'], inline=True)
     embed.add_field(name="Volume", value=vol_display, inline=True)
     if peg_str and '/' not in symbol:
         embed.add_field(name="PEG Ratio", value=peg_str, inline=True)
+    ema_items = [(signals['ema5'],'5','🟢'),(signals['ema13'],'13','🟡'),(signals['ema50'],'50','🔴'),(signals['ema200'],'200','🟣')]
+    valid = [(v,l,e) for v,l,e in ema_items if not pd.isna(v)]
+    valid.sort(reverse=True)
+    ema_text = "\n".join([f"{e} {l}: ${v:.2f}" for v,l,e in valid]) if valid else "N/A"
     embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
     embed.add_field(name="Bollinger Bands", value=bb_status, inline=True)
-    embed.add_field(name="Reason", value=reason_str, inline=False)
+    embed.add_field(name="Reason", value=" | ".join(reasons), inline=False)
     embed.add_field(name="Support", value=f"${support:.2f}", inline=True)
     embed.add_field(name="Resistance", value=f"${resistance:.2f}", inline=True)
-    embed.add_field(name="Stop Loss", value=f"${stop_loss:.2f}", inline=True)
-    embed.add_field(name="Target", value=f"${target:.2f}", inline=True)
-    embed.add_field(name="TradingView", value=tv_field, inline=False)
-    embed.set_footer(text=f"{sym_type} · {timeframe}")
+    embed.add_field(name="Stop Loss", value=f"${support:.2f}", inline=True)
+    embed.add_field(name="Target", value=f"${resistance + (resistance-support):.2f}", inline=True)
+    embed.add_field(name="TradingView", value=f"[Chart]({get_tradingview_web_link(symbol)})", inline=False)
+    embed.set_footer(text=f"{'Crypto' if '/' in symbol else 'Stock'} · {timeframe}")
     return embed
 
 def format_zone_embed(symbol, signals, timeframe):
-    sym_type = "Crypto" if '/' in symbol else "Stock"
     price = signals['price']
     support = signals['support_20']
     resistance = signals['resistance_20']
     ema5, ema13, ema50, ema200 = signals['ema5'], signals['ema13'], signals['ema50'], signals['ema200']
-    support_levels = [support]
-    resistance_levels = [resistance]
-    if not pd.isna(ema200):
-        (support_levels if ema200 < price else resistance_levels).append(ema200)
-    if not pd.isna(ema50):
-        (support_levels if ema50 < price else resistance_levels).append(ema50)
-    if not pd.isna(ema13):
-        (support_levels if ema13 < price else resistance_levels).append(ema13)
-    if not pd.isna(ema5):
-        (support_levels if ema5 < price else resistance_levels).append(ema5)
-    support_levels.sort(reverse=True)
-    resistance_levels.sort()
-    web_url = get_tradingview_web_link(symbol)
-    tv_field = f"📊 [TradingView]({web_url})"
-    embed = discord.Embed(title=f"📊 {symbol} – {timeframe.capitalize()} Zones",
-                          description=f"Price: **${price:.2f}**",
-                          color=0x00ff00 if signals['net_score']>0 else 0xff0000 if signals['net_score']<0 else 0xffff00)
-    sup_text = ""
-    for i,level in enumerate(support_levels):
-        sup_text += f"**Primary Support:** ${level:.2f}\n" if i==0 else f"Secondary: ${level:.2f}\n"
-    if sup_text:
-        embed.add_field(name="📉 Support (Buy Zone)", value=sup_text, inline=False)
-    res_text = ""
-    for i,level in enumerate(resistance_levels):
-        res_text += f"**Primary Resistance:** ${level:.2f}\n" if i==0 else f"Secondary: ${level:.2f}\n"
-    if res_text:
-        embed.add_field(name="📈 Resistance (Sell Zone)", value=res_text, inline=False)
+    supports = [support]
+    resistances = [resistance]
+    if not pd.isna(ema200): (supports if ema200<price else resistances).append(ema200)
+    if not pd.isna(ema50): (supports if ema50<price else resistances).append(ema50)
+    if not pd.isna(ema13): (supports if ema13<price else resistances).append(ema13)
+    if not pd.isna(ema5): (supports if ema5<price else resistances).append(ema5)
+    supports.sort(reverse=True)
+    resistances.sort()
+    embed = discord.Embed(title=f"Zones: {symbol} ({timeframe})", description=f"Price: ${price:.2f}", color=0x00ff00 if signals['net_score']>0 else 0xff0000 if signals['net_score']<0 else 0xffff00)
+    sup_txt = "\n".join([f"**Primary Support:** ${l:.2f}" if i==0 else f"Secondary: ${l:.2f}" for i,l in enumerate(supports[:3])])
+    if sup_txt: embed.add_field(name="📉 Support (Buy Zone)", value=sup_txt, inline=False)
+    res_txt = "\n".join([f"**Primary Resistance:** ${l:.2f}" if i==0 else f"Secondary: ${l:.2f}" for i,l in enumerate(resistances[:3])])
+    if res_txt: embed.add_field(name="📈 Resistance (Sell Zone)", value=res_txt, inline=False)
     target = resistance + (resistance - support)
     embed.add_field(name="🎯 Target", value=f"${target:.2f}", inline=False)
-    embed.add_field(name="TradingView", value=tv_field, inline=False)
-    embed.set_footer(text=f"{sym_type} · Based on 20d high/low & EMAs")
+    embed.add_field(name="TradingView", value=f"[Chart]({get_tradingview_web_link(symbol)})", inline=False)
+    embed.set_footer(text="Based on 20d high/low & EMAs")
     return embed
-
-async def send_combined_symbol_report(ctx, symbol, symbol_signals):
-    timeframe_priority = {'5min':1,'15min':2,'30min':3,'1h':4,'4h':5,'daily':6,'weekly':7}
-    best_tf, best_score = None, -float('inf')
-    for tf, data in symbol_signals.items():
-        strength = abs(data['signals']['net_score'])
-        if strength > best_score or (strength == best_score and timeframe_priority.get(tf,99) < timeframe_priority.get(best_tf,99)):
-            best_score, best_tf = strength, tf
-    if not best_tf:
-        return
-    best_data = symbol_signals[best_tf]
-    df, signals = best_data['df'], best_data['signals']
-    peg_str = None
-    if '/' not in symbol:
-        _, peg_str = await get_peg_ratio(symbol)
-    main_embed = format_embed(symbol, signals, best_tf, peg_str=peg_str)
-    try:
-        chart_buffer = generate_chart_image(df, symbol, best_tf)
-        if chart_buffer:
-            file = discord.File(chart_buffer, filename='chart.png')
-            main_embed.set_image(url='attachment://chart.png')
-            main_embed.description = f"**{symbol}** · ${signals['price']:.2f} · ⭐ **Primary: {best_tf}**"
-            await ctx.send(embed=main_embed, file=file)
-        else:
-            await ctx.send(embed=main_embed)
-    except Exception as e:
-        print(f"Chart failed: {e}")
-        await ctx.send(embed=main_embed)
-    await send_symbol_timeframe_summary(ctx, symbol, symbol_signals)
-
-async def send_symbol_timeframe_summary(ctx, symbol, symbol_signals):
-    timeframe_order = {'5min':1,'15min':2,'30min':3,'1h':4,'4h':5,'daily':6,'weekly':7}
-    sorted_timeframes = sorted(symbol_signals.keys(), key=lambda x: timeframe_order.get(x,99))
-    bullish_count = sum(1 for data in symbol_signals.values() if data['signals']['net_score'] > 0)
-    bearish_count = sum(1 for data in symbol_signals.values() if data['signals']['net_score'] < 0)
-    total = len(symbol_signals)
-    lines = []
-    for tf in sorted_timeframes:
-        net = symbol_signals[tf]['signals']['net_score']
-        if net >= 2: emoji, txt = "🟢", "STRONG BUY"
-        elif net == 1: emoji, txt = "🟢", "BUY"
-        elif net == 0: emoji, txt = "⚪", "NEUTRAL"
-        elif net == -1: emoji, txt = "🔴", "SELL"
-        else: emoji, txt = "🔴", "STRONG SELL"
-        lines.append(f"{emoji} {tf}: {txt} (Score: {net})")
-    embed = discord.Embed(title=f"📊 MULTI-TIMEFRAME SUMMARY: {symbol}", description="\n".join(lines), color=0x3498db)
-    if bullish_count == total:
-        recommendation = "🎯 STRONG BUY - All timeframes aligned!"
-    elif bearish_count == total:
-        recommendation = "🎯 STRONG SELL - All timeframes aligned!"
-    elif bullish_count >= total*0.6:
-        recommendation = "🎯 CAUTIOUS BUY - Most timeframes bullish"
-    elif bearish_count >= total*0.6:
-        recommendation = "🎯 CAUTIOUS SELL - Most timeframes bearish"
-    else:
-        recommendation = "🎯 NEUTRAL - Mixed signals"
-    embed.add_field(name="", value=recommendation, inline=False)
-    await ctx.send(embed=embed)
 
 async def get_stock_price(symbol):
     try:
-        stock = yf.Ticker(symbol)
-        data = stock.history(period="1d")
-        return float(data['Close'].iloc[-1]) if not data.empty else None
+        ticker = yf.Ticker(symbol)
+        data = ticker.history(period="1d")
+        return data['Close'].iloc[-1] if not data.empty else None
     except:
         return None
 
 def get_key_expirations(ticker):
     try:
         stock = yf.Ticker(ticker)
-        expirations = stock.options
-        if not expirations:
-            return []
+        exps = stock.options
+        if not exps: return []
         today = datetime.now().date()
-        exp_dates = [datetime.strptime(e,'%Y-%m-%d').date() for e in expirations]
+        exp_dates = [datetime.strptime(e,'%Y-%m-%d').date() for e in exps]
         key = []
-        for ed, es in zip(exp_dates, expirations):
+        for ed, es in zip(exp_dates, exps):
             dte = (ed - today).days
             if 0 <= dte <= 7:
                 key.append((es, dte, "WEEKLY"))
                 break
-        for ed, es in zip(exp_dates, expirations):
+        for ed, es in zip(exp_dates, exps):
             dte = (ed - today).days
             if 8 <= dte <= 21:
                 key.append((es, dte, "MONTHLY"))
                 break
         best_exp, best_dte, min_diff = None, None, float('inf')
-        for ed, es in zip(exp_dates, expirations):
+        for ed, es in zip(exp_dates, exps):
             dte = (ed - today).days
             diff = abs(dte - 38)
             if diff < min_diff:
                 min_diff, best_exp, best_dte = diff, es, dte
-        if best_exp:
-            key.append((best_exp, best_dte, "PRIMARY (30-45 DTE)"))
+        if best_exp: key.append((best_exp, best_dte, "PRIMARY (30-45 DTE)"))
         return key
     except:
         return []
@@ -721,20 +577,19 @@ def format_premium(volume, last_price):
     try:
         prem = volume * 100 * last_price
         if prem >= 1_000_000: return f"${prem/1_000_000:.1f}M"
-        elif prem >= 1_000: return f"${prem/1_000:.0f}K"
-        else: return f"${prem:.0f}"
+        if prem >= 1_000: return f"${prem/1_000:.0f}K"
+        return f"${prem:.0f}"
     except:
         return "N/A"
 
 def get_whale_emoji(premium):
     if premium >= 1_000_000: return "🐋🐋"
-    elif premium >= 100_000: return "🐋"
-    elif premium >= 10_000: return "🐬"
-    else: return "🐟"
+    if premium >= 100_000: return "🐋"
+    if premium >= 10_000: return "🐬"
+    return "🐟"
 
 def analyze_expiration(opt_chain, current_price, dte, min_volume=5):
-    if opt_chain.calls.empty and opt_chain.puts.empty:
-        return []
+    if opt_chain.calls.empty and opt_chain.puts.empty: return []
     calls, puts = opt_chain.calls.copy(), opt_chain.puts.copy()
     if not calls.empty: calls['type'] = 'CALL'
     if not puts.empty: puts['type'] = 'PUT'
@@ -744,8 +599,7 @@ def analyze_expiration(opt_chain, current_price, dte, min_volume=5):
         try:
             vol = opt.get('volume',0)
             oi = opt.get('openInterest',0)
-            if pd.isna(vol) or pd.isna(oi) or vol < min_volume or oi == 0:
-                continue
+            if pd.isna(vol) or pd.isna(oi) or vol < min_volume or oi == 0: continue
             strike = opt.get('strike',0)
             last = opt.get('lastPrice',0)
             opt_type = opt.get('type','CALL')
@@ -768,11 +622,10 @@ def add_field_safe(embed, name, value, inline=False):
 
 @bot.command(name='flow')
 async def options_flow(ctx, ticker: str):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
-        await ctx.send(f"🔍 Analyzing options flow for {ticker.upper()}...")
+        await ctx.send(f"Analyzing options flow for {ticker.upper()}...")
         price = await get_stock_price(ticker.upper())
         if not price:
             await ctx.send("Could not fetch price.")
@@ -817,8 +670,7 @@ async def options_flow(ctx, ticker: str):
 
 @bot.command(name='scanflow')
 async def scan_options_flow(ctx):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         watchlist = await load_watchlist()
@@ -829,25 +681,21 @@ async def scan_options_flow(ctx):
         await ctx.send(f"Scanning {len(symbols)} symbols for unusual options flow...")
         all_flow = []
         for sym in symbols:
-            if await check_cancel(ctx):
-                break
+            if await check_cancel(ctx): break
             try:
                 price = await get_stock_price(sym)
-                if not price:
-                    continue
+                if not price: continue
                 exps = get_key_expirations(sym)
                 stock = yf.Ticker(sym)
                 for exp_str, dte, label in exps:
                     if "WEEKLY" in label or "PRIMARY" in label:
                         chain = stock.option_chain(exp_str)
                         calls = chain.calls
-                        if calls.empty:
-                            continue
+                        if calls.empty: continue
                         for _, opt in calls.iterrows():
                             vol = opt.get('volume',0)
                             oi = opt.get('openInterest',0)
-                            if pd.isna(vol) or pd.isna(oi) or oi==0 or vol<10:
-                                continue
+                            if pd.isna(vol) or pd.isna(oi) or oi==0 or vol<10: continue
                             ratio = vol/oi
                             if ratio >= 1.5:
                                 strike = opt.get('strike',0)
@@ -887,16 +735,13 @@ async def scan_options_flow(ctx):
         user_busy[ctx.author.id] = False
 
 def find_swings(df, window=5):
-    if len(df) < window*2+1:
-        return [], []
+    if len(df) < window*2+1: return [], []
     highs, lows = df['high'].values, df['low'].values
     idx = df.index
     sh, sl = [], []
     for i in range(window, len(df)-window):
-        if highs[i] == max(highs[i-window:i+window+1]):
-            sh.append((idx[i], highs[i]))
-        if lows[i] == min(lows[i-window:i+window+1]):
-            sl.append((idx[i], lows[i]))
+        if highs[i] == max(highs[i-window:i+window+1]): sh.append((idx[i], highs[i]))
+        if lows[i] == min(lows[i-window:i+window+1]): sl.append((idx[i], lows[i]))
     return sh, sl
 
 def analyze_structure(df, window=5):
@@ -906,56 +751,39 @@ def analyze_structure(df, window=5):
     highs, lows = find_swings(df, window)
     current_price = df['close'].iloc[-1]
     price_40_ago = df['close'].iloc[-40] if len(df)>=40 else df['close'].iloc[0]
-    pct_change = (current_price - price_40_ago)/price_40_ago*100
-    if pct_change > 3:
-        trend = 'uptrend'
-    elif pct_change < -3:
-        trend = 'downtrend'
+    pct = (current_price - price_40_ago)/price_40_ago*100
+    if pct > 3: trend = 'uptrend'
+    elif pct < -3: trend = 'downtrend'
     else:
-        if len(highs)>=2 and highs[-1][1] > highs[-2][1]:
-            trend = 'uptrend'
-        elif len(lows)>=2 and lows[-1][1] < lows[-2][1]:
-            trend = 'downtrend'
-        else:
-            trend = 'sideways'
+        if len(highs)>=2 and highs[-1][1]>highs[-2][1]: trend='uptrend'
+        elif len(lows)>=2 and lows[-1][1]<lows[-2][1]: trend='downtrend'
+        else: trend='sideways'
     bos = []
-    for i in range(1, len(highs)):
-        if highs[i][1] > highs[i-1][1]:
-            bos.append({'type':'BOS','direction':'up','price':highs[i][1],'date':highs[i][0]})
-    for i in range(1, len(lows)):
-        if lows[i][1] < lows[i-1][1]:
-            bos.append({'type':'BOS','direction':'down','price':lows[i][1],'date':lows[i][0]})
+    for i in range(1,len(highs)):
+        if highs[i][1] > highs[i-1][1]: bos.append({'type':'BOS','direction':'up','price':highs[i][1],'date':highs[i][0]})
+    for i in range(1,len(lows)):
+        if lows[i][1] < lows[i-1][1]: bos.append({'type':'BOS','direction':'down','price':lows[i][1],'date':lows[i][0]})
     bos = bos[-3:] if len(bos)>3 else bos
-
     choch = []
-    # CHoCH up: higher low + later close above prior swing high
-    for i in range(2, len(lows)):
+    for i in range(2,len(lows)):
         if lows[i][1] > lows[i-1][1]:
             prev_high = None
             for h in highs:
-                if h[0] < lows[i][0]:
-                    prev_high = h
-                else:
-                    break
+                if h[0] < lows[i][0]: prev_high = h
+                else: break
             if prev_high:
-                mask = (df.index > lows[i][0]) & (df['close'] > prev_high[1])
-                if mask.any():
+                if (df.index > lows[i][0] & (df['close'] > prev_high[1])).any():
                     choch.append({'type':'CHoCH','direction':'up','price':lows[i][1],'date':lows[i][0]})
-    # CHoCH down: lower high + later close below prior swing low
-    for i in range(2, len(highs)):
+    for i in range(2,len(highs)):
         if highs[i][1] < highs[i-1][1]:
             prev_low = None
             for l in lows:
-                if l[0] < highs[i][0]:
-                    prev_low = l
-                else:
-                    break
+                if l[0] < highs[i][0]: prev_low = l
+                else: break
             if prev_low:
-                mask = (df.index > highs[i][0]) & (df['close'] < prev_low[1])
-                if mask.any():
+                if (df.index > highs[i][0] & (df['close'] < prev_low[1])).any():
                     choch.append({'type':'CHoCH','direction':'down','price':highs[i][1],'date':highs[i][0]})
     choch = choch[-3:] if len(choch)>3 else choch
-
     all_events = bos + choch
     all_events.sort(key=lambda x: x['date'], reverse=True)
     last = all_events[0] if all_events else None
@@ -969,8 +797,7 @@ def analyze_structure(df, window=5):
             'bos_events':bos, 'choch_events':choch, 'description':desc}
 
 def generate_structure_chart(df, symbol, structure):
-    if len(df) < 50:
-        return None
+    if len(df) < 50: return None
     chart_data = df[['open','high','low','close']].tail(100).copy()
     chart_data.columns = ['Open','High','Low','Close']
     sh, sl = find_swings(df)
@@ -984,11 +811,9 @@ def generate_structure_chart(df, symbol, structure):
         ax.bar(idx, row['High']-row['Low'], bottom=row['Low'], width=width, color=color, alpha=0.5)
         ax.bar(idx, row['Close']-row['Open'], bottom=row['Open'], width=width, color=color, alpha=1.0)
     for p in sh:
-        if p[0] in chart_data.index:
-            ax.plot(p[0], p[1], '^', color='lime', markersize=10)
+        if p[0] in chart_data.index: ax.plot(p[0], p[1], '^', color='lime', markersize=10)
     for p in sl:
-        if p[0] in chart_data.index:
-            ax.plot(p[0], p[1], 'v', color='red', markersize=10)
+        if p[0] in chart_data.index: ax.plot(p[0], p[1], 'v', color='red', markersize=10)
     for e in structure.get('bos_events',[]):
         if e['date'] in chart_data.index:
             col = '#00aaff' if e['direction']=='up' else '#ff8800'
@@ -1033,8 +858,7 @@ def generate_structure_chart(df, symbol, structure):
 
 @bot.command(name='structure')
 async def market_structure(ctx, ticker: str, timeframe: str = 'daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1053,11 +877,9 @@ async def market_structure(ctx, ticker: str, timeframe: str = 'daily'):
             await ctx.send(f"Scanning {len(symbols)} stocks on {timeframe}...")
             bos_up, choch_up, bos_down, choch_down = [], [], [], []
             for sym in symbols:
-                if await check_cancel(ctx):
-                    break
+                if await check_cancel(ctx): break
                 df = await fetch_ohlcv(sym, timeframe)
-                if df is None or len(df) < 50:
-                    continue
+                if df is None or len(df) < 50: continue
                 df = calculate_indicators(df)
                 struct = analyze_structure(df)
                 price = df['close'].iloc[-1]
@@ -1129,8 +951,7 @@ async def market_structure(ctx, ticker: str, timeframe: str = 'daily'):
 
 @bot.command(name='strength')
 async def trend_strength(ctx, ticker: str, timeframe: str = 'daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         symbol = normalize_symbol(ticker)
@@ -1152,16 +973,16 @@ async def trend_strength(ctx, ticker: str, timeframe: str = 'daily'):
         curr_vol = df['volume'].iloc[-1]
         vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1
         ema13, ema50, ema200 = df['ema13'].iloc[-1], df['ema50'].iloc[-1], df['ema200'].iloc[-1]
-        above_13 = price > ema13
-        above_50 = price > ema50
-        above_200 = price > ema200
+        above13 = price > ema13
+        above50 = price > ema50
+        above200 = price > ema200
         embed = discord.Embed(title=f"Trend Strength: {symbol} ({timeframe})", description=f"Price: ${price:.2f}", color=0x3498db)
         embed.add_field(name="ADX", value=f"{'Strong' if adx>25 else 'Moderate' if adx>20 else 'Weak'} ({adx:.1f})", inline=True)
         embed.add_field(name="RSI", value=f"{'Oversold' if rsi<30 else 'Overbought' if rsi>70 else 'Neutral'} ({rsi:.1f})", inline=True)
         embed.add_field(name="Volume", value=f"{'High' if vol_ratio>1.5 else 'Low' if vol_ratio<0.5 else 'Normal'} ({vol_ratio:.1f}x)", inline=True)
-        embed.add_field(name="Price vs EMA13", value="Above" if above_13 else "Below", inline=True)
-        embed.add_field(name="Price vs EMA50", value="Above" if above_50 else "Below", inline=True)
-        embed.add_field(name="Price vs EMA200", value="Above" if above_200 else "Below", inline=True)
+        embed.add_field(name="Price vs EMA13", value="Above" if above13 else "Below", inline=True)
+        embed.add_field(name="Price vs EMA50", value="Above" if above50 else "Below", inline=True)
+        embed.add_field(name="Price vs EMA200", value="Above" if above200 else "Below", inline=True)
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send(f"Error: {str(e)}")
@@ -1170,8 +991,7 @@ async def trend_strength(ctx, ticker: str, timeframe: str = 'daily'):
 
 @bot.command(name='zone')
 async def zone(ctx, ticker: str, timeframe: str = '30min'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1214,8 +1034,7 @@ async def zone(ctx, ticker: str, timeframe: str = '30min'):
         user_busy[ctx.author.id] = False
 
 def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance=0.005):
-    if len(df) < 50:
-        return []
+    if len(df) < 50: return []
     df = df.iloc[-lookback:].copy()
     df['range'] = df['high'] - df['low']
     thresh = np.percentile(df['range'].dropna(), threshold_percentile)
@@ -1224,10 +1043,8 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
     for idx, row in large.iterrows():
         level = row['low']
         after = df.loc[idx:]
-        if len(after) < 2:
-            continue
-        if (after['close'] < level * (1 - touch_tolerance)).any():
-            continue
+        if len(after) < 2: continue
+        if (after['close'] < level * (1 - touch_tolerance)).any(): continue
         touches = after['low'] <= level * (1 + touch_tolerance)
         strength = int(touches.sum())
         if strength >= 1:
@@ -1237,8 +1054,7 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
 
 @bot.command(name='upcoming')
 async def upcoming_events(ctx, ticker: str):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         symbol = ticker.upper()
@@ -1255,8 +1071,7 @@ async def upcoming_events(ctx, ticker: str):
                         eps = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
                         eps = 'N/A' if eps is None or pd.isna(eps) else f"{eps:.2f}"
                         earnings.append({'date':e_date.strftime('%Y-%m-%d'),'eps':eps})
-        except:
-            pass
+        except: pass
         dividends = []
         try:
             divs = stock.dividends
@@ -1266,8 +1081,7 @@ async def upcoming_events(ctx, ticker: str):
                     d_date = date.date() if hasattr(date,'date') else datetime.strptime(str(date),'%Y-%m-%d').date()
                     if d_date >= today:
                         dividends.append({'date':d_date.strftime('%Y-%m-%d'),'amount':f"${amt:.2f}"})
-        except:
-            pass
+        except: pass
         splits = []
         try:
             sp = stock.splits
@@ -1278,8 +1092,7 @@ async def upcoming_events(ctx, ticker: str):
                     if s_date >= today:
                         ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
                         splits.append({'date':s_date.strftime('%Y-%m-%d'),'ratio':ratio_str})
-        except:
-            pass
+        except: pass
         if not earnings and not dividends and not splits:
             await ctx.send("No upcoming events.")
             return
@@ -1301,8 +1114,7 @@ async def upcoming_events(ctx, ticker: str):
 
 @bot.command(name='backtest')
 async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         await ctx.send(f"Backtesting {symbol.upper()} over {days} days...")
@@ -1314,7 +1126,7 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
         df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
         df = calculate_indicators(df)
         signals = [get_signals(df.iloc[:i+1]) for i in range(len(df)) if get_signals(df.iloc[:i+1])]
-        equity, pos, entry_price, trades = [1.0], False, 0, []
+        equity, pos, entry_price = [1.0], False, 0
         for i in range(1, len(signals)):
             prev_sig = signals[i-1]
             open_today = df['open'].iloc[i] if i < len(df) else df['close'].iloc[-1]
@@ -1323,7 +1135,6 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
                     pos, entry_price = True, open_today
                     equity[-1] *= (1 - cost)
             else:
-                # exit when signal reverses (or at end)
                 if (prev_sig['net_score'] > 0 and signals[i]['net_score'] < 0) or (prev_sig['net_score'] < 0 and signals[i]['net_score'] > 0) or i == len(signals)-1:
                     exit_price = open_today if i < len(df) else df['close'].iloc[-1]
                     ret = (exit_price - entry_price) / entry_price
@@ -1342,8 +1153,7 @@ async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
 
 @bot.command(name='signal')
 async def signal_single(ctx, ticker: str):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         symbol = normalize_symbol(ticker)
@@ -1369,8 +1179,7 @@ async def signal_single(ctx, ticker: str):
 
 @bot.command(name='signals')
 async def signals(ctx):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         watchlist = await load_watchlist()
@@ -1378,8 +1187,7 @@ async def signals(ctx):
         tfs = ['5min','15min','30min','1h','4h','daily','weekly']
         await ctx.send(f"Scanning {len(symbols)} symbols across all timeframes...")
         for sym in symbols:
-            if await check_cancel(ctx):
-                break
+            if await check_cancel(ctx): break
             found = False
             for tf in tfs:
                 df = await fetch_ohlcv(sym, tf)
@@ -1399,8 +1207,7 @@ async def signals(ctx):
 
 @bot.command(name='scan')
 async def scan(ctx, target='all', timeframe='daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1431,8 +1238,7 @@ async def scan(ctx, target='all', timeframe='daily'):
             return
         await ctx.send(f"Scanning {len(symbols)} symbols on {timeframe}...")
         for sym in symbols:
-            if await check_cancel(ctx):
-                break
+            if await check_cancel(ctx): break
             df = await fetch_ohlcv(sym, timeframe)
             if df is not None and not df.empty:
                 df = calculate_indicators(df)
@@ -1454,8 +1260,7 @@ async def fetch_earnings_upcoming(symbol, days=7):
     try:
         stock = yf.Ticker(symbol)
         edates = stock.earnings_dates
-        if edates is None or edates.empty:
-            return []
+        if edates is None or edates.empty: return []
         today = datetime.now().date()
         upcoming = []
         for date, row in edates.iterrows():
@@ -1472,16 +1277,14 @@ async def fetch_analyst_ratings(symbol, limit=3):
     try:
         async with aiohttp.ClientSession(timeout=10) as session:
             async with session.get(url, params=params) as resp:
-                if resp.status != 200:
-                    return []
+                if resp.status != 200: return []
                 data = await resp.json()
                 return data[:limit] if data else []
     except:
         return []
 
 async def calculate_quick_score(df, symbol, timeframe):
-    if df is None or df.empty:
-        return 0, "No data"
+    if df is None or df.empty: return 0, "No data"
     price = df['close'].iloc[-1]
     rsi = df['rsi'].iloc[-1] if 'rsi' in df.columns else 50
     adx = ta.trend.adx(df['high'], df['low'], df['close'], window=14).iloc[-1] if len(df)>=20 else 20
@@ -1583,8 +1386,7 @@ def get_score_color(score):
 
 @bot.command(name='score')
 async def quick_score(ctx, target: str = None, timeframe: str = 'daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1617,11 +1419,9 @@ async def quick_score(ctx, target: str = None, timeframe: str = 'daily'):
         await ctx.send(f"Scanning {len(symbols)} stocks on {timeframe}...")
         results = []
         for sym in symbols:
-            if await check_cancel(ctx):
-                break
+            if await check_cancel(ctx): break
             df = await fetch_ohlcv(sym, timeframe)
-            if df is None or len(df) < 30:
-                continue
+            if df is None or len(df) < 30: continue
             df = calculate_indicators(df)
             score, _ = await calculate_quick_score(df, sym, timeframe)
             price = df['close'].iloc[-1]
@@ -1645,8 +1445,7 @@ async def quick_score(ctx, target: str = None, timeframe: str = 'daily'):
 
 @bot.command(name='confirm')
 async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1658,7 +1457,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
             await ctx.send("Only stocks.")
             return
         await ctx.send(f"Confirming {symbol} on {timeframe}...")
-        # Bot's historical data
         df = await fetch_ohlcv(symbol, timeframe)
         if df is None or df.empty:
             await ctx.send("No data.")
@@ -1675,19 +1473,14 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         above13 = price_bot > ema13
         above50 = price_bot > ema50
         above200 = price_bot > ema200
-        # Live price check
+        # Live price
         live_price = await get_stock_price(symbol)
-        live_price_diff = abs(live_price - price_bot) / price_bot * 100 if live_price else None
-        live_status = f"Live price: ${live_price:.2f}" if live_price else "Live price unavailable"
-        if live_price and live_price_diff < 0.5:
-            live_alignment = "✅ Aligned (within 0.5%)"
-        elif live_price:
-            live_alignment = f"⚠️ Moved {live_price_diff:.2f}% since last close"
-        else:
-            live_alignment = "❌ Could not fetch live"
+        live_diff = abs(live_price - price_bot)/price_bot*100 if live_price else None
+        live_str = f"${live_price:.2f}" if live_price else "unavailable"
+        live_match = "✅ Aligned" if live_price and live_diff<0.5 else f"⚠️ Moved {live_diff:.2f}%" if live_price else "❌ No live data"
         # Demand zones
         df_30 = await fetch_ohlcv(symbol, '30min')
-        zones = find_demand_zones(df_30) if df_30 is not None else []
+        zones = find_demand_zones(df_30) if df_30 else []
         near_zone = any(abs((price_bot - z['level'])/price_bot) < 0.02 for z in zones)
         # Options flow
         unusual = False
@@ -1704,10 +1497,9 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
                         if oi>0 and vol/oi > 1.5:
                             unusual = True
                             break
-        except:
-            pass
+        except: pass
         # Earnings
-        earnings = await fetch_earnings_upcoming(symbol, days=7)
+        earnings = await fetch_earnings_upcoming(symbol, 7)
         earnings_soon = len(earnings) > 0
         # SPY trend
         spy_df = await fetch_ohlcv('SPY', 'daily')
@@ -1717,84 +1509,62 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         reasons_bull = []
         reasons_bear = []
         if struct['last_event'] == 'CHoCH' and struct['last_event_direction'] == 'up':
-            score += 25
-            reasons_bull.append("CHoCH UP +25")
+            score += 25; reasons_bull.append("CHoCH UP +25")
         elif struct['last_event'] == 'BOS' and struct['last_event_direction'] == 'up':
-            score += 20
-            reasons_bull.append("BOS UP +20")
+            score += 20; reasons_bull.append("BOS UP +20")
         elif struct['last_event'] == 'CHoCH' and struct['last_event_direction'] == 'down':
-            score -= 25
-            reasons_bear.append("CHoCH DOWN -25")
+            score -= 25; reasons_bear.append("CHoCH DOWN -25")
         elif struct['last_event'] == 'BOS' and struct['last_event_direction'] == 'down':
-            score -= 20
-            reasons_bear.append("BOS DOWN -20")
+            score -= 20; reasons_bear.append("BOS DOWN -20")
         if adx > 25:
-            score += 15
-            reasons_bull.append(f"Strong trend ADX {adx:.1f} +15")
+            score += 15; reasons_bull.append(f"Strong ADX {adx:.1f} +15")
         elif adx > 20:
-            score += 8
-            reasons_bull.append(f"Moderate trend ADX {adx:.1f} +8")
+            score += 8; reasons_bull.append(f"Moderate ADX {adx:.1f} +8")
         else:
-            score -= 5
-            reasons_bear.append(f"Weak trend ADX {adx:.1f} -5")
+            score -= 5; reasons_bear.append(f"Weak ADX {adx:.1f} -5")
         if 30 <= rsi <= 70:
-            score += 10
-            reasons_bull.append(f"RSI neutral {rsi:.1f} +10")
+            score += 10; reasons_bull.append(f"RSI neutral {rsi:.1f} +10")
         elif rsi < 30:
-            score += 8
-            reasons_bull.append(f"RSI oversold +8")
+            score += 8; reasons_bull.append(f"RSI oversold +8")
         else:
-            score -= 8
-            reasons_bear.append(f"RSI overbought -8")
+            score -= 8; reasons_bear.append(f"RSI overbought -8")
         ema_pts = 0
         if above13: ema_pts += 3
         if above50: ema_pts += 3
         if above200: ema_pts += 4
         if ema13 > ema50 > ema200:
-            ema_pts += 5
-            reasons_bull.append("Perfect EMA stack +5")
+            ema_pts += 5; reasons_bull.append("Perfect EMA stack +5")
         score += ema_pts
         if timeframe in ['daily','weekly']:
             if vol_ratio > 1.5:
-                score += 10
-                reasons_bull.append(f"High volume {vol_ratio:.1f}x +10")
+                score += 10; reasons_bull.append(f"High volume {vol_ratio:.1f}x +10")
             elif vol_ratio > 1.2:
-                score += 6
-                reasons_bull.append(f"Above avg volume +6")
+                score += 6; reasons_bull.append(f"Above avg volume +6")
             elif vol_ratio > 0.8:
-                score += 3
-                reasons_bull.append(f"Normal volume +3")
+                score += 3; reasons_bull.append("Normal volume +3")
             elif vol_ratio > 0.5:
-                score -= 5
-                reasons_bear.append(f"Low volume -5")
+                score -= 5; reasons_bear.append(f"Low volume -5")
             else:
-                score -= 10
-                reasons_bear.append(f"Very low volume -10")
+                score -= 10; reasons_bear.append("Very low volume -10")
         else:
             if vol_ratio > 1.5:
-                score += 5
-                reasons_bull.append(f"Intraday high vol +5")
+                score += 5; reasons_bull.append(f"Intraday high vol +5")
         if near_zone:
-            score += 5
-            reasons_bull.append("Near demand zone +5")
+            score += 5; reasons_bull.append("Near demand zone +5")
         if unusual:
-            score += 10
-            reasons_bull.append("Unusual call volume +10")
+            score += 10; reasons_bull.append("Unusual call volume +10")
         if earnings_soon:
-            score -= 15
-            reasons_bear.append("Earnings within 7 days -15")
+            score -= 15; reasons_bear.append("Earnings within 7 days -15")
         if spy_trend == "bullish":
-            score += 5
-            reasons_bull.append("SPY uptrend +5")
+            score += 5; reasons_bull.append("SPY uptrend +5")
         else:
-            score -= 5
-            reasons_bear.append("SPY downtrend -5")
+            score -= 5; reasons_bear.append("SPY downtrend -5")
         score = max(0, min(100, score))
-        # Confidence (based on score and live alignment)
+        # Confidence
         confidence = score
-        if live_price and live_price_diff < 0.5:
+        if live_price and live_diff < 0.5:
             confidence = min(100, score + 5)
-        elif live_price and live_price_diff > 1:
+        elif live_price and live_diff > 1:
             confidence = max(0, score - 10)
         # Recommendation
         if score >= 65 and struct['last_event_direction'] == 'up':
@@ -1816,7 +1586,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         else:
             rec, rec_color, action = "⚪ WAIT – No clear edge", 0x888888, "No trade"
             sl = tp = None
-        embed = discord.Embed(title=f"Confirmation: {symbol} ({timeframe})", description=f"Price: ${price_bot:.2f}\nLive: {live_alignment}\nScore: {score}/100  |  Confidence: {confidence}%\n{rec}", color=rec_color)
+        embed = discord.Embed(title=f"Confirmation: {symbol} ({timeframe})", description=f"Price: ${price_bot:.2f} | Live: {live_str} {live_match}\nScore: {score}/100 | Confidence: {confidence}%\n{rec}", color=rec_color)
         if reasons_bull:
             embed.add_field(name="Bullish", value="\n".join(reasons_bull[:6]), inline=False)
         if reasons_bear:
@@ -1834,8 +1604,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
 
 @bot.command(name='analyze')
 async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         now = datetime.now()
@@ -1868,13 +1637,18 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
         # Live price
         live_price = await get_stock_price(symbol)
         if live_price:
-            diff_pct = abs(live_price - price_bot)/price_bot*100
-            live_text = f"${live_price:.2f} ({'aligned' if diff_pct<0.5 else f'Δ {diff_pct:.2f}%'})"
+            diff = abs(live_price - price_bot)/price_bot*100
+            live_text = f"${live_price:.2f} ({'aligned' if diff<0.5 else f'Δ {diff:.1f}%'})"
         else:
             live_text = "unavailable"
-        # Score
+        # Score & confidence
         score, details = await calculate_quick_score(df, symbol, timeframe)
-        # Options flow summary
+        confidence = score
+        if live_price and diff < 0.5:
+            confidence = min(100, score + 5)
+        elif live_price and diff > 1:
+            confidence = max(0, score - 10)
+        # Options summary
         flow_text = ""
         try:
             price_flow = await get_stock_price(symbol)
@@ -1882,28 +1656,22 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
                 exps = get_key_expirations(symbol)
                 if exps:
                     stock = yf.Ticker(symbol)
-                    high_prob = []
+                    hp = []
                     for exp_str, dte, label in exps:
                         if "PRIMARY" in label or "MONTHLY" in label:
                             chain = stock.option_chain(exp_str)
                             analyzed = analyze_expiration(chain, price_flow, dte)
                             for opt in analyzed:
                                 if opt['vol_oi_ratio'] >= 1.5 and opt['distance_pct'] <= 20:
-                                    high_prob.append(opt)
-                    high_prob.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
-                    for opt in high_prob[:2]:
+                                    hp.append(opt)
+                    hp.sort(key=lambda x: x['vol_oi_ratio'], reverse=True)
+                    for opt in hp[:2]:
                         flow_text += f"${opt['strike']:.2f} {opt['type']} (vol {opt['vol_oi_ratio']:.1f}x)\n"
         except:
             pass
         # Earnings
-        earnings = await fetch_earnings_upcoming(symbol, days=7)
+        earnings = await fetch_earnings_upcoming(symbol, 7)
         earn_text = earnings[0]['date'] if earnings else "None in 7 days"
-        # Confidence
-        confidence = score
-        if live_price and diff_pct < 0.5:
-            confidence = min(100, score + 5)
-        elif live_price and diff_pct > 1:
-            confidence = max(0, score - 10)
         # Recommendation
         if score >= 65 and struct['last_event_direction'] == 'up':
             rec, rec_color = "🟢 CALL", 0x00ff00
@@ -1929,13 +1697,10 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
     finally:
         user_busy[ctx.author.id] = False
 
-# ====================
-# WATCHLIST COMMANDS
-# ====================
+# ==================== WATCHLIST COMMANDS ====================
 @bot.command(name='add')
 async def add_symbol(ctx, symbol):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         sym = normalize_symbol(symbol.upper())
@@ -1943,53 +1708,40 @@ async def add_symbol(ctx, symbol):
         if '/' in sym:
             if sym not in wl['crypto']:
                 wl['crypto'].append(sym)
-                if await save_watchlist(wl):
-                    await ctx.send(f"✅ Added {sym} to crypto watchlist.")
-                else:
-                    await ctx.send("Failed to save.")
-            else:
-                await ctx.send(f"{sym} already in crypto.")
+                if await save_watchlist(wl): await ctx.send(f"✅ Added {sym} to crypto.")
+                else: await ctx.send("Failed.")
+            else: await ctx.send(f"{sym} already in crypto.")
         else:
             if sym not in wl['stocks']:
                 wl['stocks'].append(sym)
-                if await save_watchlist(wl):
-                    await ctx.send(f"✅ Added {sym} to stocks watchlist.")
-                else:
-                    await ctx.send("Failed to save.")
-            else:
-                await ctx.send(f"{sym} already in stocks.")
+                if await save_watchlist(wl): await ctx.send(f"✅ Added {sym} to stocks.")
+                else: await ctx.send("Failed.")
+            else: await ctx.send(f"{sym} already in stocks.")
     finally:
         user_busy[ctx.author.id] = False
 
 @bot.command(name='remove')
 async def remove_symbol(ctx, symbol):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         sym = normalize_symbol(symbol.upper())
         wl = await load_watchlist()
         if sym in wl['stocks']:
             wl['stocks'].remove(sym)
-            if await save_watchlist(wl):
-                await ctx.send(f"✅ Removed {sym} from stocks.")
-            else:
-                await ctx.send("Failed.")
+            if await save_watchlist(wl): await ctx.send(f"✅ Removed {sym} from stocks.")
+            else: await ctx.send("Failed.")
         elif sym in wl['crypto']:
             wl['crypto'].remove(sym)
-            if await save_watchlist(wl):
-                await ctx.send(f"✅ Removed {sym} from crypto.")
-            else:
-                await ctx.send("Failed.")
-        else:
-            await ctx.send(f"{sym} not found.")
+            if await save_watchlist(wl): await ctx.send(f"✅ Removed {sym} from crypto.")
+            else: await ctx.send("Failed.")
+        else: await ctx.send(f"{sym} not found.")
     finally:
         user_busy[ctx.author.id] = False
 
 @bot.command(name='list')
 async def list_watchlist(ctx):
-    if user_busy.get(ctx.author.id):
-        return
+    if user_busy.get(ctx.author.id): return
     user_busy[ctx.author.id] = True
     try:
         wl = await load_watchlist()
@@ -2009,7 +1761,7 @@ async def help_command(ctx):
     embed.add_field(name="Other", value="`!upcoming SYMBOL` `!backtest SYMBOL`", inline=False)
     embed.add_field(name="Watchlist", value="`!add SYMBOL` `!remove SYMBOL` `!list`", inline=False)
     embed.add_field(name="Utility", value="`!ping` `!stopscan` `!cancel` `!help`", inline=False)
-    embed.set_footer(text="Timeframes: 5min,15min,30min,1h,4h,daily,weekly")
+    embed.set_footer(text="Default timeframe = daily | Use !analyze SYMBOL daily")
     await ctx.send(embed=embed)
 
 @bot.command(name='ping')
