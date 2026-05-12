@@ -230,11 +230,10 @@ async def fetch_ohlcv(symbol, timeframe):
         return data_cache[cache_key][0]
     df = None
     is_crypto = '/' in symbol
-    # For daily, use yfinance directly (most reliable)
     if not is_crypto and timeframe == 'daily':
         try:
             ticker = yf.Ticker(symbol)
-            df = ticker.history(period="60d", interval="1d")
+            df = ticker.history(period="120d", interval="1d")
             if not df.empty:
                 df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
                 print(f"✅ yfinance daily {symbol}: price={df['close'].iloc[-1]:.2f}, vol={df['volume'].iloc[-1]}")
@@ -242,7 +241,6 @@ async def fetch_ohlcv(symbol, timeframe):
                 return df
         except Exception as e:
             print(f"yfinance daily failed: {e}")
-    # Fallback for other timeframes or if yfinance fails
     if df is None and not is_crypto and ALPACA_API_KEY and ALPACA_SECRET_KEY:
         tf_map = {'5min':(TimeFrame.Minute,5),'15min':(TimeFrame.Minute,15),'30min':(TimeFrame.Minute,30),
                   '1h':(TimeFrame.Hour,1),'4h':(TimeFrame.Hour,4),'daily':(TimeFrame.Day,1),'weekly':(TimeFrame.Week,1)}
@@ -286,6 +284,9 @@ async def fetch_ohlcv(symbol, timeframe):
     return df
 
 def calculate_indicators(df):
+    if len(df) < 50:
+        # Not enough data for EMAs
+        return df
     df['ema5'] = ta.trend.ema_indicator(df['close'], window=5)
     df['ema13'] = ta.trend.ema_indicator(df['close'], window=13)
     df['ema50'] = ta.trend.ema_indicator(df['close'], window=50)
@@ -307,40 +308,40 @@ def get_signals(df):
     prev = df.iloc[-2]
     signals = {}
     signals['price'] = latest['close']
-    signals['ema5'] = latest['ema5']
-    signals['ema13'] = latest['ema13']
-    signals['ema50'] = latest['ema50']
-    signals['ema200'] = latest['ema200']
+    signals['ema5'] = latest['ema5'] if 'ema5' in df.columns else None
+    signals['ema13'] = latest['ema13'] if 'ema13' in df.columns else None
+    signals['ema50'] = latest['ema50'] if 'ema50' in df.columns else None
+    signals['ema200'] = latest['ema200'] if 'ema200' in df.columns else None
     if 'volume' in latest and 'volume_avg' in latest and pd.notna(latest['volume_avg']):
         signals['volume'] = latest['volume']
         signals['volume_avg'] = latest['volume_avg']
     else:
         signals['volume'] = None
         signals['volume_avg'] = None
-    signals['trend'] = 'UPTREND' if latest['close'] > latest['ema50'] and latest['ema5'] > latest['ema13'] else 'DOWNTREND'
+    signals['trend'] = 'UPTREND' if (signals['ema50'] and latest['close'] > signals['ema50'] and signals['ema5'] and signals['ema5'] > signals['ema13']) else 'DOWNTREND'
     signals['support_20'] = df['low'].tail(20).min()
     signals['resistance_20'] = df['high'].tail(20).max()
-    signals['ema5_above_13'] = latest['ema5'] > latest['ema13']
-    signals['ema13_above_50'] = latest['ema13'] > latest['ema50']
-    signals['ema5_cross_above_13'] = prev['ema5'] <= prev['ema13'] and latest['ema5'] > latest['ema13']
-    signals['ema5_cross_below_13'] = prev['ema5'] >= prev['ema13'] and latest['ema5'] < latest['ema13']
-    signals['ema13_cross_above_50'] = prev['ema13'] <= prev['ema50'] and latest['ema13'] > latest['ema50']
-    signals['ema13_cross_below_50'] = prev['ema13'] >= prev['ema50'] and latest['ema13'] < latest['ema50']
-    signals['touch_upper_bb'] = latest['high'] >= latest['bb_upper']
-    signals['touch_lower_bb'] = latest['low'] <= latest['bb_lower']
-    signals['rsi'] = latest['rsi']
-    signals['rsi_overbought'] = latest['rsi'] >= 75
-    signals['rsi_oversold'] = latest['rsi'] <= 25
-    signals['buy_signal'] = signals['ema5_cross_above_13'] and latest['rsi'] >= 50
-    signals['sell_signal'] = signals['ema5_cross_below_13'] and latest['rsi'] <= 50
+    signals['ema5_above_13'] = signals['ema5'] and signals['ema13'] and signals['ema5'] > signals['ema13']
+    signals['ema13_above_50'] = signals['ema13'] and signals['ema50'] and signals['ema13'] > signals['ema50']
+    signals['ema5_cross_above_13'] = (prev['ema5'] <= prev['ema13']) and (latest['ema5'] > latest['ema13']) if 'ema5' in prev and 'ema13' in prev else False
+    signals['ema5_cross_below_13'] = (prev['ema5'] >= prev['ema13']) and (latest['ema5'] < latest['ema13']) if 'ema5' in prev and 'ema13' in prev else False
+    signals['ema13_cross_above_50'] = (prev['ema13'] <= prev['ema50']) and (latest['ema13'] > latest['ema50']) if 'ema13' in prev and 'ema50' in prev else False
+    signals['ema13_cross_below_50'] = (prev['ema13'] >= prev['ema50']) and (latest['ema13'] < latest['ema50']) if 'ema13' in prev and 'ema50' in prev else False
+    signals['touch_upper_bb'] = latest['high'] >= latest['bb_upper'] if 'bb_upper' in latest else False
+    signals['touch_lower_bb'] = latest['low'] <= latest['bb_lower'] if 'bb_lower' in latest else False
+    signals['rsi'] = latest['rsi'] if 'rsi' in latest else 50
+    signals['rsi_overbought'] = signals['rsi'] >= 75
+    signals['rsi_oversold'] = signals['rsi'] <= 25
+    signals['buy_signal'] = signals['ema5_cross_above_13'] and signals['rsi'] >= 50
+    signals['sell_signal'] = signals['ema5_cross_below_13'] and signals['rsi'] <= 50
     signals['overbought_triangle'] = signals['touch_upper_bb'] and signals['rsi_overbought']
     signals['oversold_triangle'] = signals['touch_lower_bb'] and signals['rsi_oversold']
     bullish = [signals['ema5_cross_above_13'], signals['ema13_cross_above_50'], signals['buy_signal'],
                signals['oversold_triangle'], signals['rsi_oversold']]
     bearish = [signals['ema5_cross_below_13'], signals['ema13_cross_below_50'], signals['sell_signal'],
                signals['overbought_triangle'], signals['rsi_overbought']]
-    signals['bullish_count'] = sum(bullish)
-    signals['bearish_count'] = sum(bearish)
+    signals['bullish_count'] = sum([1 for b in bullish if b])
+    signals['bearish_count'] = sum([1 for b in bearish if b])
     signals['net_score'] = signals['bullish_count'] - signals['bearish_count']
     return signals
 
@@ -349,7 +350,7 @@ def get_rating(signals):
     rsi = signals['rsi']
     buy_signal = signals['buy_signal']
     sell_signal = signals['sell_signal']
-    above_200 = signals['price'] > signals['ema200'] if not pd.isna(signals['ema200']) else False
+    above_200 = signals['price'] > signals['ema200'] if signals['ema200'] and not pd.isna(signals['ema200']) else False
     ob_triangle = signals['overbought_triangle']
     os_triangle = signals['oversold_triangle']
     if net >= 2 or (buy_signal and rsi >= 60) or os_triangle:
@@ -498,7 +499,7 @@ def format_embed(symbol, signals, timeframe, peg_str=None):
     if peg_str and '/' not in symbol:
         embed.add_field(name="PEG Ratio", value=peg_str, inline=True)
     ema_items = [(signals['ema5'],'5','🟢'),(signals['ema13'],'13','🟡'),(signals['ema50'],'50','🔴'),(signals['ema200'],'200','🟣')]
-    valid = [(v,l,e) for v,l,e in ema_items if not pd.isna(v)]
+    valid = [(v,l,e) for v,l,e in ema_items if v and not pd.isna(v)]
     valid.sort(reverse=True)
     ema_text = "\n".join([f"{e} {l}: ${v:.2f}" for v,l,e in valid]) if valid else "N/A"
     embed.add_field(name="EMAs (sorted)", value=ema_text, inline=False)
@@ -539,6 +540,10 @@ def format_zone_embed(symbol, signals, timeframe):
 async def get_stock_price(symbol):
     try:
         ticker = yf.Ticker(symbol)
+        data = ticker.history(period="1d", interval="1m")
+        if not data.empty:
+            return data['Close'].iloc[-1]
+        # fallback
         data = ticker.history(period="1d")
         return data['Close'].iloc[-1] if not data.empty else None
     except:
@@ -1052,210 +1057,6 @@ def find_demand_zones(df, lookback=200, threshold_percentile=90, touch_tolerance
     zones.sort(key=lambda x: x['level'])
     return zones
 
-@bot.command(name='upcoming')
-async def upcoming_events(ctx, ticker: str):
-    if user_busy.get(ctx.author.id): return
-    user_busy[ctx.author.id] = True
-    try:
-        symbol = ticker.upper()
-        await ctx.send(f"Fetching upcoming events for {symbol}...")
-        stock = yf.Ticker(symbol)
-        earnings = []
-        try:
-            edates = stock.earnings_dates
-            if edates is not None and not edates.empty:
-                today = datetime.now().date()
-                for date, row in edates.iterrows():
-                    e_date = date.date() if hasattr(date,'date') else datetime.strptime(str(date),'%Y-%m-%d').date()
-                    if e_date >= today:
-                        eps = row.get('epsEstimated') if 'epsEstimated' in row else row.get('epsEstimate')
-                        eps = 'N/A' if eps is None or pd.isna(eps) else f"{eps:.2f}"
-                        earnings.append({'date':e_date.strftime('%Y-%m-%d'),'eps':eps})
-        except: pass
-        dividends = []
-        try:
-            divs = stock.dividends
-            if not divs.empty:
-                today = datetime.now().date()
-                for date, amt in divs.items():
-                    d_date = date.date() if hasattr(date,'date') else datetime.strptime(str(date),'%Y-%m-%d').date()
-                    if d_date >= today:
-                        dividends.append({'date':d_date.strftime('%Y-%m-%d'),'amount':f"${amt:.2f}"})
-        except: pass
-        splits = []
-        try:
-            sp = stock.splits
-            if not sp.empty:
-                today = datetime.now().date()
-                for date, ratio in sp.items():
-                    s_date = date.date() if hasattr(date,'date') else datetime.strptime(str(date),'%Y-%m-%d').date()
-                    if s_date >= today:
-                        ratio_str = f"{ratio:.0f}:1" if ratio >= 1 else f"1:{int(1/ratio)}"
-                        splits.append({'date':s_date.strftime('%Y-%m-%d'),'ratio':ratio_str})
-        except: pass
-        if not earnings and not dividends and not splits:
-            await ctx.send("No upcoming events.")
-            return
-        embed = discord.Embed(title=f"Upcoming: {symbol}", color=0x00ff00)
-        if earnings:
-            txt = "\n".join([f"**{e['date']}** – EPS Est: {e['eps']}" for e in earnings[:3]])
-            embed.add_field(name="Earnings", value=txt, inline=False)
-        if dividends:
-            txt = "\n".join([f"**{d['date']}** – {d['amount']}" for d in dividends[:2]])
-            embed.add_field(name="Dividends", value=txt, inline=False)
-        if splits:
-            txt = "\n".join([f"**{s['date']}** – {s['ratio']}" for s in splits[:2]])
-            embed.add_field(name="Stock Splits", value=txt, inline=False)
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='backtest')
-async def backtest(ctx, symbol: str, days: int = 365, cost: float = 0.001):
-    if user_busy.get(ctx.author.id): return
-    user_busy[ctx.author.id] = True
-    try:
-        await ctx.send(f"Backtesting {symbol.upper()} over {days} days...")
-        ticker = yf.Ticker(symbol.upper())
-        df = ticker.history(period=f"{days}d", interval="1d")
-        if df.empty:
-            await ctx.send("No data.")
-            return
-        df = df.rename(columns={'Open':'open','High':'high','Low':'low','Close':'close','Volume':'volume'})
-        df = calculate_indicators(df)
-        signals = [get_signals(df.iloc[:i+1]) for i in range(len(df)) if get_signals(df.iloc[:i+1])]
-        equity, pos, entry_price = [1.0], False, 0
-        for i in range(1, len(signals)):
-            prev_sig = signals[i-1]
-            open_today = df['open'].iloc[i] if i < len(df) else df['close'].iloc[-1]
-            if not pos:
-                if prev_sig['net_score'] > 0 or prev_sig['net_score'] < 0:
-                    pos, entry_price = True, open_today
-                    equity[-1] *= (1 - cost)
-            else:
-                if (prev_sig['net_score'] > 0 and signals[i]['net_score'] < 0) or (prev_sig['net_score'] < 0 and signals[i]['net_score'] > 0) or i == len(signals)-1:
-                    exit_price = open_today if i < len(df) else df['close'].iloc[-1]
-                    ret = (exit_price - entry_price) / entry_price
-                    equity.append(equity[-1] * (1+ret) * (1-cost))
-                    pos = False
-        if len(equity) < 2:
-            await ctx.send("No trades.")
-            return
-        ret = (equity[-1]-1)*100
-        embed = discord.Embed(title=f"Backtest {symbol.upper()}", description=f"Return: {ret:.2f}%", color=0x00ff00 if ret>0 else 0xff0000)
-        await ctx.send(embed=embed)
-    except Exception as e:
-        await ctx.send(f"Error: {str(e)}")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='signal')
-async def signal_single(ctx, ticker: str):
-    if user_busy.get(ctx.author.id): return
-    user_busy[ctx.author.id] = True
-    try:
-        symbol = normalize_symbol(ticker)
-        await ctx.send(f"Multi‑timeframe analysis for {symbol}...")
-        tfs = ['5min','15min','30min','1h','4h','daily','weekly']
-        found = False
-        for tf in tfs:
-            df = await fetch_ohlcv(symbol, tf)
-            if df is not None and not df.empty:
-                df = calculate_indicators(df)
-                sig = get_signals(df)
-                if sig and sig['net_score'] != 0:
-                    if not found:
-                        await ctx.send(f"**{symbol}**")
-                        found = True
-                    embed = format_embed(symbol, sig, tf)
-                    await ctx.send(embed=embed)
-            await asyncio.sleep(0.3)
-        if not found:
-            await ctx.send(f"No active signals for {symbol}.")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='signals')
-async def signals(ctx):
-    if user_busy.get(ctx.author.id): return
-    user_busy[ctx.author.id] = True
-    try:
-        watchlist = await load_watchlist()
-        symbols = watchlist['stocks'] + watchlist['crypto']
-        tfs = ['5min','15min','30min','1h','4h','daily','weekly']
-        await ctx.send(f"Scanning {len(symbols)} symbols across all timeframes...")
-        for sym in symbols:
-            if await check_cancel(ctx): break
-            found = False
-            for tf in tfs:
-                df = await fetch_ohlcv(sym, tf)
-                if df is not None and not df.empty:
-                    df = calculate_indicators(df)
-                    sig = get_signals(df)
-                    if sig and sig['net_score'] != 0:
-                        if not found:
-                            await ctx.send(f"**{sym}**")
-                            found = True
-                        embed = format_embed(sym, sig, tf)
-                        await ctx.send(embed=embed)
-                await asyncio.sleep(0.3)
-        await ctx.send("Scan complete.")
-    finally:
-        user_busy[ctx.author.id] = False
-
-@bot.command(name='scan')
-async def scan(ctx, target='all', timeframe='daily'):
-    if user_busy.get(ctx.author.id): return
-    user_busy[ctx.author.id] = True
-    try:
-        now = datetime.now()
-        if last_command_time.get(ctx.author.id) and (now - last_command_time[ctx.author.id]) < timedelta(seconds=5):
-            return
-        last_command_time[ctx.author.id] = now
-        if timeframe not in ['5min','15min','30min','1h','4h','daily','weekly']:
-            await ctx.send("Invalid timeframe.")
-            return
-        watchlist = await load_watchlist()
-        symbols = watchlist['stocks'] + watchlist['crypto']
-        if target.lower() != 'all':
-            symbol = normalize_symbol(target)
-            df = await fetch_ohlcv(symbol, timeframe)
-            if df is None or df.empty:
-                await ctx.send("No data.")
-                return
-            df = calculate_indicators(df)
-            signals = get_signals(df)
-            embed = format_embed(symbol, signals, timeframe)
-            chart = generate_chart_image(df, symbol, timeframe)
-            if chart:
-                file = discord.File(chart, filename='chart.png')
-                embed.set_image(url='attachment://chart.png')
-                await ctx.send(embed=embed, file=file)
-            else:
-                await ctx.send(embed=embed)
-            return
-        await ctx.send(f"Scanning {len(symbols)} symbols on {timeframe}...")
-        for sym in symbols:
-            if await check_cancel(ctx): break
-            df = await fetch_ohlcv(sym, timeframe)
-            if df is not None and not df.empty:
-                df = calculate_indicators(df)
-                signals = get_signals(df)
-                embed = format_embed(sym, signals, timeframe)
-                chart = generate_chart_image(df, sym, timeframe)
-                if chart:
-                    file = discord.File(chart, filename='chart.png')
-                    embed.set_image(url='attachment://chart.png')
-                    await ctx.send(embed=embed, file=file)
-                else:
-                    await ctx.send(embed=embed)
-            await asyncio.sleep(1)
-        await ctx.send("Scan complete.")
-    finally:
-        user_busy[ctx.author.id] = False
-
 async def fetch_earnings_upcoming(symbol, days=7):
     try:
         stock = yf.Ticker(symbol)
@@ -1300,45 +1101,30 @@ async def calculate_quick_score(df, symbol, timeframe):
     struct = analyze_structure(df)
     score = 0
     details = []
-    # Structure
     if struct['last_event'] == 'CHoCH' and struct['last_event_direction'] == 'up':
-        score += 25
-        details.append(f"CHoCH UP +25")
+        score += 25; details.append(f"CHoCH UP +25")
     elif struct['last_event'] == 'BOS' and struct['last_event_direction'] == 'up':
-        score += 20
-        details.append(f"BOS UP +20")
+        score += 20; details.append(f"BOS UP +20")
     elif struct['last_event'] == 'CHoCH' and struct['last_event_direction'] == 'down':
-        score -= 25
-        details.append(f"CHoCH DOWN -25")
+        score -= 25; details.append(f"CHoCH DOWN -25")
     elif struct['last_event'] == 'BOS' and struct['last_event_direction'] == 'down':
-        score -= 20
-        details.append(f"BOS DOWN -20")
+        score -= 20; details.append(f"BOS DOWN -20")
     else:
         details.append("No structure signal")
-    # ADX
     if adx > 25:
-        score += 15
-        details.append(f"ADX {adx:.1f} +15")
+        score += 15; details.append(f"ADX {adx:.1f} +15")
     elif adx > 20:
-        score += 8
-        details.append(f"ADX {adx:.1f} +8")
+        score += 8; details.append(f"ADX {adx:.1f} +8")
     elif adx > 15:
-        score += 3
-        details.append(f"ADX {adx:.1f} +3")
+        score += 3; details.append(f"ADX {adx:.1f} +3")
     else:
-        score -= 5
-        details.append(f"ADX {adx:.1f} -5")
-    # RSI
+        score -= 5; details.append(f"ADX {adx:.1f} -5")
     if 30 <= rsi <= 70:
-        score += 10
-        details.append(f"RSI {rsi:.1f} +10")
+        score += 10; details.append(f"RSI {rsi:.1f} +10")
     elif rsi < 30:
-        score += 8
-        details.append(f"RSI oversold +8")
+        score += 8; details.append(f"RSI oversold +8")
     else:
-        score -= 8
-        details.append(f"RSI overbought -8")
-    # EMA
+        score -= 8; details.append(f"RSI overbought -8")
     ema_pts = 0
     if above13: ema_pts += 3
     if above50: ema_pts += 3
@@ -1346,27 +1132,20 @@ async def calculate_quick_score(df, symbol, timeframe):
     if ema13 > ema50 > ema200: ema_pts += 5
     score += ema_pts
     details.append(f"EMA position +{ema_pts}")
-    # Volume (no penalty for intraday)
     if timeframe in ['daily','weekly']:
         if vol_ratio > 1.5:
-            score += 10
-            details.append(f"High volume {vol_ratio:.1f}x +10")
+            score += 10; details.append(f"High volume {vol_ratio:.1f}x +10")
         elif vol_ratio > 1.2:
-            score += 6
-            details.append(f"Above avg volume {vol_ratio:.1f}x +6")
+            score += 6; details.append(f"Above avg volume +6")
         elif vol_ratio > 0.8:
-            score += 3
-            details.append(f"Normal volume +3")
+            score += 3; details.append(f"Normal volume +3")
         elif vol_ratio > 0.5:
-            score -= 5
-            details.append(f"Low volume -5")
+            score -= 5; details.append(f"Low volume -5")
         else:
-            score -= 10
-            details.append(f"Very low volume -10")
+            score -= 10; details.append(f"Very low volume -10")
     else:
         if vol_ratio > 1.5:
-            score += 5
-            details.append(f"Intraday high vol {vol_ratio:.1f}x +5")
+            score += 5; details.append(f"Intraday high vol +5")
         else:
             details.append(f"Intraday vol {vol_ratio:.1f}x (no penalty)")
     score = max(0, min(100, score))
@@ -1462,6 +1241,10 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
             await ctx.send("No data.")
             return
         df = calculate_indicators(df)
+        # Ensure we have enough data for EMAs
+        if len(df) < 50:
+            await ctx.send(f"⚠️ Not enough data for {symbol} on {timeframe} (need at least 50 candles). Try a higher timeframe or check symbol.")
+            return
         price_bot = df['close'].iloc[-1]
         struct = analyze_structure(df)
         rsi = df['rsi'].iloc[-1]
@@ -1469,7 +1252,9 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         avg_vol = df['volume'].tail(20).mean()
         curr_vol = df['volume'].iloc[-1]
         vol_ratio = curr_vol / avg_vol if avg_vol > 0 else 1
-        ema13, ema50, ema200 = df['ema13'].iloc[-1], df['ema50'].iloc[-1], df['ema200'].iloc[-1]
+        ema13 = df['ema13'].iloc[-1]
+        ema50 = df['ema50'].iloc[-1]
+        ema200 = df['ema200'].iloc[-1]
         above13 = price_bot > ema13
         above50 = price_bot > ema50
         above200 = price_bot > ema200
@@ -1480,7 +1265,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         live_match = "✅ Aligned" if live_price and live_diff<0.5 else f"⚠️ Moved {live_diff:.2f}%" if live_price else "❌ No live data"
         # Demand zones
         df_30 = await fetch_ohlcv(symbol, '30min')
-        zones = find_demand_zones(df_30) if df_30 else []
+        zones = find_demand_zones(df_30) if df_30 is not None else []
         near_zone = any(abs((price_bot - z['level'])/price_bot) < 0.02 for z in zones)
         # Options flow
         unusual = False
@@ -1504,7 +1289,7 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         # SPY trend
         spy_df = await fetch_ohlcv('SPY', 'daily')
         spy_trend = "bullish" if spy_df is not None and spy_df['close'].iloc[-1] > spy_df['ema50'].iloc[-1] else "bearish"
-        # Score
+        # Score calculation
         score = 0
         reasons_bull = []
         reasons_bear = []
@@ -1560,7 +1345,6 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
         else:
             score -= 5; reasons_bear.append("SPY downtrend -5")
         score = max(0, min(100, score))
-        # Confidence
         confidence = score
         if live_price and live_diff < 0.5:
             confidence = min(100, score + 5)
@@ -1588,14 +1372,15 @@ async def trade_confirmation(ctx, ticker: str, timeframe: str = 'daily'):
             sl = tp = None
         embed = discord.Embed(title=f"Confirmation: {symbol} ({timeframe})", description=f"Price: ${price_bot:.2f} | Live: {live_str} {live_match}\nScore: {score}/100 | Confidence: {confidence}%\n{rec}", color=rec_color)
         if reasons_bull:
-            embed.add_field(name="Bullish", value="\n".join(reasons_bull[:6]), inline=False)
+            embed.add_field(name="Bullish Signals", value="\n".join(reasons_bull[:6]), inline=False)
         if reasons_bear:
-            embed.add_field(name="Bearish", value="\n".join(reasons_bear[:4]), inline=False)
+            embed.add_field(name="Bearish Signals / Warnings", value="\n".join(reasons_bear[:4]), inline=False)
         if sl and tp:
-            embed.add_field(name="Parameters", value=f"Action: {action}\nStop: ${sl:.2f} | Target: ${tp:.2f}\nR/R: {abs((tp-price_bot)/(sl-price_bot)):.2f}", inline=False)
+            embed.add_field(name="Suggested Trade Parameters", value=f"Action: {action}\nStop Loss: ${sl:.2f} ({((sl-price_bot)/price_bot*100):+.1f}%)\nTake Profit: ${tp:.2f} ({((tp-price_bot)/price_bot*100):+.1f}%)\nRisk/Reward: {abs((tp-price_bot)/(sl-price_bot)):.2f}", inline=False)
         else:
-            embed.add_field(name="Action", value=action, inline=False)
-        embed.add_field(name="Summary", value=f"Trend: {struct['trend']} | Last: {struct['last_event']} {struct['last_event_direction']}\nADX: {adx:.1f} | RSI: {rsi:.1f}\nVolume: {vol_ratio:.1f}x | EMAs: {'Bullish' if above13 and above50 else 'Mixed'}", inline=False)
+            embed.add_field(name="Suggested Action", value=action, inline=False)
+        embed.add_field(name="Signal Summary", value=f"Structure: {struct['last_event'] or 'None'} {struct['last_event_direction'] or ''}\nADX: {adx:.1f} | RSI: {rsi:.1f}\nVolume: {vol_ratio:.1f}x avg\nEMAs: {'Bullish' if above13 and above50 else 'Mixed/Bearish'}\nMarket: SPY {spy_trend.upper()}", inline=False)
+        embed.set_footer(text="Use !structure, !strength, !zone for deeper analysis | Not financial advice")
         await ctx.send(embed=embed)
     except Exception as e:
         await ctx.send(f"Error: {str(e)}")
@@ -1621,6 +1406,9 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
             await ctx.send("No data.")
             return
         df = calculate_indicators(df)
+        if len(df) < 50:
+            await ctx.send(f"⚠️ Not enough data for {symbol} on {timeframe}.")
+            return
         price_bot = df['close'].iloc[-1]
         struct = analyze_structure(df)
         rsi = df['rsi'].iloc[-1]
@@ -1634,21 +1422,18 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
         above50 = price_bot > ema50
         above200 = price_bot > ema200
         ema_align = "Bullish" if above13 and above50 and above200 else "Bearish" if (not above13) and (not above50) and (not above200) else "Mixed"
-        # Live price
         live_price = await get_stock_price(symbol)
         if live_price:
             diff = abs(live_price - price_bot)/price_bot*100
             live_text = f"${live_price:.2f} ({'aligned' if diff<0.5 else f'Δ {diff:.1f}%'})"
         else:
             live_text = "unavailable"
-        # Score & confidence
         score, details = await calculate_quick_score(df, symbol, timeframe)
         confidence = score
         if live_price and diff < 0.5:
             confidence = min(100, score + 5)
         elif live_price and diff > 1:
             confidence = max(0, score - 10)
-        # Options summary
         flow_text = ""
         try:
             price_flow = await get_stock_price(symbol)
@@ -1669,10 +1454,8 @@ async def analyze_symbol(ctx, ticker: str, timeframe: str = 'daily'):
                         flow_text += f"${opt['strike']:.2f} {opt['type']} (vol {opt['vol_oi_ratio']:.1f}x)\n"
         except:
             pass
-        # Earnings
         earnings = await fetch_earnings_upcoming(symbol, 7)
         earn_text = earnings[0]['date'] if earnings else "None in 7 days"
-        # Recommendation
         if score >= 65 and struct['last_event_direction'] == 'up':
             rec, rec_color = "🟢 CALL", 0x00ff00
         elif score >= 50 and struct['last_event_direction'] == 'up':
